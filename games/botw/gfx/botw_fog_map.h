@@ -33,7 +33,7 @@ static NSHashTable *g_fog_tiles;   /* live tiles (weak) */
 static uint64_t g_fog_n_open[4], g_fog_n_key[4], g_fog_n_up[4], g_fog_n_built[4];
 static pthread_mutex_t g_fog_gmu = PTHREAD_MUTEX_INITIALIZER;   /* grid, slot */
 static uint8_t g_fog_grid[FOG_GW * FOG_GH];
-static uint64_t g_fog_ggen;   /* grid generation */
+static uint64_t g_fog_ggen, g_fog_epoch;   /* grid generation; slot loads */
 static int g_fog_slot = -1, g_fog_have_prev;
 static float g_fog_prev[2];
 
@@ -65,13 +65,14 @@ static int fog_on(void) {
 }
 static int fog_level_of(uint32_t w) { for (int l = 0; l < 4; l++) if (fog_level_size[l] == w) return l; return -1; }
 
+static void fog_kick_locked(BotwFogTile *tl, int now);
 /* Build queue: darken a copy of the tile's blocks from a grid snapshot into a new texture; the next pick takes it. */
 static void fog_build(BotwFogTile *tl) {
     dispatch_async(g_fog_bq, ^{
         double t0 = fog_now();
         uint8_t *g = malloc(sizeof g_fog_grid); size_t nb = (size_t)((tl->w + 3) / 4) * ((tl->h + 3) / 4) * 8; uint8_t *b = malloc(nb);
         if (!g || !b) { free(g); free(b); os_unfair_lock_lock(&g_fog_lk); tl->busy = 0; os_unfair_lock_unlock(&g_fog_lk); return; }
-        pthread_mutex_lock(&g_fog_gmu); memcpy(g, g_fog_grid, sizeof g_fog_grid); uint64_t gen = g_fog_ggen; pthread_mutex_unlock(&g_fog_gmu);
+        pthread_mutex_lock(&g_fog_gmu); memcpy(g, g_fog_grid, sizeof g_fog_grid); uint64_t gen = g_fog_ggen, epoch = g_fog_epoch; pthread_mutex_unlock(&g_fog_gmu);
         memcpy(b, tl->blocks, nb);
         int col = (tl->cell >> 8 & 0xff) - 2, row = tl->cell & 0xff;
         fog_bc1_tile(b, tl->w, tl->h, -5000.0f + 1000 * col, -5000.0f + 1000 * row, g, g_fog_dark);
@@ -81,10 +82,12 @@ static void fog_build(BotwFogTile *tl) {
         id<MTLTexture> t = [g_dev newTextureWithDescriptor:d];
         if (t) [t replaceRegion:MTLRegionMake2D(0, 0, tl->w, tl->h) mipmapLevel:0 withBytes:b bytesPerRow:(NSUInteger)((tl->w + 3) / 4) * 8];
         free(b);
+        pthread_mutex_lock(&g_fog_gmu); int stale = epoch != g_fog_epoch; pthread_mutex_unlock(&g_fog_gmu);   // a slot loaded meanwhile
         os_unfair_lock_lock(&g_fog_lk);
-        int live = !tl->dead && t; uint64_t n = 0;
+        int live = !tl->dead && t && !stale; uint64_t n = 0;
         if (live) { tl->next = t; tl->gen = gen; if (!tl->t_built) n = ++g_fog_n_built[tl->level]; tl->t_built = fog_now(); }
         tl->busy = 0;
+        if (stale && !tl->dead) fog_kick_locked(tl, 1);
         os_unfair_lock_unlock(&g_fog_lk);
         if (!live) return;
         ser_bump(tl->ser);   // the slots of this serial validate again and pick the new texture
@@ -214,10 +217,11 @@ void botw_fog_save_opened(const char *path, int write) {
     int slot = s[0] - '0';
     pthread_mutex_lock(&g_fog_gmu);
     if (write) { fog_grid_save(slot); g_fog_slot = slot; pthread_mutex_unlock(&g_fog_gmu); return; }
+    if (slot == g_fog_slot) { pthread_mutex_unlock(&g_fog_gmu); return; }   // the live slot read again (a check after a save): the live grid is newer
     memset(g_fog_grid, 0, sizeof g_fog_grid);
     int had = fog_grid_load(slot);
     if (!had) fog_import_track(slot >= 6);
-    g_fog_slot = slot; g_fog_have_prev = 0; g_fog_ggen++;
+    g_fog_slot = slot; g_fog_have_prev = 0; g_fog_ggen++; g_fog_epoch++;
     pthread_mutex_unlock(&g_fog_gmu);
     MLOG("[fog] slot %d loaded (%s): %s", slot, slot >= 6 ? "Master Mode" : "normal", had ? "its fog grid" : "new grid from Hero's Path");
     fog_mark_all_dirty();
@@ -233,6 +237,7 @@ static void *fog_loop(void *arg) {
     pthread_setname_np("botw.fog.pos");
     for (uint64_t tick = 0;; tick++) {
         sleep(1);
+        pthread_mutex_lock(&g_fog_gmu); uint64_t epoch = g_fog_epoch; pthread_mutex_unlock(&g_fog_gmu);
         uintptr_t pi = 0, ts = 0; float pos[3] = {0}; char type[16] = {0};
         int ok = fog_read(g_fog_main + FOG_PINFO, &pi, 8) && pi && fog_read(pi + FOG_PINFO_POS, pos, sizeof pos);
         int field = fog_read(g_fog_main + FOG_MAPTYPE + 8, &ts, 8) && ts && fog_read(ts, type, sizeof type - 1) && !strcmp(type, "MainField");
@@ -240,7 +245,8 @@ static void *fog_loop(void *arg) {
         fog_box box = {1, 0, 0, 0}; int slot;
         pthread_mutex_lock(&g_fog_gmu);
         slot = g_fog_slot;
-        if (slot >= 0 && field && valid) {
+        if (epoch != g_fog_epoch) ;   // a slot loaded while this sample was read: it belongs to the old one
+        else if (slot >= 0 && field && valid) {
             int ch = g_fog_have_prev ? fog_paint_line(g_fog_grid, g_fog_prev[0], g_fog_prev[1], pos[0], pos[2], g_fog_radius, FOG_EDGE, FOG_GAP, &box)
                                      : fog_paint_disc(g_fog_grid, pos[0], pos[2], g_fog_radius, FOG_EDGE, &box);
             if (ch) g_fog_ggen++;
@@ -256,7 +262,7 @@ static void *fog_loop(void *arg) {
             if (box.x0 <= box.x1 && tl->cell > 0) {
                 int col = (tl->cell >> 8 & 0xff) - 2, row = tl->cell & 0xff;
                 float tx0 = -5000.0f + 1000 * col, tz0 = -5000.0f + 1000 * row;
-                float bx0 = FOG_X0 + box.x0 * (float)FOG_CELL, bx1 = FOG_X0 + (box.x1 + 1) * (float)FOG_CELL, bz0 = FOG_Z0 + box.z0 * (float)FOG_CELL, bz1 = FOG_Z0 + (box.z1 + 1) * (float)FOG_CELL;
+                float bx0 = FOG_X0 + (box.x0 - 1) * (float)FOG_CELL, bx1 = FOG_X0 + (box.x1 + 2) * (float)FOG_CELL, bz0 = FOG_Z0 + (box.z0 - 1) * (float)FOG_CELL, bz1 = FOG_Z0 + (box.z1 + 2) * (float)FOG_CELL;   // + the bilinear reach
                 if (bx1 > tx0 && bx0 < tx0 + 1000 && bz1 > tz0 && bz0 < tz0 + 1000) tl->dirty = 1;
             }
             fog_kick_locked(tl, 0);
