@@ -88,6 +88,7 @@ static void fog_build(BotwFogTile *tl) {
         os_unfair_lock_unlock(&g_fog_lk);
         if (!live) return;
         ser_bump(tl->ser);   // the slots of this serial validate again and pick the new texture
+        if (!n && g_fog_log) MLOG("[fog] tile %ux%u cell %c-%d rebuilt in %.1f ms (grid generation %llu)", tl->w, tl->h, "ZABCDEFGHIJK"[col + 1], row, (fog_now() - t0) * 1e3, (unsigned long long)gen);
         if (n && (n <= 3 || g_fog_log)) MLOG("[fog] tile %ux%u cell %c-%d built in %.1f ms (%llu at this size)", tl->w, tl->h, "ZABCDEFGHIJK"[col + 1], row, (fog_now() - t0) * 1e3, (unsigned long long)n);
     });
 }
