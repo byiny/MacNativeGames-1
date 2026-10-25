@@ -583,9 +583,21 @@ static uint64_t gpu_budget_bytes(void) {
 }
 static void defer_drain(void);
 static void stor_diag_report(void);
+/* Long-run diagnostics (local patch, owner 2026-10-25: an abort here after ~6 h, and textures that flicker late in a long
+   run). The wall clock of each memory readout and budget warning, so a moment the player saw can be matched to the log. */
+static const char *wall_clock(char out[16]) { time_t t = time(NULL); struct tm tm; localtime_r(&t, &tm); strftime(out, 16, "%H:%M:%S", &tm); return out; }
 static void gpu_budget_check(const char *where) {
     uint64_t budget = gpu_budget_bytes(); if (!budget) return;
-    uint64_t cur = (uint64_t)g_dev.currentAllocatedSize; if (cur <= budget) return;
+    uint64_t cur = (uint64_t)g_dev.currentAllocatedSize;
+    /* one warning (with the top residency sites) as GPU memory first passes 80% and 90% of the budget; armed again below 70% */
+    static _Atomic int warned;
+    int level = cur > budget / 10 * 9 ? 2 : cur > budget / 10 * 8 ? 1 : 0, was = atomic_load(&warned);
+    if (level > was && atomic_compare_exchange_strong(&warned, &was, level)) {
+        char w[16];
+        MLOG("【红】[budget] %s %s：显卡已分配 %llu MB，已到预算 %llu MB 的 %d%%（下面是驻留集明细）", wall_clock(w), where, (unsigned long long)(cur >> 20), (unsigned long long)(budget >> 20), level == 2 ? 90 : 80);
+        res_site_report(12);
+    } else if (!level && was && cur < budget / 10 * 7) atomic_store(&warned, 0);
+    if (cur <= budget) return;
     /* Over the line, part of it can be objects already retired and the staging of submissions still on the GPU, both freed
        when those submissions complete (#616: stopped 51 s after the start while the world loaded; #614: on a dive). Let the
        running work complete and release what it held (at most 2 s; it stops early once nothing more completes), then look
@@ -5751,7 +5763,10 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long rss_mb) {
     if (dead_stat_on() && frame % 1800 == 0) dead_stat_print(frame);
     static unsigned long long last_rss, last_gpu, last_frame; static int lines; unsigned long long gpu = (unsigned long long)(g_dev.currentAllocatedSize >> 20);
     unsigned long long dr = rss_mb > last_rss ? rss_mb - last_rss : last_rss - rss_mb, dg = gpu > last_gpu ? gpu - last_gpu : last_gpu - gpu;
-    if (lines >= 400 || (lines && dr < 64 && dg < 64 && frame - last_frame < 3000)) return; lines++; last_rss = rss_mb; last_gpu = gpu; last_frame = frame;
+    /* local long-run diagnostics: also one line a minute (a 6 h session is about 400 lines), cap 1500 */
+    static time_t last_t; time_t now = time(NULL);
+    if (lines >= 1500 || (lines && dr < 64 && dg < 64 && frame - last_frame < 3000 && now - last_t < 60)) return; lines++; last_rss = rss_mb; last_gpu = gpu; last_frame = frame; last_t = now;
+    { char w[16]; MLOG("[clock] %s", wall_clock(w)); }
     pthread_mutex_lock(&g_deferred_mu); unsigned long nd = (unsigned long)g_deferred.count; pthread_mutex_unlock(&g_deferred_mu);
     pthread_mutex_lock(&g_res_mu); unsigned long nr = (unsigned long)g_res_objects.count; pthread_mutex_unlock(&g_res_mu);
     int live = 0, peak = 0, cap = 0; nvn_dirty_stat(&live, &peak, &cap);
