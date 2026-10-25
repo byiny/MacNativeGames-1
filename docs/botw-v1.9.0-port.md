@@ -576,6 +576,26 @@ stopped voice's last samples (Ryujinx.Audio `CommandGenerator.GenerateVoice`: `V
 - Not tested: a listening test by the owner (pause menu, map, shrine, fast travel) and splitter voices (BOTW opens none).
 - A run that ends in Game Over has no world sound (digital zero): the first runs of this check, started from the legs
   save on a build without the legs cure, were silent for that reason.
+## Game state map: player position, map type, Hero's Path (2026-10-25)
+
+Found for the fog-of-war map (local build, `games/botw/gfx/botw_fog_map.h`). Offsets are `main` module offsets of
+1.9.0; the names come from the zeldaret/botw decompilation (1.5.0), matched by strings and code shape.
+
+| What | 1.9.0 | How it was found | Checked |
+|---|---|---|---|
+| `PlayerInfo::getPlayerPos` | 0xcc7598, returns `this+0x88` | the only code that passes the string "getPlayerPos" to its debug log | static |
+| `PlayerInfo::sInstance` | 0x1e13ed0 (through the GOT slot 0x1d66a78) | the callers of 0xcc7598 load `x0` from it | in game |
+| Player position | `float[3]` x, y, z at `[main+0x1e13ed0]+0x88` | as above | in game: equals the save's `PlayerSavePos` at load (2 saves, within 0.7 m) |
+| `StageInfo::sCurrentMapType` | 0x1dae3a0 (`FixedSafeString<32>`, `char *` at +8); `sCurrentMapName` 0x1dae3d8 | `setCurrentMap` 0x1208310, getters 0x12082f8 / 0x1208304 | in game: "MainField" in the field |
+| `StageInfo::setCurrentMapNameForFieldPos` | 0x1208344 | string "%c-%c", constants 5000 / 4000 / 1000 | static |
+
+- Map grid: column `(x + 5000) / 1000` from 'A', row `(z + 4000) / 1000` from '1'. The tiles
+  `UI/MapTex/MainField/MapTex*_<col>-<row>` add a margin: column `Z` west of A, `K` east of J, rows 0 and 9.
+- Hero's Path is `save/<user>/tracker/trackblock00.sav` (normal) and `trackblock_hard00.sav` (Master Mode), 64 KB.
+  From 0x50 one 32-bit word per point: bit 31 main field, bits 0-11 |z| with sign bit 12, bits 13-25 |x| with sign
+  bit 26, metres. Header and shrine words have bit 31 clear; chunks of 304 words start with 4 header words. The last
+  point of the owner's file equals the newest save's position. Only Great Plateau data was checked.
+- Save slots 6 and 7 are Master Mode (slot 7's save time equals `trackblock_hard00.sav`'s); 0-5 are normal.
 
 ## LOD, render distance and depth of field (1.9.0)
 

@@ -350,8 +350,24 @@ static unsigned cache_size_index(uint64_t *out,int index) {(void)index;return ca
 /* TOTK_FS_LOG=1: log every RomFS open with the time since start (shows how far the game gets without a picture). */
 static void fs_log(const char *what,const char *path){static int on=-1;static uint64_t t0;if(on<0){on=getenv("TOTK_FS_LOG")!=NULL;t0=runtime_now_ns();}if(on)fprintf(stderr,"[totk-fs] %8.3f %s %s\n",(runtime_now_ns()-t0)/1e9,what,path);}
 void runtime_fs_log(const char *what,const char *path){fs_log(what,path);}
+#ifdef GAME_BOTW190
+void botw_fog_rom_opened(const char *path);   /* botw_fog_map.h: the map tiles the game loads */
+/* botw_fog_map.h: a whole RomFS file in a malloc'd buffer, outside the game's handles and its write tracking */
+void *runtime_romfs_slurp(const char *path,size_t *n) {
+ const char *p=rom_path(path);if(!p)return NULL;uint64_t i=file_index(p);if(i==UINT64_MAX)return NULL;
+ uint32_t ov=overlay_slot(i);int fd=image_fd;uint64_t base=0,size=0;
+ if(ov){fd=open(overlays[ov-1].path,O_RDONLY|O_CLOEXEC);if(fd<0)return NULL;size=overlays[ov-1].size;}
+ else if(i<file_count){Entry e=entry(i);base=e.offset;size=e.size;}else return NULL;
+ uint8_t *b=malloc(size?size:1);uint64_t done=0;
+ while(b&&done<size){ssize_t r=src_pread(fd,b+done,(size_t)(size-done),(off_t)(base+done));if(r<=0){free(b);b=NULL;break;}done+=(uint64_t)r;}
+ if(ov)close(fd);if(b)*n=(size_t)size;return b;
+}
+#endif
 unsigned runtime_romfs_open(uint64_t *out,const char *path,int mode) {
  fs_log("rom",path?path:"(null)");
+#ifdef GAME_BOTW190
+ if(path&&strstr(path,"UI/MapTex/"))botw_fog_rom_opened(path);
+#endif
  if(!out||mode!=1)return UNSUPPORTED;const char *p=rom_path(path);if(!p)return NOT_FOUND;uint64_t i=file_index(p);if(i==UINT64_MAX)return NOT_FOUND;
  uint32_t ov=overlay_slot(i);int fd=-1;
  if(ov){const Overlay *o=&overlays[ov-1];fd=open(o->path,O_RDONLY|O_CLOEXEC);struct stat st;

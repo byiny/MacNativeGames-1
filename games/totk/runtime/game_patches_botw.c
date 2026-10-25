@@ -1371,6 +1371,9 @@ void runtime_game_patches(Module *m) {
     fprintf(stderr, "[botw] %s game-code patches\n", TOTK_GAME_VERSION);
     botw_stereo_install(m);
     runtime_survey_init(m);   /* TOTK_SURVEY=1: survey pos / move (world_survey.c) */
+#ifdef GAME_BOTW190
+    { void botw_fog_init(uintptr_t main_base, uint64_t main_size); if (!strcmp(m->name, "main")) botw_fog_init((uintptr_t)m->base, m->size); }   /* fog-of-war map (gfx/botw_fog_map.h) */
+#endif
     patch_pchtxt(m);   /* first: on a Mac the patches below check the original words they replace (the phone's code is patched at build, CODE_PATCHED_AT_BUILD) */
     if (!patch_output_res(m)) patch_render_1080(m);
     patch_phone_render(m);

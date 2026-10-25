@@ -463,6 +463,8 @@ GFX_OBJECTS_BOTW190 := $(addprefix build/gfx-botw190/,$(addsuffix .o,$(GFX_SRC))
 build/gfx-botw190/%.o: % $(GFX_HEADERS) Makefile
 	@mkdir -p "$(dir $@)"
 	xcrun clang $(NATIVE_OPT) -g -Wall -Wextra $(GFX_FLAGS) -DGAME_BOTW=1 -DGAME_BOTW190=1 -c "$<" -o "$@"
+# the fog map (local patch 0004) is a header of nvn_mtl.m
+build/gfx-botw/third_party/d2r_gfx/gfx/nvn/nvn_mtl.m.o build/gfx-botw190/third_party/d2r_gfx/gfx/nvn/nvn_mtl.m.o: ../botw/gfx/botw_fog_map.h ../botw/gfx/botw_fog_core.h
 .PHONY: runtime-botw190 binary-botw190
 # 1.9.0: the add-on content volumes the build imported from the --dlc NSPs (extracted/botw190/aoc/<index>).
 build/game-data/botw190/aoc-config.txt: scripts/prepare_romfs_backend.py $(wildcard extracted/botw190/aoc/*/index.json)

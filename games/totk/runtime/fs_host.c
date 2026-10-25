@@ -239,6 +239,12 @@ static unsigned commit(const char *name) {
     return 0;
 }
 
+#ifdef GAME_BOTW190
+void botw_fog_save_opened(const char *path, int write);
+/* botw_fog_map.h: where the fog grids and the game's Hero's Path files are */
+const char *runtime_fs_profile_dir(void) { return profile; }
+const char *runtime_fs_save_root(void) { return save_root; }
+#endif
 /* ---------- files ---------- */
 static File *file_of(uint64_t h, int *fd, int *mode) {
     if (h < FILE_BASE || h >= FILE_BASE + NFILES) return NULL;
@@ -256,6 +262,9 @@ static unsigned open_file(uint64_t *out, const char *path, int mode) {
     int fd = open(p, (mode & OPEN_WRITE ? (mode & OPEN_READ ? O_RDWR : O_WRONLY) : O_RDONLY) | O_NOFOLLOW);
     if (fd < 0) return errno_result();
     runtime_autoload_save_file_opened(path);   /* TOTK_AUTOLOAD: a slot's caption.sav starts the presses, its progress.sav ends them */
+#ifdef GAME_BOTW190
+    botw_fog_save_opened(path, mode & OPEN_WRITE);   /* botw_fog_map.h: a slot's fog grid follows its game_data.sav */
+#endif
     pthread_mutex_lock(&lock);
     for (int i = 0; i < NFILES; i++) if (files[i].fd <= 0) {
         files[i] = (File){fd, mode, save_writer}; *out = FILE_BASE + (uint64_t)i; pthread_mutex_unlock(&lock);

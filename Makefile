@@ -25,6 +25,7 @@ C_TESTS = \
 	game_language \
 	audio_ramp \
 	bow_state \
+	botw_fog \
 	screenshot \
 	screenshot_botw \
 	agent_slot_limit \

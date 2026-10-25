@@ -406,6 +406,13 @@ void ui_pack_harvest(const char *fs_key, const tex_t *t);
 #define UI_PACK_OWNED(pk)
 #define UI_PACK_FREE()
 #endif
+/* Fog-of-war map (local patch 0004, games/botw/gfx/botw_fog_map.h, included at the end of nvn_mtl.m): its own hooks, next to the
+   UI_PACK_* ones (BOTW 1.9.0 only). */
+#if defined(GAME_BOTW190)
+#define FOG_PKG_FIELDS id fog;   /* the map tile object of this texture (BotwFogTile) */
+#else
+#define FOG_PKG_FIELDS
+#endif
 /* Key 5 (MetalFX temporal anti-aliasing, totk_taa.m): the compose draw that samples the linear HDR scene at fragment
    texture slot 0 before tone mapping. TOTK: 0ac9a549 (tone mapping and bloom). Breath of the Wild 1.9.0: f7ee6fe1 (two
    texel reads: the 1600x900 R11G11B10F scene at slot 0, the 320x180 bloom at slot 1; it writes the 1600x900 RGB10A2
