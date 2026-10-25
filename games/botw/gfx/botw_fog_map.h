@@ -82,13 +82,14 @@ static void fog_build(BotwFogTile *tl) {
         id<MTLTexture> t = [g_dev newTextureWithDescriptor:d];
         if (t) [t replaceRegion:MTLRegionMake2D(0, 0, tl->w, tl->h) mipmapLevel:0 withBytes:b bytesPerRow:(NSUInteger)((tl->w + 3) / 4) * 8];
         free(b);
-        pthread_mutex_lock(&g_fog_gmu); int stale = epoch != g_fog_epoch; pthread_mutex_unlock(&g_fog_gmu);   // a slot loaded meanwhile
+        pthread_mutex_lock(&g_fog_gmu); int stale = epoch != g_fog_epoch;   // a slot loaded meanwhile; held until published (lock order: grid, then tiles)
         os_unfair_lock_lock(&g_fog_lk);
         int live = !tl->dead && t && !stale; uint64_t n = 0;
         if (live) { tl->next = t; tl->gen = gen; if (!tl->t_built) n = ++g_fog_n_built[tl->level]; tl->t_built = fog_now(); }
         tl->busy = 0;
         if (stale && !tl->dead) fog_kick_locked(tl, 1);
         os_unfair_lock_unlock(&g_fog_lk);
+        pthread_mutex_unlock(&g_fog_gmu);
         if (!live) return;
         ser_bump(tl->ser);   // the slots of this serial validate again and pick the new texture
         if (!n && g_fog_log) MLOG("[fog] tile %ux%u cell %c-%d rebuilt in %.1f ms (grid generation %llu)", tl->w, tl->h, "ZABCDEFGHIJK"[col + 1], row, (fog_now() - t0) * 1e3, (unsigned long long)gen);
@@ -217,7 +218,7 @@ void botw_fog_save_opened(const char *path, int write) {
     int slot = s[0] - '0';
     pthread_mutex_lock(&g_fog_gmu);
     if (write) { fog_grid_save(slot); g_fog_slot = slot; pthread_mutex_unlock(&g_fog_gmu); return; }
-    if (slot == g_fog_slot) { pthread_mutex_unlock(&g_fog_gmu); return; }   // the live slot read again (a check after a save): the live grid is newer
+    if (slot == g_fog_slot) { g_fog_have_prev = 0; pthread_mutex_unlock(&g_fog_gmu); return; }   // the live slot read again (a check after a save, a retry): the live grid is newer; no line to the respawn
     memset(g_fog_grid, 0, sizeof g_fog_grid);
     int had = fog_grid_load(slot);
     if (!had) fog_import_track(slot >= 6);
