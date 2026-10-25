@@ -1367,6 +1367,22 @@ void runtime_dof_set(int on) {
     fprintf(stderr, "[botw] depth of field %s\n", on ? "on" : "off");
 }
 int runtime_dof_on(void) { return !g_dof_off; }
+#ifdef GAME_BOTW190
+/* TOTK_BOTW_COOK_COUNT=1..5 (default 2): dishes per cook of the cook_multiple exefs mod (local build only). The mod's loop
+   count is the word `mov w21, #N` at main+0x792668 (the pot AI at main+0x62393c calls cookItemGet N times); it is rewritten
+   only when the mod put a mov w21, #1..5 there, so a build without the mod keeps the game's one dish. */
+static void patch_cook_count(Module *m) {
+    if (ios_code()) return;
+    uint32_t w; memcpy(&w, m->base + 0x792668, 4);
+    unsigned have = (w >> 5) & 0xffff;
+    if ((w & 0xffe0001fu) != 0x52800015u || have < 1 || have > 5) { fprintf(stderr, "[botw] cook count: main+0x792668 is %08x, not the cook_multiple mod's mov w21,#N: dishes per cook as shipped\n", w); return; }
+    const char *e = getenv("TOTK_BOTW_COOK_COUNT"); int n = e && *e ? atoi(e) : 2;
+    if (n < 1 || n > 5) { fprintf(stderr, "[botw] TOTK_BOTW_COOK_COUNT=%s is not 1..5: using 2\n", e); n = 2; }
+    w = 0x52800015u | ((uint32_t)n << 5);
+    memcpy(m->base + 0x792668, &w, 4);
+    fprintf(stderr, "[botw] cook count: %d dish%s per cook (TOTK_BOTW_COOK_COUNT, 1 = as shipped)\n", n, n == 1 ? "" : "es");
+}
+#endif
 void runtime_game_patches(Module *m) {
     fprintf(stderr, "[botw] %s game-code patches\n", TOTK_GAME_VERSION);
     botw_stereo_install(m);
@@ -1375,6 +1391,9 @@ void runtime_game_patches(Module *m) {
     { void botw_fog_init(uintptr_t main_base, uint64_t main_size); if (!strcmp(m->name, "main")) botw_fog_init((uintptr_t)m->base, m->size); }   /* fog-of-war map (gfx/botw_fog_map.h) */
 #endif
     patch_pchtxt(m);   /* first: on a Mac the patches below check the original words they replace (the phone's code is patched at build, CODE_PATCHED_AT_BUILD) */
+#ifdef GAME_BOTW190
+    patch_cook_count(m);   /* after the pchtxt mods, whose word it rewrites */
+#endif
     if (!patch_output_res(m)) patch_render_1080(m);
     patch_phone_render(m);
 #if defined(GAME_BOTW190) || defined(GAME_BOTW160)

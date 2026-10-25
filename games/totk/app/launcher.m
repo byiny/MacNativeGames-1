@@ -365,6 +365,25 @@ int runtime_app_launch(int argc, char **argv, char ***boot) {
         NSString *home = NSHomeDirectory();
         NSString *data = [home stringByAppendingPathComponent:@"Library/Application Support/MacNativeGames/" GAME_FOLDER];   /* game_version.h: TOTK, BotW */
         NSString *logs = [home stringByAppendingPathComponent:@"Library/Logs/MacNativeGames"];
+#ifdef GAME_BOTW
+        /* Local build only: the player's settings: <data>/settings.txt, one TOTK_NAME=value per line (# starts a comment), read at
+           each launch (e.g. TOTK_BOTW_COOK_COUNT=3). Only TOTK_ names; a line here wins over the app's Info.plist environment. */
+        { NSString *path = [data stringByAppendingPathComponent:@"settings.txt"];
+          NSString *text = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
+          NSCharacterSet *ws = NSCharacterSet.whitespaceCharacterSet;
+          NSCharacterSet *bad = [NSCharacterSet characterSetWithCharactersInString:@"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"].invertedSet;
+          __block int n = 0, badline = 0;
+          [text enumerateLinesUsingBlock:^(NSString *raw, BOOL *stop) {
+              n++;
+              NSString *line = [[raw componentsSeparatedByString:@"#"].firstObject stringByTrimmingCharactersInSet:ws];
+              if (!line.length) return;
+              NSRange eq = [line rangeOfString:@"="];
+              NSString *name = eq.location == NSNotFound ? line : [[line substringToIndex:eq.location] stringByTrimmingCharactersInSet:ws];
+              if (eq.location == NSNotFound || ![name hasPrefix:@"TOTK_"] || [name rangeOfCharacterFromSet:bad].location != NSNotFound) { badline = n; *stop = YES; return; }
+              setenv(name.UTF8String, [[line substringFromIndex:eq.location + 1] stringByTrimmingCharactersInSet:ws].UTF8String, 1);
+          }];
+          if (badline) { show_error([NSString stringWithFormat:@"%@, line %d: expected TOTK_NAME=value", path, badline]); return 1; } }
+#endif
         /* Folders the environment already names are kept (open --env TOTK_PROFILE_DIR=... runs a test on a save copy,
            TOTK_GAME_SLOT_DIR shares one game slot with another build of the game: one game at a time on the Mac). */
         NSString *(^env_or)(const char *, NSString *) = ^NSString *(const char *name, NSString *fallback) {
