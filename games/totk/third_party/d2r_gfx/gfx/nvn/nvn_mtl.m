@@ -23818,6 +23818,11 @@ void botw_tex_follow(const void *tv) {
     }
     uint64_t from = t->serial; int pinned = dm_nvn_pin_rekey(t, &live);
     if (!pinned) *t = live;
+    /* The re-keyed copy no longer names the finalised serial, so the pin sweep never reports it (it reports the live serial
+       when the copy goes): forget it here once no other copy names it, or its kept texture and residency entry stay for the
+       whole session (owner 2026-10-26: 946,000 kept serials, 18,500 resident objects and the GPU budget stop after 4.5 h). */
+    extern int dm_nvn_pin_has_serial(uint64_t serial);
+    if (pinned && !dm_nvn_pin_has_serial(from)) mtl_dead_forget(&from, 1);
     static uint64_t n; if (n++ < 8 || n % 1000 == 0)
         MLOG("[tex-follow] %s ser=%llu -> %llu at %p (%ux%u nvnfmt=%#x; %llu so far)", pinned ? "recording copy" : "texture", (unsigned long long)from,
              (unsigned long long)live.serial, (void *)t->mem, t->d.width, t->d.height, t->d.format, (unsigned long long)n);
