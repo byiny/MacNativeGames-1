@@ -907,8 +907,13 @@ void runtime_front_run(void(*callback)(void)){
      with it (a test's frames and pictures then say nothing). */
   {const char *e=getenv("TOTK_WINDOW_FLOAT");if(e&&!strcmp(e,"1")){window.level=NSFloatingWindowLevel;window.collectionBehavior|=NSWindowCollectionBehaviorCanJoinAllSpaces|NSWindowCollectionBehaviorFullScreenAuxiliary;}}   /* also over another app in full screen */
   /* An agent's test game (TOTK_SLOT_OWNER other than user) says so in its title: it plays a save copy and its script closes it. */
+#ifdef GAME_BOTW   /* BOTW: owner and purpose are enough (owner, 2026-10-24) */
+#define TEST_TITLE TOTK_UI("测试局（%s）Ver. %s：%s","Test session (%s) Ver. %s: %s")
+#else
+#define TEST_TITLE TOTK_UI("测试局（%s）Ver. %s：%s — 存档副本，进度不会存进你的存档，脚本会自己关闭","Test session (%s) Ver. %s: %s — save copy, progress is not saved to your save, the script closes it")
+#endif
   const char *owner=getenv("TOTK_SLOT_OWNER"),*purpose=getenv("TOTK_SLOT_PURPOSE");
-  window.title=owner&&*owner&&strcmp(owner,"user")?[NSString stringWithFormat:@(TOTK_UI("测试局（%s）Ver. %s：%s — 存档副本，进度不会存进你的存档，脚本会自己关闭","Test session (%s) Ver. %s: %s — save copy, progress is not saved to your save, the script closes it")),owner,TOTK_GAME_VERSION,purpose&&*purpose?purpose:TOTK_UI("代理测试","agent test")]:[NSString stringWithFormat:@GAME_NAME "  Mac — Ver. %s",TOTK_GAME_VERSION];
+  window.title=owner&&*owner&&strcmp(owner,"user")?[NSString stringWithFormat:@(TEST_TITLE),owner,TOTK_GAME_VERSION,purpose&&*purpose?purpose:TOTK_UI("代理测试","agent test")]:[NSString stringWithFormat:@GAME_NAME "  Mac — Ver. %s",TOTK_GAME_VERSION];
   windowDelegate=[TOTKWindowDelegate new];window.delegate=windowDelegate;
   front_hdr_init();
   front_install_menu();
