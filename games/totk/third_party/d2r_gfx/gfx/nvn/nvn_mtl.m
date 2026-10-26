@@ -5773,6 +5773,9 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long rss_mb) {
     MLOG("内存 至帧 %llu：常驻 %llu MB，显卡已分配 %llu MB，延迟释放队列 %lu，驻留集 %lu 个，内存池 %d 个（峰值 %d / 跟踪表容量 %d），贴图重传累计 %llu 次", frame, rss_mb, gpu, nd, nr, live, peak, cap, (unsigned long long)g_pkg_reuploads);
     stor_memory_report(frame);
     MLOG("已死序号纹理累计 %llu 张（替换前即为泄漏来源）", (unsigned long long)g_dead_put_total);
+#ifdef GAME_BOTW
+    { extern void botw_leak_log(void); @autoreleasepool { botw_leak_log(); } }
+#endif
     /* Exact-writeback snapshots are host allocations, absent from Metal's allocatedSize. Include them in the existing
        diagnostic so an iPhone run can attribute the cost of the larger terrain-normal snapshots (PR #188). */
     size_t snap_bytes = 0; unsigned snap_count = 0;
@@ -23799,6 +23802,12 @@ void botw_gpu_copy_supersedes(const void *mbv, uint64_t mo, size_t n) {
    storage to the texture living there with the same layout: the pinned copy is re-keyed in place (dm_nvn_pin_rekey),
    so every recording holding it, and the owned / write-back bookkeeping by serial, see the live texture. */
 int botw_serial_noted(uint64_t serial);
+/* long-run log (local 0007): uses of a finalised serial that were not followed, by reason (0 no live texture at its storage,
+   1 the live texture is itself, 2 the live texture is finalised too, 3 the layout differs): such a use draws the old host
+   texture of the finalised serial, or a fresh upload of its stale pool bytes (a flicker candidate); plus the last example */
+static _Atomic uint64_t g_bfollow_miss[4], g_bfollow_done, g_bfollow_forgot;
+static struct { uint64_t serial; uint32_t w, h, fmt; int why; } g_bfollow_last;
+static void bfollow_miss(const tex_t *t, int why) { atomic_fetch_add(&g_bfollow_miss[why], 1); g_bfollow_last.serial = t->serial; g_bfollow_last.w = t->d.width; g_bfollow_last.h = t->d.height; g_bfollow_last.fmt = t->d.format; g_bfollow_last.why = why; }
 void botw_tex_follow(const void *tv) {
     tex_t *t = (tex_t *)tv;
     if (!t || !t->serial || !t->mem || !serial_is_dead(t->serial)) return;
@@ -23807,6 +23816,7 @@ void botw_tex_follow(const void *tv) {
     if (!have || live.serial == t->serial || serial_is_dead(live.serial)) {
         if (watched) MLOG("[tile] f%llu ser=%llu not followed: %s", (unsigned long long)atomic_load(&g_cur_frame), (unsigned long long)t->serial,
                           !have ? "no live texture at its storage" : live.serial == t->serial ? "the live texture is itself" : "the live texture is finalised too");
+        bfollow_miss(t, !have ? 0 : live.serial == t->serial ? 1 : 2);
         return;
     }
     if (live.L.size != t->L.size || live.d.format != t->d.format || live.d.width != t->d.width || live.d.height != t->d.height ||
@@ -23814,6 +23824,7 @@ void botw_tex_follow(const void *tv) {
         if (watched) MLOG("[tile] f%llu ser=%llu not followed: live ser=%llu %ux%ux%u lv%u nvnfmt=%#x target %d size %llu differs from %ux%ux%u lv%u nvnfmt=%#x target %d size %llu",
                           (unsigned long long)atomic_load(&g_cur_frame), (unsigned long long)t->serial, (unsigned long long)live.serial, live.d.width, live.d.height, live.d.depth, live.d.levels, live.d.format, live.d.target,
                           (unsigned long long)live.L.size, t->d.width, t->d.height, t->d.depth, t->d.levels, t->d.format, t->d.target, (unsigned long long)t->L.size);
+        bfollow_miss(t, 3);
         return;
     }
     uint64_t from = t->serial; int pinned = dm_nvn_pin_rekey(t, &live);
@@ -23822,7 +23833,8 @@ void botw_tex_follow(const void *tv) {
        when the copy goes): forget it here once no other copy names it, or its kept texture and residency entry stay for the
        whole session (owner 2026-10-26: 946,000 kept serials, 18,500 resident objects and the GPU budget stop after 4.5 h). */
     extern int dm_nvn_pin_has_serial(uint64_t serial);
-    if (pinned && !dm_nvn_pin_has_serial(from)) mtl_dead_forget(&from, 1);
+    if (pinned && !dm_nvn_pin_has_serial(from)) { mtl_dead_forget(&from, 1); atomic_fetch_add(&g_bfollow_forgot, 1); }
+    atomic_fetch_add(&g_bfollow_done, 1);
     static uint64_t n; if (n++ < 8 || n % 1000 == 0)
         MLOG("[tex-follow] %s ser=%llu -> %llu at %p (%ux%u nvnfmt=%#x; %llu so far)", pinned ? "recording copy" : "texture", (unsigned long long)from,
              (unsigned long long)live.serial, (void *)t->mem, t->d.width, t->d.height, t->d.format, (unsigned long long)n);
@@ -23904,6 +23916,38 @@ void botw_serial_note(uint64_t serial, const char *what) {
     int c = atomic_load(np);
     if (!what) { for (int i = 0; i < c; i++) if (seen[i] == serial) return; if (c < 64) { seen[c] = serial; atomic_store(np, c + 1); } return; }
     for (int i = 0; i < c; i++) if (seen[i] == serial) { MLOG("[tile] f%llu ser=%llu %s", (unsigned long long)atomic_load(&g_cur_frame), (unsigned long long)serial, what); return; }
+}
+/* Long-run log (local 0007, with TOTK_DEBUG_LOG): one [leak] line with each memory readout. Host textures that only finalised
+   serials hold (no live serial holds the same texture), counted once per texture: kept for a recording copy (g_bdead_kept)
+   or other; the kept set; follows of finalised serials (and how many of them freed the old serial) and the misses by reason
+   since the last line, with the last missed texture. (mtl_mem_stat lists the top residency sites after it.) */
+void botw_leak_log(void) {
+    static uint64_t last_miss[4], last_done;
+    NSHashTable *live = [NSHashTable hashTableWithOptions:NSPointerFunctionsOpaqueMemory | NSPointerFunctionsOpaquePersonality];
+    NSHashTable *dk = [NSHashTable hashTableWithOptions:NSPointerFunctionsOpaqueMemory | NSPointerFunctionsOpaquePersonality];
+    NSHashTable *dother = [NSHashTable hashTableWithOptions:NSPointerFunctionsOpaqueMemory | NSPointerFunctionsOpaquePersonality];
+    uint64_t n = 0, nd = 0, kn; uint64_t bk = 0, bo = 0;
+    pthread_mutex_lock(&g_smu);
+    for (int pass = 0; pass < 2; pass++)
+        for (uint32_t i = 0; i < g_by_serial.cap; i++) {
+            void *v = g_by_serial.vals[i]; if (!v) continue;
+            uint64_t k; memcpy(&k, g_by_serial.keys + (size_t)i * g_by_serial.klen, 8);
+            id o = (__bridge id)v; id<MTLTexture> t = [o isKindOfClass:[NvPkg class]] ? ((NvPkg *)o)->tex : [o conformsToProtocol:@protocol(MTLTexture)] ? (id<MTLTexture>)o : nil;
+            if (!t) continue;
+            id<MTLTexture> base = t.parentTexture ?: t; int dead = totk_serial_has(&g_dead_serial, k);
+            if (pass == 0) { n++; nd += dead; if (!dead) [live addObject:base]; continue; }
+            if (!dead || [live containsObject:base]) continue;
+            if (nvn_hm_get(&g_bdead_kept, &k)) { if (![dk containsObject:base]) { [dk addObject:base]; bk += base.allocatedSize; } }
+            else if (![dother containsObject:base] && ![dk containsObject:base]) { [dother addObject:base]; bo += base.allocatedSize; }
+        }
+    kn = g_bdead_kept.n;
+    pthread_mutex_unlock(&g_smu);
+    uint64_t m[4], done = atomic_load(&g_bfollow_done); for (int i = 0; i < 4; i++) { m[i] = atomic_load(&g_bfollow_miss[i]); }
+    MLOG("[leak] serial table %llu textures (%llu of finalised serials); held only by finalised serials: kept for recordings %lu textures %llu MB, other %lu textures %llu MB; kept set %llu; follows +%llu (freed %llu so far); missed follows +%llu/+%llu/+%llu/+%llu (no live / itself / live finalised / layout), last ser=%llu %ux%u nvnfmt=%#x why %d",
+         (unsigned long long)n, (unsigned long long)nd, (unsigned long)dk.count, (unsigned long long)(bk >> 20), (unsigned long)dother.count, (unsigned long long)(bo >> 20), (unsigned long long)kn,
+         (unsigned long long)(done - last_done), (unsigned long long)atomic_load(&g_bfollow_forgot), (unsigned long long)(m[0] - last_miss[0]), (unsigned long long)(m[1] - last_miss[1]),
+         (unsigned long long)(m[2] - last_miss[2]), (unsigned long long)(m[3] - last_miss[3]), (unsigned long long)g_bfollow_last.serial, g_bfollow_last.w, g_bfollow_last.h, g_bfollow_last.fmt, g_bfollow_last.why);
+    for (int i = 0; i < 4; i++) last_miss[i] = m[i]; last_done = done;
 }
 #endif
 #ifdef GAME_BOTW
