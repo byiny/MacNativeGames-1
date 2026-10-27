@@ -12,8 +12,11 @@
      StageInfo::sCurrentMapType at main+0x1dae3a0 (FixedSafeString, char * at +8) reads "MainField" in the field. A
      thread reads both once a second; field places paint the grid (shrines use their own coordinates and do not).
    - Save slots: the game reading save:/N/game_data.sav loads slot N's grid (<profile>/fog-map/<user>/slotN.grid);
-     the game writing it saves the live grid to slot N. A slot without a grid starts from Hero's Path
-     (save/<user>/tracker/trackblock{,_hard}NN.sav; slots 6-7 are Master Mode). The game's save files are only read.
+     the game writing it saves the live grid to slot N. Every load also paints Hero's Path into the grid
+     (save/<user>/tracker/trackblock{,_hard}NN.sav; slots 6-7 are Master Mode), so a slot without a grid starts from
+     it, and a grid older than its save (the save written by a run without the fog map) gets back the trail walked
+     since (owner, 2026-10-27: a Hateno trail walked before its tower was gone after the unlock, because the loaded
+     slot's grid was 2 h older than its save). The game's save files are only read.
    - A re-upload of a tile retires the old tile and releases its fog texture at once. The position thread and the save
      hook walk the weak tile table inside an autorelease pool: each weak read autoreleases the tile, and without a pool
      on these threads no tile was ever freed (owner's 4.9 h run, 2026-10-27: 1399 fog textures, 746 MB, GPU budget abort).
@@ -231,10 +234,10 @@ void botw_fog_save_opened(const char *path, int write) {
     if (slot == g_fog_slot) { g_fog_have_prev = 0; pthread_mutex_unlock(&g_fog_gmu); return; }   // the live slot read again (a check after a save, a retry): the live grid is newer; no line to the respawn
     memset(g_fog_grid, 0, sizeof g_fog_grid);
     int had = fog_grid_load(slot);
-    if (!had) fog_import_track(slot >= 6);
+    fog_import_track(slot >= 6);   // painting only raises: a stale or missing grid gets the trail the game recorded
     g_fog_slot = slot; g_fog_have_prev = 0; g_fog_ggen++; g_fog_epoch++;
     pthread_mutex_unlock(&g_fog_gmu);
-    MLOG("[fog] slot %d loaded (%s): %s", slot, slot >= 6 ? "Master Mode" : "normal", had ? "its fog grid" : "new grid from Hero's Path");
+    MLOG("[fog] slot %d loaded (%s): %s", slot, slot >= 6 ? "Master Mode" : "normal", had ? "its fog grid + Hero's Path" : "new grid from Hero's Path");
     fog_mark_all_dirty();
 }
 
