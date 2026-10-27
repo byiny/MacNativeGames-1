@@ -14,6 +14,9 @@
    - Save slots: the game reading save:/N/game_data.sav loads slot N's grid (<profile>/fog-map/<user>/slotN.grid);
      the game writing it saves the live grid to slot N. A slot without a grid starts from Hero's Path
      (save/<user>/tracker/trackblock{,_hard}NN.sav; slots 6-7 are Master Mode). The game's save files are only read.
+   - A re-upload of a tile retires the old tile and releases its fog texture at once. The position thread and the save
+     hook walk the weak tile table inside an autorelease pool: each weak read autoreleases the tile, and without a pool
+     on these threads no tile was ever freed (owner's 4.9 h run, 2026-10-27: 1399 fog textures, 746 MB, GPU budget abort).
    - BOTW_FOG=0 off; BOTW_FOG_DARK (0.3: what is left of unvisited colour), BOTW_FOG_RADIUS (48 m, plus a 32 m soft edge); BOTW_FOG_LOG=1
      logs the position once a second. */
 #include "botw_fog_core.h"
@@ -30,7 +33,7 @@ static os_unfair_lock g_fog_lk = OS_UNFAIR_LOCK_INIT;   /* table, tiles, tile st
 static NSMutableDictionary<NSNumber *, NSNumber *> *g_fog_keys;   /* hash -> cell (level << 16 | (col + 2) << 8 | row, never 0; -1 shared) */
 static NSMutableSet<NSString *> *g_fog_seen;   /* tile files opened */
 static NSHashTable *g_fog_tiles;   /* live tiles (weak) */
-static uint64_t g_fog_n_open[4], g_fog_n_key[4], g_fog_n_up[4], g_fog_n_built[4];
+static uint64_t g_fog_n_open[4], g_fog_n_key[4], g_fog_n_up[4], g_fog_n_built[4], g_fog_n_retired;
 static pthread_mutex_t g_fog_gmu = PTHREAD_MUTEX_INITIALIZER;   /* grid, slot */
 static uint8_t g_fog_grid[FOG_GW * FOG_GH];
 static uint64_t g_fog_ggen, g_fog_epoch;   /* grid generation; slot loads */
@@ -38,7 +41,8 @@ static int g_fog_slot = -1, g_fog_have_prev;
 static float g_fog_prev[2];
 
 @interface BotwFogTile : NSObject { @public
-    uint64_t hash, ser, gen;   /* gen: grid generation of the last build started */
+    uint64_t hash, ser;
+    uintptr_t lo, hi;   /* the guest memory the tile was uploaded from */
     uint32_t w, h; int level, cell, dead, busy, dirty, warned;
     double t_up, t_built;
     uint8_t *blocks; MTLPixelFormat pf; MTLTextureSwizzleChannels swz;
@@ -85,7 +89,7 @@ static void fog_build(BotwFogTile *tl) {
         pthread_mutex_lock(&g_fog_gmu); int stale = epoch != g_fog_epoch;   // a slot loaded meanwhile; held until published (lock order: grid, then tiles)
         os_unfair_lock_lock(&g_fog_lk);
         int live = !tl->dead && t && !stale; uint64_t n = 0;
-        if (live) { tl->next = t; tl->gen = gen; if (!tl->t_built) n = ++g_fog_n_built[tl->level]; tl->t_built = fog_now(); }
+        if (live) { tl->next = t; if (!tl->t_built) n = ++g_fog_n_built[tl->level]; tl->t_built = fog_now(); }
         tl->busy = 0;
         if (stale && !tl->dead) fog_kick_locked(tl, 1);
         os_unfair_lock_unlock(&g_fog_lk);
@@ -127,16 +131,22 @@ void botw_fog_rom_opened(const char *path) {
     });
 }
 
+/* replay thread (the only one that touches cur): the tile is no longer used; its textures go now, not with its package */
+static void fog_retire(BotwFogTile *tl) {
+    os_unfair_lock_lock(&g_fog_lk); tl->dead = 1; tl->next = nil; os_unfair_lock_unlock(&g_fog_lk);   // next: built, never picked, never resident
+    if (tl->cur) { defer_obj_release(tl->cur); tl->cur = nil; }
+    g_fog_n_retired++;
+}
 /* botw_texpack.h botw_tp_uploaded (replay thread): a first upload or a re-upload of a mirrored texture */
 static void fog_uploaded(NvPkg *pk, const tex_t *t) {
-    if (pk->fog) { BotwFogTile *old = pk->fog; os_unfair_lock_lock(&g_fog_lk); old->dead = 1; old->next = nil; os_unfair_lock_unlock(&g_fog_lk); pk->fog = nil; }
+    if (pk->fog) { fog_retire(pk->fog); pk->fog = nil; }
     int level = fog_level_of(t->d.width);
     if (level < 0 || t->d.height != t->d.width || t->d.format != 0x46 || (t->d.target != 1 && t->d.target != 7) || t->d.levels > 1 || !t->mem || !t->L.size
         || !pk->tex || pk->tex.pixelFormat != MTLPixelFormatBC1_RGBA_sRGB || pk->tex.mipmapLevelCount != 1) return;
     double t0 = fog_now();
     BotwFogTile *tl = [BotwFogTile new];
     tl->hash = pkg_hash(t->mem, t->L.size); tl->ser = t->serial; tl->w = t->d.width; tl->h = t->d.height; tl->level = level;
-    tl->pf = pk->tex.pixelFormat; tl->swz = pk->tex.swizzle; tl->t_up = t0;
+    tl->pf = pk->tex.pixelFormat; tl->swz = pk->tex.swizzle; tl->t_up = t0; tl->lo = (uintptr_t)t->mem; tl->hi = tl->lo + t->L.size;
     uint8_t *raw = malloc(t->L.size); if (!raw) return;
     memcpy(raw, t->mem, t->L.size);
     nvn_texdesc desc = t->d;
@@ -207,9 +217,9 @@ static int fog_import_track(int hard) {   /* g_fog_gmu held: Hero's Path of this
     MLOG("[fog] Hero's Path (%s): %d points from %d file(s)", hard ? "Master Mode" : "normal", points, files);
     return points;
 }
-static void fog_mark_all_dirty(void) {
+static void fog_mark_all_dirty(void) { @autoreleasepool {   // a guest thread: no pool of its own (see the top)
     os_unfair_lock_lock(&g_fog_lk); for (BotwFogTile *tl in g_fog_tiles) { tl->dirty = 1; fog_kick_locked(tl, 1); } os_unfair_lock_unlock(&g_fog_lk);
-}
+} }
 void botw_fog_save_opened(const char *path, int write) {
     static const char pre[] = "save:/";
     if (g_fog <= 0 || !path || strncmp(path, pre, sizeof pre - 1)) return;
@@ -236,7 +246,7 @@ static int fog_read(uintptr_t a, void *out, size_t n) {
 static void *fog_loop(void *arg) {
     (void)arg;
     pthread_setname_np("botw.fog.pos");
-    for (uint64_t tick = 0;; tick++) {
+    for (uint64_t tick = 0;; tick++) @autoreleasepool {   // each weak read of a tile autoreleases it (see the top)
         sleep(1);
         pthread_mutex_lock(&g_fog_gmu); uint64_t epoch = g_fog_epoch; pthread_mutex_unlock(&g_fog_gmu);
         uintptr_t pi = 0, ts = 0; float pos[3] = {0}; char type[16] = {0};
@@ -269,10 +279,23 @@ static void *fog_loop(void *arg) {
             fog_kick_locked(tl, 0);
             if (!tl->cell && !tl->warned && now - tl->t_up > 5) { tl->warned = 1; MLOG("【红】[fog] map tile %ux%u (serial %llu) has no known file after 5 s: no fog on it", tl->w, tl->h, (unsigned long long)tl->ser); }
         }
-        if (tick % 30 == 29) MLOG("[fog] tiles 3000/840/300/135: files %llu/%llu/%llu/%llu, keys %llu/%llu/%llu/%llu, uploads %llu/%llu/%llu/%llu, built %llu/%llu/%llu/%llu, live %lu",
+        NSArray<BotwFogTile *> *all = tick % 30 == 29 ? g_fog_tiles.allObjects : nil;
+        if (all) MLOG("[fog] tiles 3000/840/300/135: files %llu/%llu/%llu/%llu, keys %llu/%llu/%llu/%llu, uploads %llu/%llu/%llu/%llu, built %llu/%llu/%llu/%llu, live %lu",
             g_fog_n_open[0], g_fog_n_open[1], g_fog_n_open[2], g_fog_n_open[3], g_fog_n_key[0], g_fog_n_key[1], g_fog_n_key[2], g_fog_n_key[3],
-            g_fog_n_up[0], g_fog_n_up[1], g_fog_n_up[2], g_fog_n_up[3], g_fog_n_built[0], g_fog_n_built[1], g_fog_n_built[2], g_fog_n_built[3], (unsigned long)g_fog_tiles.allObjects.count);
+            g_fog_n_up[0], g_fog_n_up[1], g_fog_n_up[2], g_fog_n_up[3], g_fog_n_built[0], g_fog_n_built[1], g_fog_n_built[2], g_fog_n_built[3], (unsigned long)all.count);
         os_unfair_lock_unlock(&g_fog_lk);
+        if (all) {   // what holds the live tiles: their serial finalised, still in the serial table, memory initialised over by a newer tile
+            unsigned long live = 0, dead = 0, fin = 0, intab = 0, over = 0; uint64_t mb = 0;
+            for (BotwFogTile *tl in all) {
+                if (tl->dead) { dead++; continue; }
+                live++; mb += (uint64_t)((tl->w + 3) / 4) * ((tl->h + 3) / 4) * 8;
+                if (serial_is_dead(tl->ser)) fin++;
+                if (serial_get(tl->ser)) intab++;
+                for (BotwFogTile *o in all) if (o != tl && o->ser > tl->ser && o->lo < tl->hi && tl->lo < o->hi) { over++; break; }
+            }
+            MLOG("[fog] tile objects: %lu in use (%llu MB of fog textures; serial finalised %lu, in the serial table %lu, memory used by a newer tile %lu), %lu retired not yet freed; %llu retired so far",
+                live, (unsigned long long)(mb >> 20), fin, intab, over, dead, (unsigned long long)g_fog_n_retired);
+        }
     }
     return NULL;
 }
