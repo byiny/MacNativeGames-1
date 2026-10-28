@@ -24,9 +24,9 @@ static int failures;
 #define IMAGE (DATA + 0x4000u)
 #define BASE 0x300000000ull   /* where the fake main is "mapped", for the adrp */
 #define ALIGNED 0x15a1c70u    /* the text end, 16-byte aligned */
-#define LOD_AT (ALIGNED + 352)
-#define DISP_AT (ALIGNED + 368)
-#define DOF_AT (ALIGNED + 400)
+#define LOD_AT (ALIGNED + 8)
+#define DISP_AT (ALIGNED - 12)    /* in the 12 bytes between the text end and the aligned end */
+#define DOF_AT (ALIGNED + 884)    /* after the sensor caves (+200 .. +884) */
 static const view_patch *const patches[3] = {&view_lod, &view_disp, &view_dof};
 
 static uint8_t *fake_main(void) {
@@ -149,10 +149,11 @@ static int dof_through(uint8_t *m, uint32_t enable) {
 
 static void words(void) {
     CHECK(view_stub_at(&view_lod, TEXT_END) == LOD_AT && view_stub_at(&view_disp, TEXT_END) == DISP_AT && view_stub_at(&view_dof, TEXT_END) == DOF_AT, "the stubs' places");
-    /* Behind the FOV stub (+32..+76) and the camera blend's veneer (+80..+104), and apart from each other. */
-    CHECK(view_lod.skip >= 112 && view_lod.skip + 4 * view_lod.words <= view_disp.skip && view_disp.skip + 4 * view_disp.words <= view_dof.skip, "the stubs do not overlap");
-    CHECK(view_dof.skip + 4 * view_dof.words <= 0x390 - 16, "inside the padding of the real layout");
-    CHECK(VIEW_LOD_SLOT >= 0x50u && VIEW_DISP_SLOT == VIEW_LOD_SLOT + 4 && VIEW_DOF_SLOT == VIEW_DISP_SLOT + 4, "slots past the FOV's +0x48 / +0x4c");
+    /* Render distance (-12 .. +8) and model detail distance (+8 .. +24) before the FOV stub (+32), the depth of field after the
+       sensor caves (+200 .. +884, game_patches_botw.c), apart from each other and from the VR camera veneer's +128 .. +200. */
+    CHECK(view_disp.skip == -12 && view_disp.skip + 4 * view_disp.words <= view_lod.skip && view_lod.skip + 4 * view_lod.words <= 32, "the first two stubs sit before the FOV stub");
+    CHECK(view_dof.skip == 200 + 684 && view_dof.skip + 4 * view_dof.words <= 0x390, "the depth of field after the caves, inside the padding of the real layout");
+    CHECK(VIEW_LOD_SLOT >= 0x60u && VIEW_DISP_SLOT == VIEW_LOD_SLOT + 4 && VIEW_DOF_SLOT == VIEW_DISP_SLOT + 4, "slots past the FOV's +0x48 / +0x4c");
     for (unsigned p = 0; p < 3; p++) {
         unsigned at = 0;
         for (unsigned i = 0; i < patches[p]->guards; i++) at += patches[p]->guard[i].off == patches[p]->site;
@@ -289,7 +290,7 @@ static void refusing(void) {
         uint8_t *t = fake_main(), *before = copy_of(t);
         CHECK(view_apply(v, t, BASE, TEXT_END, DATA, DATA, 0, NULL) == -1 && !memcmp(t, before, IMAGE), "patch %u: no data page", p);
         CHECK(view_apply(v, t, BASE, TEXT_END, DATA + 8, IMAGE, 0, NULL) == -1 && !memcmp(t, before, IMAGE), "patch %u: page not aligned", p);
-        CHECK(view_apply(v, t, BASE, 0x15a1fe0u, DATA, IMAGE, 0, NULL) == -1 && !memcmp(t, before, IMAGE), "patch %u: no room", p);
+        CHECK(view_apply(v, t, BASE, 0x15a1ffcu, DATA, IMAGE, 0, NULL) == -1 && !memcmp(t, before, IMAGE), "patch %u: no room", p);
         CHECK(view_apply(v, t, BASE, TEXT_END, DATA, IMAGE, 0, NULL) == 0, "patch %u: and then it goes in", p);
         free(before); free(t);
     }
@@ -302,16 +303,16 @@ static void refusing(void) {
 }
 
 /* With botw_fov.h's stub (+32), the camera blend's veneer (+80, 24 bytes), the arrow gravity veneer (+104, 24), the VR camera
-   veneer (+128, 72) and the two 64-bit heap stubs (+256 and +272, 12 bytes each) in the padding, in either order. */
+   veneer (+128, 72) and the sensor caves (+200, 684 bytes: they cover upstream's heap veneers at +256 and +272) in the
+   padding, in either order. */
 static void with_the_others(void) {
     uint8_t *a = fake_main(), *b = fake_main();
-    uint8_t blend[148]; for (unsigned i = 0; i < sizeof blend; i++) blend[i] = (uint8_t)(0xa0 + i);   /* the blend +80, the arrow +104, the VR camera +128 .. +200, then the heap stubs +256 .. +284 (the gap +200 .. +256 stays empty) */
+    uint8_t others[24 + 24 + 72 + 684]; for (unsigned i = 0; i < sizeof others; i++) others[i] = (uint8_t)(0xa0 + i);
     CHECK(fov_apply(a, BASE, TEXT_END, DATA, IMAGE, 1.2, NULL) == 0, "the FOV first");
-    memcpy(a + ALIGNED + 80, blend, 120); memcpy(b + ALIGNED + 80, blend, 120);
-    memcpy(a + ALIGNED + 256, blend + 120, 28); memcpy(b + ALIGNED + 256, blend + 120, 28);
+    memcpy(a + ALIGNED + 80, others, sizeof others); memcpy(b + ALIGNED + 80, others, sizeof others);
     uint8_t *fov_only = copy_of(a);
-    CHECK(view_lod_apply(a, BASE, TEXT_END, DATA, IMAGE, 2.0, NULL) == 0 && view_disp_apply(a, BASE, TEXT_END, DATA, IMAGE, 1.5, NULL) == 0 && view_dof_apply(a, BASE, TEXT_END, DATA, IMAGE, 1, NULL) == 0, "the three after the FOV and the blend");
-    CHECK(!memcmp(a + ALIGNED + 32, fov_only + ALIGNED + 32, 284 - 32) && !memcmp(a + DATA, fov_only + DATA, 0x50), "their bytes and slots untouched");
+    CHECK(view_lod_apply(a, BASE, TEXT_END, DATA, IMAGE, 2.0, NULL) == 0 && view_disp_apply(a, BASE, TEXT_END, DATA, IMAGE, 1.5, NULL) == 0 && view_dof_apply(a, BASE, TEXT_END, DATA, IMAGE, 1, NULL) == 0, "the three after the FOV and the others");
+    CHECK(!memcmp(a + ALIGNED + 32, fov_only + ALIGNED + 32, 884 - 32) && !memcmp(a + DATA, fov_only + DATA, 0x50), "their bytes and slots untouched");
     CHECK(view_lod_apply(b, BASE, TEXT_END, DATA, IMAGE, 2.0, NULL) == 0 && view_disp_apply(b, BASE, TEXT_END, DATA, IMAGE, 1.5, NULL) == 0 && view_dof_apply(b, BASE, TEXT_END, DATA, IMAGE, 1, NULL) == 0, "the three first");
     CHECK(fov_apply(b, BASE, TEXT_END, DATA, IMAGE, 1.2, NULL) == 0, "the FOV after them");
     CHECK(!memcmp(a, b, IMAGE), "the same main either way");

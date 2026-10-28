@@ -268,6 +268,7 @@ static int fog_read(uintptr_t a, void *out, size_t n) {
     mach_vm_size_t got = 0;
     return a && mach_vm_read_overwrite(mach_task_self(), a, n, (uintptr_t)out, &got) == KERN_SUCCESS && got == n;
 }
+static void shrines_tick(const float *pos, int ok);   /* botw_sensor_shrines.h */
 static void *fog_loop(void *arg) {
     (void)arg;
     pthread_setname_np("botw.fog.pos");
@@ -289,6 +290,7 @@ static void *fog_loop(void *arg) {
             g_fog_prev[0] = pos[0]; g_fog_prev[1] = pos[2]; g_fog_have_prev = 1;
         } else if (!field) g_fog_have_prev = 0;
         pthread_mutex_unlock(&g_fog_gmu);
+        shrines_tick(pos, field && valid);   // sensor and shrine map mod (no-op without its table)
         if (g_fog_log) MLOG("[fog] pos %.1f %.1f %.1f map '%s' slot %d%s", pos[0], pos[1], pos[2], type, slot, box.x0 <= box.x1 ? " painted" : "");
         /* tiles whose 1 km cell meets the painted cells */
         double now = fog_now();
@@ -333,3 +335,4 @@ void botw_fog_init(uintptr_t main_base, uint64_t main_size) {
     pthread_detach(th);
     MLOG("[fog] on: unvisited places keep %.0f%% of their colour, reveal radius %.0f m (BOTW_FOG=0 off)", g_fog_dark * 100, g_fog_radius);
 }
+#include "botw_sensor_shrines.h"   // Sheikah Sensor and shrine map mod (local patch 0011): reveal bytes, tower shares, grey colours

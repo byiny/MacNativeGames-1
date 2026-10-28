@@ -78,18 +78,20 @@ typedef struct { uint32_t off, original; } view_guard;
 typedef struct {
     const view_guard *guard; unsigned guards;   /* the words checked before anything is written */
     uint32_t site;                              /* the word that becomes a branch to the stub */
-    uint32_t skip;                              /* the stub's place: the text end, 16-byte aligned, + skip */
+    int32_t skip;                               /* the stub's place: the text end, 16-byte aligned, + skip (1.9.0's model detail distance and render distance stubs sit in the 12 bytes before it too) */
     unsigned words;                             /* its length */
     uint32_t slot;                              /* its word on the data page */
     int (*build)(uint32_t *w, uint64_t base, uint64_t stub, uint64_t data);   /* 0 = a branch or the adrp is out of range */
     unsigned sites;                             /* 1; the 1.6.0 model detail distance has VIEW_LOD160_SITES (view_lod160_apply) */
 } view_patch;
 
-/* The stubs (1.9.0): LOD +352 (4 words), render distance +368 (5), depth of field +400 (6), in the text padding after
-   every other user: botw_fov.h's FOV stub +32 .. +76, the camera blend's veneer +80, the arrow gravity veneer +104 .. +128
-   (game_patches_botw.c), the VR camera veneer +128 .. +200 (botw_vr_camera.h), the heap stubs +256 .. +288
-   (botw_heap_patch.h) and the Quest projection veneer +288 (1.6.0 only, botw_vr_projection.h; its 64 bytes end at +352);
-   the page's room runs to the 4 KiB boundary (+912). Every offset counts from the text end rounded up to 16. */
+/* The stubs (1.9.0), counted from the text end rounded up to 16 ("pad"; main+0x15a1c70). The page's room is 912 bytes
+   (pad .. main+0x15a2000) and the other users fill it: botw_fov.h's FOV stub +32 .. +76, the camera blend's veneer +80, the
+   arrow gravity veneer +104 .. +128 (game_patches_botw.c), the VR camera veneer +128 .. +200 (botw_vr_camera.h, VR only),
+   upstream's heap veneers +256 and +272 (botw_heap_patch.h, native 5K or HD heaps only) and, here, the sensor caves
+   (0011) +200 .. +884. So these three go where nothing else fits: the render distance (5 words) at -12, in the 12 bytes
+   between the text end and pad (zero like the rest), the model detail distance (4 words) at +8, before the FOV stub, and
+   the depth of field (6 words) at +884, after the caves; each is checked empty before it is written. */
 #define VIEW_LOD_BACK 0x10575ecu
 #define VIEW_DISP_BACK 0x10a468cu
 #define VIEW_DOF_BACK 0xfe09f0u
@@ -236,16 +238,16 @@ static inline int view_dof160_stub_words(uint32_t *w, uint64_t base, uint64_t st
     w[5] = fov_branch(stub + 20, VIEW_DOF160_RET);          /* b main+0x1416508: the epilogue */
     return w[0] && w[4] && w[5];
 }
-static const view_patch view_lod = {view_lod_guard, sizeof view_lod_guard / sizeof *view_lod_guard, 0x10575e8u, 352, 4, VIEW_LOD_SLOT, view_lod_stub_words, 1};
-static const view_patch view_disp = {view_disp_guard, sizeof view_disp_guard / sizeof *view_disp_guard, 0x10a4688u, 368, 5, VIEW_DISP_SLOT, view_disp_stub_words, 1};
-static const view_patch view_dof = {view_dof_guard, sizeof view_dof_guard / sizeof *view_dof_guard, 0xfe09ecu, 400, 6, VIEW_DOF_SLOT, view_dof_stub_words, 1};
+static const view_patch view_lod = {view_lod_guard, sizeof view_lod_guard / sizeof *view_lod_guard, 0x10575e8u, 8, 4, VIEW_LOD_SLOT, view_lod_stub_words, 1};
+static const view_patch view_disp = {view_disp_guard, sizeof view_disp_guard / sizeof *view_disp_guard, 0x10a4688u, -12, 5, VIEW_DISP_SLOT, view_disp_stub_words, 1};
+static const view_patch view_dof = {view_dof_guard, sizeof view_dof_guard / sizeof *view_dof_guard, 0xfe09ecu, 884, 6, VIEW_DOF_SLOT, view_dof_stub_words, 1};
 
 static const view_patch view_dof160 = {view_dof160_guard, sizeof view_dof160_guard / sizeof *view_dof160_guard, 0x14140e8u, 960, 6, VIEW_DOF_SLOT, view_dof160_stub_words, 1};
 static const view_patch view_far160 = {view_far160_guard, sizeof view_far160_guard / sizeof *view_far160_guard, VIEW_TRAV160_SITE, 984, VIEW_FAR160_WORDS, VIEW_DISP_SLOT, NULL, 1 + VIEW_FAR160_NULLS};
 
 static const view_patch view_lod160 = {view_lod160_guard, sizeof view_lod160_guard / sizeof *view_lod160_guard, 0x14e2eacu, 192, VIEW_LOD160_WORDS, VIEW_LOD_SLOT, NULL, VIEW_LOD160_SITES};
 
-static inline uint64_t view_stub_at(const view_patch *p, uint64_t text_end) { return ((text_end + 15) & ~15ULL) + p->skip; }
+static inline uint64_t view_stub_at(const view_patch *p, uint64_t text_end) { return (uint64_t)((int64_t)((text_end + 15) & ~15ULL) + p->skip); }
 
 /* Install: the guards are checked first, then the stub's padding (zero, inside the 4 KiB page after the text), the data
    page and the slot (zero). Only when all hold are the slot's word, the stub and, last, the branch written. 0 = done;
@@ -257,7 +259,7 @@ static inline int view_apply(const view_patch *p, uint8_t *main, uint64_t base, 
         if (have != p->guard[i].original) { if (found) *found = have; return (int)i + 1; }
     }
     const uint64_t stub = view_stub_at(p, text_end);
-    if (stub + 4 * p->words > ((text_end + 0xfff) & ~0xfffULL) || data & 0xfff || data + p->slot + 4 > size) return -1;
+    if (stub < text_end || stub + 4 * p->words > ((text_end + 0xfff) & ~0xfffULL) || data & 0xfff || data + p->slot + 4 > size) return -1;
     for (unsigned i = 0; i < 4 * p->words; i++) if (main[stub + i]) return -1;
     for (unsigned i = 0; i < 4; i++) if (main[data + p->slot + i]) return -1;
     uint32_t w[VIEW_MAX_WORDS], jump = fov_branch(p->site, stub);

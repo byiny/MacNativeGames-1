@@ -1383,6 +1383,115 @@ static void patch_cook_count(Module *m) {
     fprintf(stderr, "[botw] cook count: %d dish%s per cook (TOTK_BOTW_COOK_COUNT, 1 = as shipped)\n", n, n == 1 ? "" : "es");
 }
 #endif
+#ifdef GAME_BOTW190
+/* Sheikah Sensor and shrine map mod (local build only; map: docs/botw-v1.9.0-sensor.md, host side:
+   games/botw/gfx/botw_sensor_shrines.h). Needs botw_shrines.bin in the app's Resources (TOTK_BOTW_SENSOR_MOD=0 off).
+   Caves in main's text padding (main+0x15a1d38 = the padding's start main+0x15a1c70 (text end rounded up to 16) + 0xc8,
+   before the 4 KiB page end 0x15a2000; source caves.s in the task folder, each cave tested in Unicorn on the 1.9.0 text).
+   The padding's 912 bytes: the FOV stub +0x20 (botw_fov.h, 11 words), the camera blend veneer +0x50, the arrow gravity
+   veneer +0x68 (6 words each), the VR camera veneer +0x80 .. +0xc8, then the caves (684 bytes, to +0x374), then the depth
+   of field stub (+0x374, botw_view_patches.h); the model detail distance (+8) and render distance (-12) stubs sit before the FOV
+   stub. Upstream's heap veneers at +0x100 / +0x110 (native 5K or HD heaps only) overlap the caves. They are reached from eight sites whose original words are checked first:
+     0xd7c748 / 0xd7cf94  shrine / DLC shrine icon slot 11 thunk "b 0xd7bdbc" -> b vis: the vanilla body (flag value > 0 sets
+                          the discovered bit 0x8000 and the draw bit 0x80), then while 0x8000 is clear 0x80 = the reveal byte
+     0xd7c80c / 0xd7d058  slot 12 "copy 0x8000 to 0x80" -> b copy: the same with the reveal byte
+     0xdac260 / 0xdac378  "movi d0, #0" (Color frame 0, orange) -> b col: frame 0.5 (grey) while 0x8000 is clear
+     0xdfdbf0             "bl 0xe84940" (setText of the big map's tower name; x21 = the hovered icon) -> bl text_t: an
+                          icon of the flag class (vtable +0x58 = 0xd7bdbc) labelled Location_MapTowerNN gets the host's " 61%" for its region
+     0xd882d0             "ldr w8, [x8, #0x178]" (the map manager updates the shrine icons, +0x2f0 / +0x300, slot +0x28, only in a
+                          frame with a game flag change) -> b trig: also while the host holds data page +0x10c at 1 (one second after
+                          a reveal byte changed)
+   The text cave uses only caller-saved registers, keeps x0-x2 and the caller's LR and tail-calls setText with a view on the
+   data page; a final "。" moves after the suffix; a seqlock miss, no suffix or a message over 495 units gives the vanilla text.
+   The sensor itself is as shipped here (no height text, owner 2026-10-29); the facing gauge is the sensor_facing pchtxt. No save flag is written. */
+enum { SC_ADRP, SC_B, SC_BL };
+static const uint32_t g_sensor_cave[171] = {   /* caves.s, assembled at main+0x15a1d38 */
+    0xa9be7bfdu, 0xf9000bf3u, 0x910003fdu, 0xaa0003f3u, 0x94000000u, 0xf9000fe0u, 0xaa1303e0u, 0xb9403c08u,
+    0x377800e8u, 0xf9402c09u, 0xb40000a9u, 0x94000012u, 0xb9403c08u, 0x33190128u, 0xb9003c08u, 0xf9400fe0u,
+    0xf9400bf3u, 0xa8c27bfdu, 0xd65f03c0u, 0xb9403c08u, 0x530f7d09u, 0x377800a8u, 0xaa1e03f1u, 0x94000006u,
+    0xaa1103feu, 0xb9403c08u, 0x33190128u, 0xb9003c08u, 0xd65f03c0u, 0x52800009u, 0xf9402c0au, 0xb400044au,
+    0xf940094au, 0xb400040au, 0xf940054bu, 0xd2888becu, 0xf2adceacu, 0xf2ccacecu, 0xf2edcdecu, 0xeb0c017fu,
+    0x54000321u, 0x39404d4bu, 0x350002ebu, 0x3940414bu, 0x5100c16bu, 0x7100257fu, 0x54000268u, 0x3940454cu,
+    0x5100c18cu, 0x7100259fu, 0x540001e8u, 0x0b0b096bu, 0x0b0b058bu, 0x3940494cu, 0x5100c18cu, 0x7100259fu,
+    0x54000128u, 0x0b0b096bu, 0x0b0b058bu, 0x7102217fu, 0x540000a2u, 0x9000000au, 0x9108014au, 0x386b4949u,
+    0x12000129u, 0xd65f03c0u, 0x1e2c1000u, 0x36780048u, 0x2f00e400u, 0x14000000u, 0x1e2c1000u, 0x36780048u,
+    0x2f00e400u, 0x14000000u, 0xaa1503e9u, 0xb40004a9u, 0xf940012au, 0xf9402d4au, 0x9000000bu, 0x9136f16bu,
+    0xeb0b015fu, 0x540003e1u, 0xf9402d29u, 0xb40003a9u, 0xf9400929u, 0xb4000369u, 0xf840912au, 0xd28c29abu,
+    0xf2aa8e0bu, 0xf2ceedebu, 0xf2ee4cabu, 0xeb0b015fu, 0x54000281u, 0x39404d2au, 0x3500024au, 0x3940452au,
+    0x5100c14au, 0x7100255fu, 0x540001c8u, 0x3940492bu, 0x5100c16bu, 0x7100257fu, 0x54000148u, 0x0b0a094au,
+    0x0b0a056au, 0x5100054bu, 0x7100397fu, 0x540000a8u, 0x90000009u, 0x910c0129u, 0x8b0a1529u, 0x14000002u,
+    0x14000000u, 0x9000000au, 0x9104014bu, 0x88dffd6bu, 0x3707ff8bu, 0x7940012cu, 0x34ffff4cu, 0x71003d9fu,
+    0x54ffff08u, 0xf940004du, 0xb4fffecdu, 0xb940084eu, 0x9118014fu, 0xd2800010u, 0xeb0e021fu, 0x54000102u,
+    0x787079b1u, 0x340000d1u, 0xf107c21fu, 0x54fffda2u, 0x783079f1u, 0x91000610u, 0x17fffff8u, 0xeb0e021fu,
+    0x1a9f27f1u, 0x52800008u, 0xb40000f0u, 0xd100060du, 0x786d79e8u, 0x51400d08u, 0x7100091fu, 0x9a9001b0u,
+    0x1a9f17e8u, 0x0b0c020eu, 0x0b1101ceu, 0x0b0801ceu, 0x8b1005edu, 0x91000929u, 0x78402531u, 0x780025b1u,
+    0x7100058cu, 0x54ffffa1u, 0x34000068u, 0x52860051u, 0x780025b1u, 0x790001bfu, 0xd50339bfu, 0xb9410151u,
+    0x6b0b023fu, 0x54fff9e1u, 0x9117c142u, 0xf900004fu, 0xb900084eu, 0x14000000u, 0xb9417908u, 0x90000009u,
+    0xb9410d29u, 0x2a090108u, 0x14000000u,
+};
+static const struct { uint16_t word; uint8_t kind; uint32_t target; } g_sensor_reloc[] = {   /* target: main offset, or 0 = the data page */
+    {4, SC_BL, 0xd7bdbc}, {61, SC_ADRP, 0}, {69, SC_B, 0xdac280}, {73, SC_B, 0xdac398}, {78, SC_ADRP, 0xd7b000}, {108, SC_ADRP, 0}, {112, SC_B, 0xe84940}, {113, SC_ADRP, 0}, {165, SC_B, 0xe84940}, {167, SC_ADRP, 0}, {170, SC_B, 0xd882d4},
+};
+enum { SC_VIS = 0, SC_COPY = 19, SC_COL1 = 66, SC_COL2 = 70, SC_TEXT_T = 74, SC_TRIG = 166 };   /* entry points (word index) */
+static const struct { uint32_t off, original; uint8_t entry, call; } g_sensor_site[] = {
+    {0xd7c748u, 0x17fffd9du, SC_VIS, 0}, {0xd7cf94u, 0x17fffb8au, SC_VIS, 0}, {0xd7c80cu, 0xb9403c08u, SC_COPY, 0}, {0xd7d058u, 0xb9403c08u, SC_COPY, 0},
+    {0xdac260u, 0x2f00e400u, SC_COL1, 0}, {0xdac378u, 0x2f00e400u, SC_COL2, 0}, {0xdfdbf0u, 0x94021b54u, SC_TEXT_T, 1}, {0xd882d0u, 0xb9417908u, SC_TRIG, 0},
+};
+static const struct { uint32_t off, original; } g_sensor_check[] = {   /* what the caves rely on next to the sites */
+    {0xd7c810u, 0x530f7d09u}, {0xd7c81cu, 0xd65f03c0u}, {0xd7d05cu, 0x530f7d09u}, {0xd7d068u, 0xd65f03c0u},   /* the slot-12 copies they replace */
+    {0xdac24cu, 0xb9403e68u}, {0xdac264u, 0x14000007u}, {0xdac364u, 0xb9403e68u}, {0xdac37cu, 0x14000007u},   /* w8 = state; b to the tail */
+    {0xdfdb90u, 0xaa0103f5u}, {0xdfdbecu, 0x910003e2u},   /* x21 = the tower icon; x2 = the view */
+    {0xd882d4u, 0x35fff688u}, {0xd882d8u, 0x17ffffc7u},   /* cbnz w8 -> the shrine icons' update; b past it */
+};
+static uint32_t sensor_branch(uint64_t site, uint64_t target, int link) {   /* b / bl <target>, both offsets in main */
+    int64_t delta = (int64_t)target - (int64_t)site;
+    if ((delta & 3) || delta < -(1 << 27) || delta >= (1 << 27)) runtime_fail("sensor caves: branch outside range");
+    return (link ? 0x94000000u : 0x14000000u) | ((uint32_t)(delta >> 2) & 0x3ffffffu);
+}
+static void sensor_check(Module *m, uint32_t off, uint32_t want) {
+    uint32_t w; memcpy(&w, m->base + off, 4);
+    if (w != want) { fprintf(stderr, "[botw] sensor caves main+%#x: found %08x expected %08x\n", off, w, want); runtime_fail("the sensor and shrine map mod requires the 1.9.0 instructions"); }
+}
+static void patch_sensor_shrines(Module *m) {
+    int botw_shrines_load(void); void botw_shrines_start(uint8_t *page);   /* botw_sensor_shrines.h (nvn_mtl.m) */
+    const char *e = getenv("TOTK_BOTW_SENSOR_MOD");
+    if (ios_code() || strcmp(m->name, "main")) return;
+    if (e && !strcmp(e, "0")) { fprintf(stderr, "[botw] sensor and shrine map mod off (TOTK_BOTW_SENSOR_MOD=0)\n"); return; }
+    /* The caves start after the VR camera veneer (pad+0x80 .. +0xc8, botw_vr_camera.h) and overlap upstream's heap veneers
+       (pad+0x100 and +0x110, botw_heap_patch.h: native 5K or HD heaps only, off on this Mac; with them on, the check below
+       stops the start). The view stubs (botw_view_patches.h) sit at pad-12, pad+8 and after the caves. */
+    enum { CAVE_AT = 0xc8 };
+    _Static_assert(CAVE_AT >= 0x80 + 72, "sensor caves start inside the VR camera veneer");
+    const view_patch *const view[] = {&view_lod, &view_disp, &view_dof};   /* patch_view writes them after the caves, so this checks the layout, not the bytes */
+    for (size_t i = 0; i < sizeof view / sizeof *view; i++)
+        if (view[i]->skip + 4 * (int64_t)view[i]->words > CAVE_AT && view[i]->skip < CAVE_AT + (int64_t)sizeof g_sensor_cave) runtime_fail("sensor caves: a view stub is inside the caves");
+    const uint64_t pad = (m->text_end + 15) & ~15ULL, stub = pad + CAVE_AT, data_off = (m->file_size + 0x3fff) & ~0x3fffULL;
+    if (pad != 0x15a1c70u || stub + sizeof g_sensor_cave > ((m->text_end + 0xfff) & ~0xfffULL) || data_off + 0x4000 != m->size) {
+        fprintf(stderr, "[botw] sensor and shrine map mod: main text ends at %#llx, not the 1.9.0 layout: off\n", (unsigned long long)m->text_end); return;
+    }
+    for (size_t i = 0; i < sizeof g_sensor_cave; i++) if (m->base[stub + i]) {
+        fprintf(stderr, "[botw] sensor caves need main+%#llx..%#llx free, but main+%#llx is written (the VR camera veneer ends at +%#llx, the heap veneers are at +%#llx and +%#llx)\n",
+                (unsigned long long)stub, (unsigned long long)(stub + sizeof g_sensor_cave), (unsigned long long)(stub + i), (unsigned long long)(pad + 0xc8), (unsigned long long)(pad + 0x100), (unsigned long long)(pad + 0x110));
+        runtime_fail("sensor caves: another patch writes in main's text padding where the caves go");
+    }
+    for (size_t i = 0; i < sizeof g_sensor_site / sizeof *g_sensor_site; i++) sensor_check(m, g_sensor_site[i].off, g_sensor_site[i].original);
+    for (size_t i = 0; i < sizeof g_sensor_check / sizeof *g_sensor_check; i++) sensor_check(m, g_sensor_check[i].off, g_sensor_check[i].original);
+    if (!botw_shrines_load()) return;   /* no table: as shipped */
+    uint32_t cave[sizeof g_sensor_cave / 4];
+    memcpy(cave, g_sensor_cave, sizeof cave);
+    for (size_t i = 0; i < sizeof g_sensor_reloc / sizeof *g_sensor_reloc; i++) {
+        unsigned k = g_sensor_reloc[i].word; uint64_t at = stub + 4 * k, t = g_sensor_reloc[i].target;
+        cave[k] = g_sensor_reloc[i].kind == SC_ADRP ? adrp_reg(cave[k] & 31, (uintptr_t)m->base + at, (uintptr_t)m->base + (t ? t : data_off))
+                : sensor_branch(at, t, g_sensor_reloc[i].kind == SC_BL);
+    }
+    put_words(m, stub, cave, sizeof cave / 4, "sensor caves");
+    for (size_t i = 0; i < sizeof g_sensor_site / sizeof *g_sensor_site; i++)
+        put_word(m, g_sensor_site[i].off, sensor_branch(g_sensor_site[i].off, stub + 4 * g_sensor_site[i].entry, g_sensor_site[i].call), "sensor site");
+    botw_shrines_start(m->base + data_off);
+    fprintf(stderr, "[botw] sensor and shrine map mod: %zu sites, caves at +%#llx (%zu bytes) (TOTK_BOTW_SENSOR_MOD=0: as shipped)\n",
+            sizeof g_sensor_site / sizeof *g_sensor_site, (unsigned long long)stub, sizeof g_sensor_cave);
+}
+#endif
 void runtime_game_patches(Module *m) {
     fprintf(stderr, "[botw] %s game-code patches\n", TOTK_GAME_VERSION);
     botw_stereo_install(m);
@@ -1393,6 +1502,7 @@ void runtime_game_patches(Module *m) {
     patch_pchtxt(m);   /* first: on a Mac the patches below check the original words they replace (the phone's code is patched at build, CODE_PATCHED_AT_BUILD) */
 #ifdef GAME_BOTW190
     patch_cook_count(m);   /* after the pchtxt mods, whose word it rewrites */
+    patch_sensor_shrines(m);   /* after the pchtxt mods: it checks the words they must not change */
 #endif
     if (!patch_output_res(m)) patch_render_1080(m);
     patch_phone_render(m);

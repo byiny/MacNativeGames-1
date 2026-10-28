@@ -90,11 +90,14 @@ class BotwViewPatches(unittest.TestCase):
         arrow = int(re.search(r'patch_arrow_gravity\(m, page, \(\(m->text_end \+ 15\) & ~15ULL\) \+ (\d+)\);', SOURCE)[1])
         vr_camera = int(re.search(r'stub=\(\(m->text_end\+15\)&~15ull\)\+(\d+);', (RUNTIME / 'botw_vr_camera.h').read_text())[1])
         vr_camera_bytes = 4 * len(re.search(r'uint32_t code\[\]=\{(.*?)\};', (RUNTIME / 'botw_vr_camera.h').read_text(), re.S)[1].replace('\n', '').split(','))
+        cave_at = int(re.search(r'CAVE_AT = (0x[0-9a-f]+)', SOURCE)[1], 0)
+        cave_bytes = 4 * int(re.search(r'g_sensor_cave\[(\d+)\]', SOURCE)[1])
         heap = int(re.search(r'\+ (0x[0-9a-f]+) \+ slot\*16', (RUNTIME / 'botw_heap_patch.h').read_text())[1], 0)
-        spans = [fov, (blend, 4 * 6), (arrow, 4 * 6), (vr_camera, vr_camera_bytes), (heap, 12), (heap + 16, 12)]   # + the VR camera and the 64-bit heap stubs
+        self.assertTrue(cave_at < heap + 12 and cave_at + cave_bytes > heap)   # the caves overlap the 64-bit heap veneers (native 5K or HD heaps only): the one allowed overlap, noted in botw_view_patches.h
+        spans = [fov, (blend, 4 * 6), (arrow, 4 * 6), (vr_camera, vr_camera_bytes), (cave_at, cave_bytes)]   # + the VR camera and the sensor caves
         for name, words in (('lod', 4), ('disp', 5), ('dof', 6)):
             skip = int(re.search(rf'view_{name}_guard\[\].*?\}};\n', HEADER, re.S) and
-                       re.search(rf'static const view_patch view_{name} = \{{[^;]*?\b0x[0-9a-f]+u, (\d+), {words},', HEADER)[1])
+                       re.search(rf'static const view_patch view_{name} = \{{[^;]*?\b0x[0-9a-f]+u, (-?\d+), {words},', HEADER)[1])
             spans.append((skip, 4 * words))
         spans.sort()
         for (a, n), (b, _) in zip(spans, spans[1:]):
