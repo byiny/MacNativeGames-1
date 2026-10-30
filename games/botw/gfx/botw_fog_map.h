@@ -20,7 +20,7 @@
    - A re-upload of a tile retires the old tile and releases its fog texture at once. The position thread and the save
      hook walk the weak tile table inside an autorelease pool: each weak read autoreleases the tile, and without a pool
      on these threads no tile was ever freed (owner's 4.9 h run, 2026-10-27: 1399 fog textures, 746 MB, GPU budget abort).
-   - BOTW_FOG=0 off; BOTW_FOG_DARK (0.3: what is left of unvisited colour), BOTW_FOG_RADIUS (48 m, plus a 32 m soft edge); BOTW_FOG_LOG=1
+   - BOTW_FOG=0 off; BOTW_FOG_DARK (0.3: what is left of unvisited colour), BOTW_FOG_RADIUS (60 m since 2026-10-30, was 48; plus a 32 m soft edge); BOTW_FOG_LOG=1
      logs the position once a second. */
 #include "botw_fog_core.h"
 #include <mach/mach.h>
@@ -28,7 +28,7 @@
 
 enum { FOG_PINFO = 0x1e13ed0, FOG_PINFO_POS = 0x88, FOG_MAPTYPE = 0x1dae3a0, FOG_EDGE = 2 * FOG_CELL, FOG_GAP = 250 };
 static int g_fog = -1;   /* -1 not yet set up, 0 off, 1 on */
-static float g_fog_dark = 0.3f, g_fog_radius = 48;
+static float g_fog_dark = 0.3f, g_fog_radius = 60;
 static int g_fog_log;
 static uintptr_t g_fog_main;
 static dispatch_queue_t g_fog_dq, g_fog_bq;   /* decode, build */
