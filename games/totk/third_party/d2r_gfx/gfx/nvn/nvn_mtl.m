@@ -8761,6 +8761,11 @@ static MTLSamplerDescriptor *samp_desc(samp_par p) {   // the game's sampler as 
                     d.mipFilter != MTLSamplerMipFilterNotMipmapped && repeats;
     if (aniso > 1 && material && d.maxAnisotropy < (NSUInteger)aniso) d.maxAnisotropy = (NSUInteger)aniso;
     if (material) d.lodBias = tup_mip_bias();   // TOTK_MFX_TEMPORAL_MIPBIAS (totk_taa.m): finer mip levels for a scene upscaled temporally; 0 unless set
+#ifdef GAME_BOTW
+    /* The game's own LOD bias (nvnSamplerBuilderSetLodBias), as nxnative passes it: Breath of the Wild sets -1 on its
+       LINEAR_MIPMAP_NEAREST samplers (699 of 207,401 in a Hateno run, 2026-10-31), the rest 0. Metal takes -16..15.99. */
+    { float b = d.lodBias + p.lod_bias; d.lodBias = b < -16.f ? -16.f : b > 15.99f ? 15.99f : b; }
+#endif
     if (p.cmp_mode) d.compareFunction = atomic_load(&g_shadow_cmp_off) ? MTLCompareFunctionAlways : (MTLCompareFunction)(p.cmp_func - 1);   // shadows off: dm_gfx_shadow_samplers_off
     d.borderColor = p.border[3] > 0.5f ? (p.border[0] > 0.5f ? MTLSamplerBorderColorOpaqueWhite : MTLSamplerBorderColorOpaqueBlack) : MTLSamplerBorderColorTransparentBlack;
     if (p.reduction > 2) die("sampler reduction filter %u unsupported", p.reduction);
