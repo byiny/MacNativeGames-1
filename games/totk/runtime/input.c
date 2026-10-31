@@ -167,6 +167,7 @@ static int pad_states(NpadState *out,int max,const uint32_t *id,uint32_t want_st
 #ifdef GAME_BOTW160
  atomic_store(&zrFrames,state.buttons&512?atomic_load(&zrFrames)+1:0);   /* ZR (bit 9) in the state the game reads */
 #endif
+ if(runtime_tilt_active())state.lx=state.ly=state.rx=state.ry=0;   /* tilt mode: the sticks tilt and turn the controller (runtime/gamepad.m) */
  }*out=state;pthread_mutex_unlock(&inputLock);return 1;}
 static int disconnected_states(NpadState *out,int max,const uint32_t *id){if(id)input_log("joy-con state",*id);if(max<=0)return 0;if(!out)runtime_fail("controller output pointer");pthread_mutex_lock(&inputLock);*out=(NpadState){.sampling=++sample};pthread_mutex_unlock(&inputLock);return 1;}
 static void hold_type(int type){if(type<0||type>1)runtime_fail("invalid joy hold type");holdType=type;(void)holdType;}
