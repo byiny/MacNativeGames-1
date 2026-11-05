@@ -16,7 +16,12 @@
       (main+0x10a4640) returns (distance > 0 ? distance : 100) x ActorDebug::mDispDistanceMultiplier; the multiply
       (main+0x10a4688, fmul s0, s0, s1) gets one more, by K from the page (+0x64): d x m x K, so K = 1 is the game's
       word. The display distance drives the placement's spawn and keep radius (more actors alive: the actor heaps) and
-      the _Far model swap. x8 and s1 are free after the multiply.
+      the _Far model swap. x8 and s1 are free after the multiply, x9 and x10 too (the function returns after it).
+      One caller keeps the game's value: the placement check main+0x10a4d20 calls it at main+0x10a6e98 for its "within
+      display distance" flag and distance, which only the placement loop main+0x1545618 reads (main+0x15457a8: the
+      object's near or far list). Scaled there, the floors of the F-3 Bokoblin camp vanished at 1.5x (2026-11-05, owner's
+      save; a caller bisect: only that call). The stub compares the return address the function saved ([sp, #8]) with
+      base + 0x10a6e9c on the data page (+0x70, written at install) and skips K for it.
    3. Depth of field. The draw entry of gsys's DepthOfField (main+0xfe09e4; x0 the object, the "enable" byte at +0x1310)
       returns at main+0xfe09ec (cbz w9, main+0xfe0a38, a plain ret) while the byte is 0. The stub also returns while the
       page's flag (+0x68) is not 0: no draw, the pass left out; an event camera or the DOF manager only writes the
@@ -64,15 +69,18 @@
 #pragma once
 #include "botw_fov.h"   /* fov_branch, fov_adrp, fov_number */
 
-#define VIEW_LOD_SLOT 0x60u      /* the data page: 1.9.0 uses +0 .. +0x20, the FOV's +0x48 / +0x4c (botw_fov.h) and the arrow log's +0x58 (8 bytes, game_patches_botw.c) */
+#define VIEW_LOD_SLOT 0x60u      /* the data page: 1.9.0 uses +0 .. +0x20, the FOV's +0x48 / +0x4c (botw_fov.h) and the arrow log's +0x58 (8 bytes, game_patches_botw.c); the placement check's kept return address is at +0x70 (8 bytes) */
 #define VIEW_DISP_SLOT 0x64u
 #define VIEW_DOF_SLOT 0x68u
+#define VIEW_DISP_KEEP_SLOT 0x70u   /* 8 bytes: base + VIEW_DISP_KEEP_RET, the caller that keeps the game's distance */
+#define VIEW_DISP_KEEP_CALL 0x10a6e98u   /* bl getDispDistance in the placement check main+0x10a4d20 */
+#define VIEW_DISP_KEEP_RET 0x10a6e9cu
 #define VIEW_LOD_MIN 0.1
 #define VIEW_LOD_ENV_MAX 100.0   /* TOTK_LOD_SCALE, as Tears of the Kingdom's */
 #define VIEW_LOD_MAX 1e6         /* "always the finest": the panel's "max" */
 #define VIEW_DISP_MIN 0.1
 #define VIEW_DISP_MAX 1.5       /* 2x and 3x crashed the 1.9.0 world load (2026-11-04, the _Far actor packs streaming in) */
-#define VIEW_MAX_WORDS 6
+#define VIEW_MAX_WORDS 9
 
 typedef struct { uint32_t off, original; } view_guard;
 typedef struct {
@@ -89,9 +97,10 @@ typedef struct {
    (pad .. main+0x15a2000) and the other users fill it: botw_fov.h's FOV stub +32 .. +76, the camera blend's veneer +80, the
    arrow gravity veneer +104 .. +128 (game_patches_botw.c), the VR camera veneer +128 .. +200 (botw_vr_camera.h, VR only),
    upstream's heap veneers +256 and +272 (botw_heap_patch.h, native 5K or HD heaps only) and, here, the sensor caves
-   (0011) +200 .. +884. So these three go where nothing else fits: the render distance (5 words) at -12, in the 12 bytes
-   between the text end and pad (zero like the rest), the model detail distance (4 words) at +8, before the FOV stub, and
-   the depth of field (6 words) at +884, after the caves; each is checked empty before it is written. */
+   (0011) +200 .. +884. So these three go where nothing else fits: the render distance (9 words) at -12, in the 12 bytes
+   between the text end and pad (zero like the rest), the depth of field (6 words) at +884, after the caves, and the model detail distance (4 words) at +128, in the VR
+   camera veneer's room (+128 .. +200: that veneer is installed only when the VR labo is on, and then finds its room taken
+   and stops the start); each is checked empty before it is written. */
 #define VIEW_LOD_BACK 0x10575ecu
 #define VIEW_DISP_BACK 0x10a468cu
 #define VIEW_DOF_BACK 0xfe09f0u
@@ -116,6 +125,8 @@ static const view_guard view_disp_guard[] = {
     {0x10a4684u, 0x1e22cc00u},   /* fcsel s0, s0, s2, gt */
     {0x10a4688u, 0x1e210800u},   /* fmul s0, s0, s1: the site */
     {VIEW_DISP_BACK, 0xa8c17bfdu},   /* ldp x29, x30, [sp], #0x10 */
+    {VIEW_DISP_KEEP_CALL, 0x97fff5eau},   /* bl main+0x10a4640: the caller that keeps the game's distance */
+    {VIEW_DISP_KEEP_RET, 0xbd000280u},    /* str s0, [x20]: its distance out */
 };
 static const view_guard view_dof_guard[] = {
     {0xfe09e4u, 0x52826209u},    /* mov w9, #0x1310 */
@@ -215,10 +226,14 @@ static inline int view_lod_stub_words(uint32_t *w, uint64_t base, uint64_t stub,
 static inline int view_disp_stub_words(uint32_t *w, uint64_t base, uint64_t stub, uint64_t data) {
     w[0] = 0x1e210800u;                                     /* fmul s0, s0, s1: the game's */
     w[1] = fov_adrp(8, base + stub + 4, base + data);       /* adrp x8, <data page> */
-    w[2] = view_ldr(0xbd400000u, 1, 8, VIEW_DISP_SLOT);     /* ldr s1, [x8, #0x64]: K */
-    w[3] = 0x1e210800u;                                     /* fmul s0, s0, s1 */
-    w[4] = fov_branch(stub + 16, VIEW_DISP_BACK);           /* b main+0x10a468c */
-    return w[1] && w[4];
+    w[2] = 0xf94007e9u;                                     /* ldr x9, [sp, #8]: the caller's return address */
+    w[3] = 0xf940390au;                                     /* ldr x10, [x8, #0x70]: base + 0x10a6e9c */
+    w[4] = 0xeb0a013fu;                                     /* cmp x9, x10 */
+    w[5] = 0x54000060u;                                     /* b.eq w[8]: that caller keeps the game's value */
+    w[6] = view_ldr(0xbd400000u, 1, 8, VIEW_DISP_SLOT);     /* ldr s1, [x8, #0x64]: K */
+    w[7] = 0x1e210800u;                                     /* fmul s0, s0, s1 */
+    w[8] = fov_branch(stub + 32, VIEW_DISP_BACK);           /* b main+0x10a468c */
+    return w[1] && w[8];
 }
 static inline int view_dof_stub_words(uint32_t *w, uint64_t base, uint64_t stub, uint64_t data) {
     w[0] = fov_adrp(10, base + stub, base + data);          /* adrp x10, <data page> */
@@ -238,8 +253,8 @@ static inline int view_dof160_stub_words(uint32_t *w, uint64_t base, uint64_t st
     w[5] = fov_branch(stub + 20, VIEW_DOF160_RET);          /* b main+0x1416508: the epilogue */
     return w[0] && w[4] && w[5];
 }
-static const view_patch view_lod = {view_lod_guard, sizeof view_lod_guard / sizeof *view_lod_guard, 0x10575e8u, 8, 4, VIEW_LOD_SLOT, view_lod_stub_words, 1};
-static const view_patch view_disp = {view_disp_guard, sizeof view_disp_guard / sizeof *view_disp_guard, 0x10a4688u, -12, 5, VIEW_DISP_SLOT, view_disp_stub_words, 1};
+static const view_patch view_lod = {view_lod_guard, sizeof view_lod_guard / sizeof *view_lod_guard, 0x10575e8u, 128, 4, VIEW_LOD_SLOT, view_lod_stub_words, 1};
+static const view_patch view_disp = {view_disp_guard, sizeof view_disp_guard / sizeof *view_disp_guard, 0x10a4688u, -12, 9, VIEW_DISP_SLOT, view_disp_stub_words, 1};
 static const view_patch view_dof = {view_dof_guard, sizeof view_dof_guard / sizeof *view_dof_guard, 0xfe09ecu, 884, 6, VIEW_DOF_SLOT, view_dof_stub_words, 1};
 
 static const view_patch view_dof160 = {view_dof160_guard, sizeof view_dof160_guard / sizeof *view_dof160_guard, 0x14140e8u, 960, 6, VIEW_DOF_SLOT, view_dof160_stub_words, 1};
@@ -316,7 +331,17 @@ static inline int view_lod160_apply(uint8_t *main, uint64_t base, uint64_t text_
 }
 static inline int view_disp_apply(uint8_t *main, uint64_t base, uint64_t text_end, uint64_t data, uint64_t size, double k, uint32_t *found) {
     uint32_t bits; if (!view_disp_bits(k, &bits)) return -2;
-    return view_apply(&view_disp, main, base, text_end, data, size, bits, found);
+    for (unsigned i = 0; i < view_disp.guards; i++) {   /* the guards first, as view_apply: a second pass refuses at the site */
+        uint32_t have; memcpy(&have, main + view_disp.guard[i].off, 4);
+        if (have != view_disp.guard[i].original) { if (found) *found = have; return (int)i + 1; }
+    }
+    if (data + VIEW_DISP_KEEP_SLOT + 8 > size) return -1;
+    for (unsigned i = 0; i < 8; i++) if (main[data + VIEW_DISP_KEEP_SLOT + i]) return -1;
+    const uint64_t keep = base + VIEW_DISP_KEEP_RET;
+    memcpy(main + data + VIEW_DISP_KEEP_SLOT, &keep, 8);   /* before the branch: the stub reads it at every call */
+    int r = view_apply(&view_disp, main, base, text_end, data, size, bits, found);
+    if (r) memset(main + data + VIEW_DISP_KEEP_SLOT, 0, 8);   /* refused: nothing stays written */
+    return r;
 }
 /* 1.6.0's render distance: the same order as view_apply (every guard, the stubs' padding and the slot; then the slot, the
    stubs, last the 6 branches). Site 0 is getTraverseDist's exit; null path i's fmov is guard 4 + 5i + 3, whose register

@@ -723,7 +723,7 @@ static void patch_realtime(Module *m) {
     patch_pad_repeat(m, page);
     patch_sound_step(m);
     patch_blend_first_step(m, ((m->text_end + 15) & ~15ULL) + 80);   /* after the FOV stub (+32, 11 words) */
-    patch_arrow_gravity(m, page, ((m->text_end + 15) & ~15ULL) + 104);   /* after the camera blend veneer (+80, 6 words), before the VR camera's (+128 .. +200); the view stubs are at +352 .. +424 (botw_view_patches.h), the heap stubs at +256 and +272 (botw_heap_patch.h) */
+    patch_arrow_gravity(m, page, ((m->text_end + 15) & ~15ULL) + 104);   /* after the camera blend veneer (+80, 6 words), before the VR camera's (+128 .. +200); the view stubs are at -12, +128 and +884 (botw_view_patches.h), the heap stubs at +256 and +272 (botw_heap_patch.h; the sensor caves cover them) */
 }
 #endif
 /* Diagnostics (TOTK_JQ_CHECK=1): random crashes look like one job run twice (two threads in the same skinning job, a list
@@ -1167,8 +1167,8 @@ static void patch_cook_count(Module *m) {
    before the 4 KiB page end 0x15a2000; source caves.s in the task folder, each cave tested in Unicorn on the 1.9.0 text).
    The padding's 912 bytes: the FOV stub +0x20 (botw_fov.h, 11 words), the camera blend veneer +0x50, the arrow gravity
    veneer +0x68 (6 words each), the VR camera veneer +0x80 .. +0xc8, then the caves (684 bytes, to +0x374), then the depth
-   of field stub (+0x374, botw_view_patches.h); the model detail distance (+8) and render distance (-12) stubs sit before the FOV
-   stub. Upstream's heap veneers at +0x100 / +0x110 (native 5K or HD heaps only) overlap the caves. They are reached from eight sites whose original words are checked first:
+   of field stub (+0x374, botw_view_patches.h); the render distance stub (-12, 9 words) sits before the FOV stub and the model detail
+   distance stub (+0x80) in the VR camera veneer's room. Upstream's heap veneers at +0x100 / +0x110 (native 5K or HD heaps only) overlap the caves. They are reached from eight sites whose original words are checked first:
      0xd7c748 / 0xd7cf94  shrine / DLC shrine icon slot 11 thunk "b 0xd7bdbc" -> b vis: the vanilla body (flag value > 0 sets
                           the discovered bit 0x8000 and the draw bit 0x80), then while 0x8000 is clear 0x80 = the reveal byte
      0xd7c80c / 0xd7d058  slot 12 "copy 0x8000 to 0x80" -> b copy: the same with the reveal byte
@@ -1236,7 +1236,7 @@ static void patch_sensor_shrines(Module *m) {
     if (e && !strcmp(e, "0")) { fprintf(stderr, "[botw] sensor and shrine map mod off (TOTK_BOTW_SENSOR_MOD=0)\n"); return; }
     /* The caves start after the VR camera veneer (pad+0x80 .. +0xc8, botw_vr_camera.h) and overlap upstream's heap veneers
        (pad+0x100 and +0x110, botw_heap_patch.h: native 5K or HD heaps only, off on this Mac; with them on, the check below
-       stops the start). The view stubs (botw_view_patches.h) sit at pad-12, pad+8 and after the caves. */
+       stops the start). The view stubs (botw_view_patches.h) sit at pad-12, pad+0x80 and after the caves. */
     enum { CAVE_AT = 0xc8 };
     _Static_assert(CAVE_AT >= 0x80 + 72, "sensor caves start inside the VR camera veneer");
     const view_patch *const view[] = {&view_lod, &view_disp, &view_dof};   /* patch_view writes them after the caves, so this checks the layout, not the bytes */

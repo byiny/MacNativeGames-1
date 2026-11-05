@@ -94,11 +94,14 @@ class BotwViewPatches(unittest.TestCase):
         cave_bytes = 4 * int(re.search(r'g_sensor_cave\[(\d+)\]', SOURCE)[1])
         heap = int(re.search(r'\+ (0x[0-9a-f]+) \+ slot\*16', (RUNTIME / 'botw_heap_patch.h').read_text())[1], 0)
         self.assertTrue(cave_at < heap + 12 and cave_at + cave_bytes > heap)   # the caves overlap the 64-bit heap veneers (native 5K or HD heaps only): the one allowed overlap, noted in botw_view_patches.h
-        spans = [fov, (blend, 4 * 6), (arrow, 4 * 6), (vr_camera, vr_camera_bytes), (cave_at, cave_bytes)]   # + the VR camera and the sensor caves
-        for name, words in (('lod', 4), ('disp', 5), ('dof', 6)):
+        spans = [fov, (blend, 4 * 6), (arrow, 4 * 6), (cave_at, cave_bytes)]   # + the sensor caves; the VR camera veneer's room is taken by the model detail distance stub (below)
+        for name, words in (('lod', 4), ('disp', 9), ('dof', 6)):
             skip = int(re.search(rf'view_{name}_guard\[\].*?\}};\n', HEADER, re.S) and
                        re.search(rf'static const view_patch view_{name} = \{{[^;]*?\b0x[0-9a-f]+u, (-?\d+), {words},', HEADER)[1])
-            spans.append((skip, 4 * words))
+            if name == 'lod':
+                self.assertTrue(vr_camera <= skip and skip + 4 * words <= vr_camera + vr_camera_bytes)   # in the VR camera veneer's room: the one allowed overlap besides the heap veneers
+            else:
+                spans.append((skip, 4 * words))
         spans.sort()
         for (a, n), (b, _) in zip(spans, spans[1:]):
             self.assertLessEqual(a + n, b, spans)

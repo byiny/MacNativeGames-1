@@ -24,7 +24,7 @@ static int failures;
 #define IMAGE (DATA + 0x4000u)
 #define BASE 0x300000000ull   /* where the fake main is "mapped", for the adrp */
 #define ALIGNED 0x15a1c70u    /* the text end, 16-byte aligned */
-#define LOD_AT (ALIGNED + 8)
+#define LOD_AT (ALIGNED + 128)    /* in the VR camera veneer's room (+128 .. +200) */
 #define DISP_AT (ALIGNED - 12)    /* in the 12 bytes between the text end and the aligned end */
 #define DOF_AT (ALIGNED + 884)    /* after the sensor caves (+200 .. +884) */
 static const view_patch *const patches[3] = {&view_lod, &view_disp, &view_dof};
@@ -91,6 +91,17 @@ static uint64_t run(uint8_t *m, Regs *r, uint64_t pc, uint64_t stop1, uint64_t s
             if (r->x[31] < SP_LOW || r->x[31] >= SP_TOP) return 0;
             r->x[rd] = r->stack[(r->x[31] - SP_LOW) / 8]; r->x[31] += (int64_t)((int32_t)(((w >> 12) & 0x1ffu) << 23) >> 23); pc += 4; continue;
         }
+        if ((w & 0xffc00000u) == 0xf9400000u) {   /* ldr x, [xn, #imm]: the stack or the data page */
+            uint64_t a = r->x[rn] + ((w >> 10) & 0xfff) * 8;
+            if (rn == 31) { if (a < SP_LOW || a + 8 > SP_TOP) return 0; r->x[rd] = r->stack[(a - SP_LOW) / 8]; }
+            else { if (a < BASE || a + 8 > BASE + g_image) return 0; memcpy(&r->x[rd], m + (a - BASE), 8); }
+            pc += 4; continue;
+        }
+        if ((w & 0xffe0fc1fu) == 0xeb00001fu) {   /* cmp x, x */
+            uint64_t a = r->x[rn], b = r->x[rm], d = a - b;
+            r->nzcv = (unsigned)(d >> 63) << 3 | (unsigned)(d == 0) << 2 | (unsigned)(a >= b) << 1 | (unsigned)((((a ^ b) & (a ^ d)) >> 63) & 1);
+            pc += 4; continue;
+        }
         if (w == 0xa9437bfdu) {   /* ldp x29, x30, [sp, #0x30]: getTraverseDist's exit (1.6.0) */
             if (r->x[31] < SP_LOW || r->x[31] + 0x40 > SP_TOP) return 0;
             r->x[29] = r->stack[(r->x[31] + 0x30 - SP_LOW) / 8]; r->x[30] = r->stack[(r->x[31] + 0x38 - SP_LOW) / 8]; pc += 4; continue;
@@ -132,13 +143,15 @@ static float lod_through(uint8_t *m, float z, float bias) {
     kept(&r, &before, 1u << 11, 1u << 1 | 1u << 3, "lod");
     return r.s[1];
 }
-/* Render distance: s0 = d, s1 = m through the multiply at main+0x10a4688; s0 at main+0x10a468c. */
-static float disp_through(uint8_t *m, float d, float mul) {
-    Regs r, before; poison(&r); r.s[0] = d; r.s[1] = mul; before = r;
+/* Render distance: s0 = d, s1 = m through the multiply at main+0x10a4688; s0 at main+0x10a468c. ret is the return
+   address the function saved at [sp, #8] (its frame: stp x29, x30, [sp, #-0x10]!). */
+static float disp_from(uint8_t *m, float d, float mul, uint64_t ret) {
+    Regs r, before; poison(&r); r.s[0] = d; r.s[1] = mul; r.x[31] = SP_TOP - 16; r.stack[(SP_TOP - 8 - SP_LOW) / 8] = ret; before = r;
     if (run(m, &r, view_disp.site, VIEW_DISP_BACK, VIEW_DISP_BACK) != VIEW_DISP_BACK) return NAN;
-    kept(&r, &before, 1u << 8, 1u << 0 | 1u << 1, "disp");
+    kept(&r, &before, 1u << 8 | 1u << 9 | 1u << 10, 1u << 0 | 1u << 1, "disp");
     return r.s[0];
 }
+static float disp_through(uint8_t *m, float d, float mul) { return disp_from(m, d, mul, BASE + 0x10a4c58u); }   /* another caller */
 /* Depth of field: w9 = the enable byte; 1 = the draw (main+0xfe09f0), 0 = the ret (main+0xfe0a38), -1 = lost. */
 static int dof_through(uint8_t *m, uint32_t enable) {
     Regs r, before; poison(&r); r.x[9] = enable; before = r;
@@ -149,9 +162,10 @@ static int dof_through(uint8_t *m, uint32_t enable) {
 
 static void words(void) {
     CHECK(view_stub_at(&view_lod, TEXT_END) == LOD_AT && view_stub_at(&view_disp, TEXT_END) == DISP_AT && view_stub_at(&view_dof, TEXT_END) == DOF_AT, "the stubs' places");
-    /* Render distance (-12 .. +8) and model detail distance (+8 .. +24) before the FOV stub (+32), the depth of field after the
-       sensor caves (+200 .. +884, game_patches_botw.c), apart from each other and from the VR camera veneer's +128 .. +200. */
-    CHECK(view_disp.skip == -12 && view_disp.skip + 4 * view_disp.words <= view_lod.skip && view_lod.skip + 4 * view_lod.words <= 32, "the first two stubs sit before the FOV stub");
+    /* Render distance (-12 .. +24, 9 words) before the FOV stub (+32), the model detail distance in the VR camera veneer's room
+       (+128 .. +200), the depth of field after the sensor caves (+200 .. +884, game_patches_botw.c). */
+    CHECK(view_disp.skip == -12 && view_disp.skip + 4 * view_disp.words <= 32, "the render distance stub sits before the FOV stub");
+    CHECK(view_lod.skip == 128 && view_lod.skip + 4 * view_lod.words <= 200, "the model detail distance stub sits in the VR camera veneer's room");
     CHECK(view_dof.skip == 200 + 684 && view_dof.skip + 4 * view_dof.words <= 0x390, "the depth of field after the caves, inside the padding of the real layout");
     CHECK(VIEW_LOD_SLOT >= 0x60u && VIEW_DISP_SLOT == VIEW_LOD_SLOT + 4 && VIEW_DOF_SLOT == VIEW_DISP_SLOT + 4, "slots past the FOV's +0x48 / +0x4c");
     for (unsigned p = 0; p < 3; p++) {
@@ -163,7 +177,7 @@ static void words(void) {
     uint32_t w[VIEW_MAX_WORDS];
     /* As the system assembler gives them (clang -c, otool -t). */
     CHECK(view_lod.build(w, BASE, LOD_AT, DATA) && w[1] == 0xbd406163u && w[2] == 0x1f030821u, "ldr s3, [x11, #0x60]; fmadd s1, s1, s3, s2");
-    CHECK(view_disp.build(w, BASE, DISP_AT, DATA) && w[0] == 0x1e210800u && w[2] == 0xbd406501u && w[3] == 0x1e210800u, "fmul; ldr s1, [x8, #0x64]; fmul");
+    CHECK(view_disp.build(w, BASE, DISP_AT, DATA) && w[0] == 0x1e210800u && w[2] == 0xf94007e9u && w[3] == 0xf940390au && w[5] == 0x54000060u && w[6] == 0xbd406501u && w[7] == 0x1e210800u, "fmul; the saved return address against +0x70; ldr s1, [x8, #0x64]; fmul");
     CHECK(view_dof.build(w, BASE, DOF_AT, DATA) && w[1] == 0xb940694au && w[2] == 0x3500006au && w[3] == 0x34000049u, "ldr w10, [x10, #0x68]; cbnz; cbz");
     CHECK(view_lod.guard[4].original == 0x1e222821u && view_dof.guard[2].original == 0x34000269u, "the games' fadd s1, s1, s2 and cbz w9");
     CHECK(fov_branch(view_lod.site, LOD_AT) != 0 && fov_branch(view_disp.site, DISP_AT) != 0 && fov_branch(view_dof.site, DOF_AT) != 0, "the branches build");
@@ -227,6 +241,7 @@ static void patching(void) {
     view_disp.build(w, BASE, DISP_AT, DATA);
     CHECK(word_at(m, view_disp.site) == fov_branch(view_disp.site, DISP_AT) && !memcmp(m + DISP_AT, w, 4 * view_disp.words), "disp: the branch and the stub");
     CHECK(word_at(m, DATA + VIEW_DISP_SLOT) == bits_of(1.0f), "disp: K = 1");
+    {   uint64_t keep; memcpy(&keep, m + DATA + VIEW_DISP_KEEP_SLOT, 8); CHECK(keep == BASE + VIEW_DISP_KEEP_RET, "disp: the kept caller's return address on the page"); }
     const float d[] = {100.0f, 0.0f, 37.5f, 1234.567f, 1e-30f, 3e38f, INFINITY, 0.3f}, mul[] = {1.0f, 2.0f, 0.5f, 3.3f, 0.0f};
     for (unsigned i = 0; i < sizeof d / sizeof *d; i++)
         for (unsigned j = 0; j < sizeof mul / sizeof *mul; j++) {
@@ -239,6 +254,8 @@ static void patching(void) {
         set_word(m, VIEW_DISP_SLOT, slot_bits(kd[i], 0));
         volatile float dm = 100.0f * 1.5f; volatile float want = dm * (float)kd[i];
         CHECK(bits_of(disp_through(m, 100.0f, 1.5f)) == bits_of(want), "K = %g: d x m x K", kd[i]);
+        CHECK(bits_of(disp_from(m, 100.0f, 1.5f, BASE + VIEW_DISP_KEEP_RET)) == bits_of(dm), "K = %g: the placement check's call keeps d x m", kd[i]);
+        CHECK(bits_of(disp_from(m, 100.0f, 1.5f, BASE + VIEW_DISP_KEEP_RET + 4)) == bits_of(want), "K = %g: a return address 4 bytes off is scaled", kd[i]);
     }
     {   /* Above the 1.5 cap: refused, the slot's word as it was. */
         uint32_t b = 0x12345678u; const double over[] = {2, 3, 10};
@@ -258,7 +275,7 @@ static void patching(void) {
     set_word(m, VIEW_DOF_SLOT, 0);
     CHECK(dof_through(m, 1) == 1, "back on");
     /* The whole: three branches, three stubs, three slots, nothing else. */
-    CHECK(bytes_changed(m, shipped) <= 3 * 4 + 4 * (view_lod.words + view_disp.words + view_dof.words) + 3 * 4, "nothing else written (%u bytes)", bytes_changed(m, shipped));
+    CHECK(bytes_changed(m, shipped) <= 3 * 4 + 4 * (view_lod.words + view_disp.words + view_dof.words) + 3 * 4 + 8, "nothing else written (%u bytes)", bytes_changed(m, shipped));
     /* A second pass refuses at the site (it is a branch now) and writes nothing. */
     uint8_t *again = copy_of(m);
     found = 0;
@@ -307,12 +324,13 @@ static void refusing(void) {
    padding, in either order. */
 static void with_the_others(void) {
     uint8_t *a = fake_main(), *b = fake_main();
-    uint8_t others[24 + 24 + 72 + 684]; for (unsigned i = 0; i < sizeof others; i++) others[i] = (uint8_t)(0xa0 + i);
+    uint8_t others[24 + 24 + 72 + 684];   /* blend +80, arrow +104, then +128 .. +200 left empty for the model detail distance (the VR camera veneer's room), caves +200 */ for (unsigned i = 0; i < sizeof others; i++) others[i] = (uint8_t)(0xa0 + i);
     CHECK(fov_apply(a, BASE, TEXT_END, DATA, IMAGE, 1.2, NULL) == 0, "the FOV first");
+    memset(others + 48, 0, 72);
     memcpy(a + ALIGNED + 80, others, sizeof others); memcpy(b + ALIGNED + 80, others, sizeof others);
     uint8_t *fov_only = copy_of(a);
     CHECK(view_lod_apply(a, BASE, TEXT_END, DATA, IMAGE, 2.0, NULL) == 0 && view_disp_apply(a, BASE, TEXT_END, DATA, IMAGE, 1.5, NULL) == 0 && view_dof_apply(a, BASE, TEXT_END, DATA, IMAGE, 1, NULL) == 0, "the three after the FOV and the others");
-    CHECK(!memcmp(a + ALIGNED + 32, fov_only + ALIGNED + 32, 884 - 32) && !memcmp(a + DATA, fov_only + DATA, 0x50), "their bytes and slots untouched");
+    CHECK(!memcmp(a + ALIGNED + 32, fov_only + ALIGNED + 32, 128 - 32) && !memcmp(a + ALIGNED + 144, fov_only + ALIGNED + 144, 884 - 144) && !memcmp(a + DATA, fov_only + DATA, 0x50), "their bytes and slots untouched");
     CHECK(view_lod_apply(b, BASE, TEXT_END, DATA, IMAGE, 2.0, NULL) == 0 && view_disp_apply(b, BASE, TEXT_END, DATA, IMAGE, 1.5, NULL) == 0 && view_dof_apply(b, BASE, TEXT_END, DATA, IMAGE, 1, NULL) == 0, "the three first");
     CHECK(fov_apply(b, BASE, TEXT_END, DATA, IMAGE, 1.2, NULL) == 0, "the FOV after them");
     CHECK(!memcmp(a, b, IMAGE), "the same main either way");
