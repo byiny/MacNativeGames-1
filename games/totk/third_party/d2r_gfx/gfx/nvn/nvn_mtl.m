@@ -2019,7 +2019,7 @@ static void usnap_collect(usnap_rngs *v, const uint8_t *p, int depth) {
         if (h.op == OP_END) return;
         if (h.op == OP_JUMP) { memcpy(&p, p + 8, 8); continue; }
         if (h.op == OP_CALL) { uint64_t t; memcpy(&t, p + 8, 8); if (depth < 16) usnap_collect(v, (const uint8_t *)(uintptr_t)t, depth + 1); }
-        else if (h.op == OP_BIND_UBO) {
+        else if (h.op == OP_BIND_UBO || BOTW_SSBO_SNAP_OP(h.op)) {   // BOTW (local 0020): read-only storage buffers too
             const p_bind_buf *b = (const p_bind_buf *)(p + 8);
             if (b->addr && b->size && b->size <= 65536) {
                 if (v->n == v->cap) { v->cap = v->cap ? v->cap * 2 : 4096; v->r = realloc(v->r, v->cap * sizeof *v->r); if (!v->r) MDIE("uniform copy ranges"); }
@@ -13646,7 +13646,7 @@ static int encode_args(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, in
             if (b->kind == NVN_RB_SBUFP && b->rw && u && u->addr) usnap_drop(u->addr, u->size ? u->size : 1);   // TOTK: the shader may write it: no stale uniform copy from here on
             uint64_t sgpu = !ren && b->kind == NVN_RB_SBUFP && !b->rw && u && u->addr && u->size && sbuf_snap_on() ? sbuf_snap_get(u) : 0;   // OOT: a small read-only storage buffer as of the encode: the GPU reads no live memory, so no read-fence mark either
             if (b->kind == NVN_RB_SBUFP && u && u->addr && !sgpu) gpu_read_input(u->addr, u->size, sh ? sh->key : NULL, b->rw ? 'w' : 's');   // OOT_RACE_CHECK / OOT_GPU_READ_FENCE (GPU writes do not fault and are not counted)
-            const usnap_t *usc = !ren && b->kind == NVN_RB_UBOP && u && u->addr && !usnap_skipped(u->size, 1) ? usnap_find(u->addr, u->size ? u->size : 1) : NULL;   // TOTK: compute uniforms as of the submit call
+            const usnap_t *usc = !ren && (b->kind == NVN_RB_UBOP || BOTW_SSBO_SNAP_RO(b)) && u && u->addr && !usnap_skipped(u->size, 1) ? usnap_find(u->addr, u->size ? u->size : 1) : NULL;   // TOTK: compute uniforms as of the submit call (BOTW: read-only storage buffers too)
             if (ren) { slots[aid] = ren; USE(dummy_buf(), MTLResourceUsageRead); }
             else if (usc) { slots[aid] = usc->gpu + (u->addr - usc->lo); USE(dummy_buf(), MTLResourceUsageRead); }
             else if (sgpu) { slots[aid] = sgpu; USE(dummy_buf(), MTLResourceUsageRead); }
@@ -24351,6 +24351,7 @@ void *botw_render_alias(const tex_t *t, const void *ownp) {
     return (__bridge void *)mt;   /* not retained, as tex_mtl_p: the write-back record holds it until the write-back lands (bra_drop_locked) */
 }
 _Thread_local int botw_bra_attach;
+int botw_ssbo_snap_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("TOTK_BOTW_SSBO_SNAPSHOT"); v = !(e && !strcmp(e, "0")); if (!v) MLOG("TOTK_BOTW_SSBO_SNAPSHOT=0: read-only storage buffers read live memory"); } return v; }   /* see BOTW_SSBO_SNAP_OP (nvn_obj.h) */
 void botw_render_gone(const void *mem, const void *obj) {
     uint64_t k = (uint64_t)(uintptr_t)mem;
     pthread_mutex_lock(&g_bwb_mu); bra_ent *r = g_bra.n ? nvn_hm_get(&g_bra, &k) : NULL; if (r && obj && r->obj == obj) bra_drop_locked(k); pthread_mutex_unlock(&g_bwb_mu);
