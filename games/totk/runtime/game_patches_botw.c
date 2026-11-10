@@ -1291,6 +1291,103 @@ static void patch_sensor_shrines(Module *m) {
 enum { HD_MEMORY_HEAP_MIB = 7680, HD_ROOT_HEAP_MIB = 7168, SHIPPED_MEMORY_HEAP_MIB = 3120, HD_GPU_BUDGET_MB = 7000 };
 int runtime_botw_hd_heaps(void) { const char *e = getenv("TOTK_BOTW_HD_HEAPS"); return e && !strcmp(e, "1") && !ios_code(); }
 #endif
+#ifdef GAME_BOTW190
+/* Two faults that Savage Wind Recomp (a static recompilation of the same 1.9.0 code) found and fixed; local patch 0025,
+   own code after their mechanism. Main has no free run of more than 3 words, so the stubs sit in 3-word udf pads: each
+   pad follows a ret / b / br and ends at a 16-byte function start (eh_frame_hdr), and no 1.9.0 pchtxt mod uses them.
+   Each fix checks every word it replaces or fills before it writes any; a word that is not as shipped (a mod or another
+   patch took it) leaves that fix off with one line, and the game runs as shipped there.
+   - Keyframed bodies' turn (SWR #209; TOTK_BOTW_KF_ANGLE=0: as shipped). The platforms, lifts, gates and Divine Beast
+     parts the game moves get, each physics step, the angular velocity of the turn left to their target
+     (main+0x12d5598). Its angle comes from hkQuaternion::getAngle (main+0xb06d4), 2 acos(|w|): below about 0.45 mrad
+     w rounds to 1 in a float and the turn reads as none, then jumps to 0.69 mrad. A 0.05 rad/s tilt reads 17% short at
+     60 fps and not at all at 120 fps, so the body stands still and then catches up, and Link hops on it. The call at
+     main+0x12d57fc now goes to a stub that returns the same angle without the rounding: 2 atan2(|xyz|, |w|), written
+     with the double-angle form atan2(2 |w| |xyz|, w^2 - |xyz|^2) so that it can end in a tail call of the game's
+     atan2f (PLT main+0x159ff10). Range [0, pi] as getAngle; q and -q give the same angle.
+   - An actor whose link is gone (SWR #393: SIGSEGV at 0x88 with Magnesis or the camera on a removed actor; TOTK_BOTW_STALE_ACTOR=0:
+     as shipped). The helper main+0x120bc40 (254 callers) reads actor+0x570, then +0x88, then asks main+0x14c1850; a
+     null +0x570 now answers 0, as a null actor does (in place, with the helper's own pad). Its inline copy at
+     main+0xdea400 (the camera target, function main+0xdea2f8) leaves by the function's "no target" epilogue
+     main+0xdea3b8 instead. A freed actor pointer (SWR #391) is not checked. */
+static uint32_t bl_to(uint64_t site, uint64_t target) { return 0x80000000u | branch_to(site, target); }
+static uint32_t cbz_x_to(uint64_t site, uint64_t target, unsigned rt) {   /* cbz x<rt>, <target> */
+    int64_t delta = (int64_t)target - (int64_t)site;
+    if ((delta & 3) || delta < -(1 << 20) || delta >= (1 << 20)) runtime_fail("patch cbz outside range");
+    return 0xb4000000u | (((uint32_t)(delta >> 2) & 0x7ffffu) << 5) | (rt & 31u);
+}
+typedef struct { uint32_t off, word; } SwrWord;
+static int swr_apply(Module *m, const SwrWord *orig, size_t no, const SwrWord *put, size_t np, const char *what) {
+    for (size_t i = 0; !CODE_PATCHED_AT_BUILD && i < no; i++) {
+        uint32_t w; memcpy(&w, m->base + orig[i].off, 4);
+        if (w != orig[i].word) {
+            fprintf(stderr, "[botw] %s: main+%#x is %08x, not the shipped %08x (a mod or another patch uses it): off\n", what, orig[i].off, w, orig[i].word);
+            return 0;
+        }
+    }
+    for (size_t i = 0; i < np; i++) put_word(m, put[i].off, put[i].word, what);
+    return 1;
+}
+static int swr_off(const char *name) { const char *e = getenv(name); return !ios_code() && e && !strcmp(e, "0"); }
+enum { KF_SITE = 0x12d57fc, KF_GETANGLE = 0xb06d4, KF_ATAN2F = 0x159ff10, KF_PADS = 5 };
+static const uint32_t g_kf_pad[KF_PADS] = {0x120aed4, 0x120b964, 0x120b9b4, 0x120bac4, 0x120baf4};
+static void patch_kf_angle(Module *m) {
+    if (swr_off("TOTK_BOTW_KF_ANGLE")) { fprintf(stderr, "[botw] keyframed bodies' turn angle as shipped (TOTK_BOTW_KF_ANGLE=0)\n"); return; }
+    static const uint32_t body[2 * KF_PADS] = {   /* q at [x0]; returns s0 */
+        0x3dc00001u, 0x6e21dc22u,   /* ldr q1, [x0] / fmul v2.4s, v1.4s, v1.4s (the squares) */
+        0x5e1c0443u, 0x4e1c1fe2u,   /* mov s3, v2.s[3] (w^2) / mov v2.s[3], wzr */
+        0x6e22d442u, 0x7e30d842u,   /* faddp v2.4s, v2.4s, v2.4s / faddp s2, v2.2s (S = x^2 + y^2 + z^2) */
+        0x1e223861u, 0x1e220863u,   /* fsub s1, s3, s2 (w^2 - S) / fmul s3, s3, s2 */
+        0x1e21c060u, 0x1e202800u,   /* fsqrt s0, s3 (|w| |xyz|) / fadd s0, s0, s0; then b atan2f */
+    };
+    static const SwrWord orig[] = {   /* the call (bl main+0xb06d4) and the five empty pads; literal rows, so that
+                                         scripts/patch_sites.py reserves them for the build's --mod */
+        {0x12d57fcu, 0x97b76bb6u},
+        {0x120aed4u, 0}, {0x120aed8u, 0}, {0x120aedcu, 0}, {0x120b964u, 0}, {0x120b968u, 0}, {0x120b96cu, 0},
+        {0x120b9b4u, 0}, {0x120b9b8u, 0}, {0x120b9bcu, 0}, {0x120bac4u, 0}, {0x120bac8u, 0}, {0x120baccu, 0},
+        {0x120baf4u, 0}, {0x120baf8u, 0}, {0x120bafcu, 0},
+    };
+    if (bl_to(KF_SITE, KF_GETANGLE) != orig[0].word) runtime_fail("keyframed bodies' turn angle: call word");
+    SwrWord put[1 + 3 * KF_PADS]; size_t np = 0;
+    for (unsigned p = 0; p < KF_PADS; p++) {
+        const uint32_t pad = g_kf_pad[p];
+        if (orig[1 + 3 * p].off != pad) runtime_fail("keyframed bodies' turn angle: pad table");
+        put[np++] = (SwrWord){pad, body[2 * p]};
+        put[np++] = (SwrWord){pad + 4, body[2 * p + 1]};
+        put[np++] = (SwrWord){pad + 8, branch_to(pad + 8, p + 1 < KF_PADS ? g_kf_pad[p + 1] : KF_ATAN2F)};
+    }
+    put[np++] = (SwrWord){KF_SITE, bl_to(KF_SITE, g_kf_pad[0])};
+    if (swr_apply(m, orig, sizeof orig / sizeof *orig, put, np, "keyframed bodies' turn angle"))
+        fprintf(stderr, "[botw] keyframed bodies' turn angle: 2 atan2(|xyz|, |w|) at main+%#x, stub in %d pads from main+%#x (TOTK_BOTW_KF_ANGLE=0: as shipped)\n",
+                KF_SITE, KF_PADS, g_kf_pad[0]);
+}
+enum { SA_HELPER = 0x120bc40, SA_ASK = 0x14c1850, SA_INLINE = 0xdea400, SA_PAD = 0xdea014, SA_EXIT = 0xdea3b8 };
+static void patch_stale_actor(Module *m) {
+    if (swr_off("TOTK_BOTW_STALE_ACTOR")) { fprintf(stderr, "[botw] actor link reads as shipped (TOTK_BOTW_STALE_ACTOR=0)\n"); return; }
+    const uint32_t h = SA_HELPER;
+    static const SwrWord horig[] = {   /* cbz x0, ret / ldr x8, [x0, #0x570] / ldr x0, [x8, #0x88] / b main+0x14c1850 / ret / pad */
+        {0x120bc40u, 0xb4000080u}, {0x120bc44u, 0xf942b808u}, {0x120bc48u, 0xf9404500u}, {0x120bc4cu, 0x140ad701u},
+        {0x120bc50u, 0xd65f03c0u}, {0x120bc54u, 0}, {0x120bc58u, 0},
+    };
+    if (horig[0].word != cbz_x_to(h, h + 0x10, 0) || horig[3].word != branch_to(h + 0xc, SA_ASK)) runtime_fail("actor link helper: words");
+    const SwrWord hput[] = {   /* cbz x0, ret / ldr x8, [x0, #0x570] / cbz x8, none / ldr x0, [x8, #0x88] / b ask / none: mov x0, xzr / ret */
+        {h, cbz_x_to(h, h + 0x18, 0)}, {h + 0x8, cbz_x_to(h + 0x8, h + 0x14, 8)}, {h + 0xc, 0xf9404500u},
+        {h + 0x10, branch_to(h + 0x10, SA_ASK)}, {h + 0x14, 0xaa1f03e0u}, {h + 0x18, 0xd65f03c0u},
+    };
+    static const SwrWord iorig[] = {   /* the epilogue's first word, the two loads, the empty pad */
+        {0xdea3b8u, 0x6d43a3e9u}, {0xdea400u, 0xf942ba68u}, {0xdea404u, 0xf9404500u}, {0xdea014u, 0}, {0xdea018u, 0}, {0xdea01cu, 0},
+    };
+    const SwrWord iput[] = {   /* the pad: ldr x8, [x19, #0x570] / cbz x8, no target / b back to the +0x88 load */
+        {SA_PAD, 0xf942ba68u}, {SA_PAD + 4, cbz_x_to(SA_PAD + 4, SA_EXIT, 8)}, {SA_PAD + 8, branch_to(SA_PAD + 8, SA_INLINE + 4)},
+        {SA_INLINE, branch_to(SA_INLINE, SA_PAD)},
+    };
+    const int a = swr_apply(m, horig, sizeof horig / sizeof *horig, hput, sizeof hput / sizeof *hput, "actor link helper");
+    const int b = swr_apply(m, iorig, sizeof iorig / sizeof *iorig, iput, sizeof iput / sizeof *iput, "camera target actor link");
+    if (a || b)
+        fprintf(stderr, "[botw] an actor whose link (+0x570) is gone reads as none:%s%s (TOTK_BOTW_STALE_ACTOR=0: as shipped)\n",
+                a ? " helper main+0x120bc40" : "", b ? " camera target main+0xdea400" : "");
+}
+#endif
 /* The phone's render size (user 2026-10-23: "内部960×540，输出 用默认 放大机制"): the iPhone / iPad runs the handheld
    mode, whose branch of the 1.6.0 display-mode routine (jump table at main+0x26164f8: mode 1 -> main+0x18216c8) stores
    the screen width 1280.0 and the render width 1280.0 as one pair:
@@ -1503,6 +1600,8 @@ void runtime_game_patches(Module *m) {
 #ifdef GAME_BOTW190
     patch_cook_count(m);   /* after the pchtxt mods, whose word it rewrites */
     patch_sensor_shrines(m);   /* after the pchtxt mods: it checks the words they must not change */
+    patch_kf_angle(m);         /* local 0025: after the pchtxt mods, whose pads it must find empty */
+    patch_stale_actor(m);
 #endif
     if (!patch_output_res(m)) patch_render_1080(m);
     patch_phone_render(m);
