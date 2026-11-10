@@ -266,6 +266,67 @@ static int folder_exists(const char *folder) {
 }
 /* The overlay slot + 1 that replaces RomFS file i, or 0. */
 static uint32_t overlay_slot(uint64_t i) {size_t lo=0,hi=noverlay;while(lo<hi){size_t m=lo+(hi-lo)/2;if(overlays[m].index<i)lo=m+1;else hi=m;}return lo<noverlay&&overlays[lo].index==i?(uint32_t)(lo+1):0;}
+#ifdef GAME_BOTW190
+#include "botw_rstb.h"
+#include <dirent.h>
+#include <signal.h>
+/* Model archives get TOTK_BOTW_RSTB_SBFRES_KB KiB more in the resource size table (default 64, 0 = as the table says; local
+   patch 0025, after Savage Wind Recomp #524): a model whose loaded size passes its entry fails to load, and the actor
+   stands without it. The table the game would read (the last overlay of it, the player's HD-pack table or the button
+   icons' copy of it, else the image's) is decoded, every Model/....sbfres entry grows, and the result, stored as Yaz0, is
+   served from <user temp dir>/mng-botw-rstb-<pid>.srsizetable in place of it (deleted at exit; a start deletes the tables
+   of games that are gone, which a crash or a kill leaves). A table it cannot read
+   stays as it was, with one line. */
+static char rstb_tmp[1100];
+static void rstb_tmp_delete(void) {if(*rstb_tmp)unlink(rstb_tmp);}
+static void botw_rstb_margin(void) {
+ const char *e=getenv("TOTK_BOTW_RSTB_SBFRES_KB");char *end=NULL;unsigned long kb=e&&*e?strtoul(e,&end,10):64;
+ if(e&&*e&&(*end||kb>65536)){fprintf(stderr,"[botw] model size-table margin: TOTK_BOTW_RSTB_SBFRES_KB=%s is not a KiB count up to 65536: off\n",e);return;}
+ if(!kb){fprintf(stderr,"[botw] model size-table margin off (TOTK_BOTW_RSTB_SBFRES_KB=0)\n");return;}
+ uint64_t i=lower(BOTW_RSTB_PATH);if(!(i<file_count&&!strcmp(entry_name(entry(i)),BOTW_RSTB_PATH))){fprintf(stderr,"[botw] model size-table margin: no %s: off\n",BOTW_RSTB_PATH);return;}
+ size_t slot=SIZE_MAX;for(size_t k=0;k<noverlay;k++)if(overlays[k].index==i)slot=k;   /* overlay_init stops on two */
+ int fd=slot==SIZE_MAX?image_fd:open(overlays[slot].path,O_RDONLY|O_CLOEXEC);uint64_t base=0,size=0;
+ if(slot==SIZE_MAX){Entry en=entry(i);base=en.offset;size=en.size;}else size=overlays[slot].size;
+ uint8_t *src=fd>=0&&size>=16&&size<(64u<<20)?malloc((size_t)size):NULL;uint64_t done=0;
+ while(src&&done<size){ssize_t r=src_pread(fd,src+done,(size_t)(size-done),(off_t)(base+done));if(r<=0){free(src);src=NULL;break;}done+=(uint64_t)r;}
+ if(slot!=SIZE_MAX&&fd>=0)close(fd);
+ char from[4200];snprintf(from,sizeof(from),"%s",slot==SIZE_MAX?"the image":overlays[slot].path);   /* a copy: the slot's path is freed below */
+ size_t n=0;uint8_t *t=src?botw_rstb_yaz0_decode(src,(size_t)size,&n):NULL;
+ char *flat=NULL;const char **names=NULL;size_t count=0,cap=0,used=0;BotwRstbGrow g={0};int ok=0;
+ /* the RomFS's models, then the ones a mod adds (numbered after this, in added_init) */
+ uint64_t j=lower("Model/");size_t k_add=0;
+ while(t&&count!=SIZE_MAX){const char *p=NULL;
+  if(j<file_count&&!strncmp(entry_name(entry(j)),"Model/",6))p=entry_name(entry(j++));
+  else{while(k_add<noverlay&&overlays[k_add].index!=ADDED)k_add++;if(k_add==noverlay)break;p=overlays[k_add++].name;}
+  size_t need_n=strlen(p)+1;char *grown;
+  if(used+need_n>cap){cap=cap?cap*2:1<<20;while(cap<used+need_n)cap*=2;grown=realloc(flat,cap);if(!grown){count=SIZE_MAX;break;}flat=grown;}
+  if(botw_rstb_model_name(p,flat+used,cap-used)){count++;used+=strlen(flat+used)+1;}}
+ if(t&&count!=SIZE_MAX&&(names=malloc((count?count:1)*sizeof(*names)))){const char *s=flat;for(size_t k=0;k<count;k++){names[k]=s;s+=strlen(s)+1;}
+  ok=botw_rstb_grow(t,n,names,count,(uint32_t)(kb*1024),&g);}
+ size_t on=0;uint8_t *out=ok?botw_rstb_yaz0_store(src,t,n,&on):NULL;free(names);free(flat);free(t);free(src);
+ if(!out){fprintf(stderr,"[botw] model size-table margin: %s from %s is not a resource size table this code reads (or out of memory): the table as it is\n",BOTW_RSTB_PATH,from);return;}
+ char dir[1024]="";if(!confstr(_CS_DARWIN_USER_TEMP_DIR,dir,sizeof(dir))||!*dir){const char *tmp=getenv("TMPDIR");snprintf(dir,sizeof(dir),"%s",tmp&&*tmp?tmp:"/tmp");}
+ snprintf(rstb_tmp,sizeof(rstb_tmp),"%s%smng-botw-rstb-%ld.srsizetable",dir,dir[strlen(dir)-1]=='/'?"":"/",(long)getpid());unlink(rstb_tmp);
+ /* a game that was stopped by a signal or crashed left its table: remove the ones whose game is gone */
+ DIR *dd=opendir(dir);struct dirent *de;
+ while(dd&&(de=readdir(dd))){long pid=0;char tail[32]="";char old[1100];
+  if(sscanf(de->d_name,"mng-botw-rstb-%ld%31s",&pid,tail)!=2||strcmp(tail,".srsizetable")||pid<=0||pid==(long)getpid())continue;
+  if(kill((pid_t)pid,0)==0||errno!=ESRCH)continue;
+  if(snprintf(old,sizeof(old),"%s%s%s",dir,dir[strlen(dir)-1]=='/'?"":"/",de->d_name)<(int)sizeof(old))unlink(old);}
+ if(dd)closedir(dd);
+ int w=open(rstb_tmp,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);struct stat st;size_t wrote=0;
+ while(w>=0&&wrote<on){ssize_t r=write(w,out+wrote,on-wrote);if(r<=0)break;wrote+=(size_t)r;}
+ int good=w>=0&&wrote==on&&fstat(w,&st)==0;if(w>=0)close(w);
+ if(!good){fprintf(stderr,"[botw] model size-table margin: cannot write %s: the table as it is\n",rstb_tmp);unlink(rstb_tmp);*rstb_tmp=0;free(out);return;}
+ atexit(rstb_tmp_delete);
+ uint8_t d[32];CC_SHA256(out,(CC_LONG)on,d);free(out);
+ Overlay o={i,on,strdup(rstb_tmp),st.st_dev,st.st_ino,st.st_mtimespec,strdup(BOTW_RSTB_PATH),{0}};need(o.path&&o.name,"RomFS overlay path copy");
+ for(unsigned k=0;k<32;k++)snprintf(o.sha+k*2,3,"%02x",d[k]);
+ if(slot!=SIZE_MAX){free(overlays[slot].path);free(overlays[slot].name);overlays[slot]=o;}
+ else{if(noverlay==overlay_cap){overlay_cap=overlay_cap?overlay_cap*2:16;overlays=realloc(overlays,overlay_cap*sizeof(*overlays));need(overlays!=NULL,"RomFS overlay table");}overlays[noverlay++]=o;}
+ fprintf(stderr,"[botw] model size-table margin: %zu Model/*.sbfres entries +%lu KiB (%zu not in the table) from %s, served from %s (TOTK_BOTW_RSTB_SBFRES_KB=0: as the table says)\n",g.grown,kb,g.missed,from,rstb_tmp);
+}
+#endif
 /* TOTK_ROMFS_PATCHES (default extracted/<version>/romfs-patches; 0 = none); with a true-2K output bigger than 1920x1080
    also <TOTK_ROMFS_PATCHES_OUT, default extracted/<version>/romfs-patches-out>/<w>x<h> (the HeapDef sizes,
    scripts/make_output_res_overlay.py); then the player's mods in TOTK_ROMFS_MODS (0 = none). */
@@ -299,6 +360,9 @@ static void overlay_init(void) {
  if(icons&&*icons){const char *taken=overlay_taken(icons,mods_first);
   if(taken){fprintf(stderr,"[totk] RomFS overlay: button icons %s left out: the player's mods replace %s\n",icons,taken);setenv("TOTK_BUTTON_ICONS","mod",1);}
   else overlay_load(icons,0,1);}
+#ifdef GAME_BOTW190
+ botw_rstb_margin();   /* after every overlay that can replace the table */
+#endif
  added_init();
  if(noverlay)qsort(overlays,noverlay,sizeof(*overlays),overlay_order);
  for(size_t k=1;k<noverlay;k++)if(overlays[k].index==overlays[k-1].index){
