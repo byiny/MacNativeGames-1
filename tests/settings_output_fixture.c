@@ -8,6 +8,9 @@
 #endif
 #include <assert.h>
 
+#ifdef GAME_BOTW160
+int vr_labo_enabled(void) { return 0; }   /* the probe links no zeldaVR; 1.6.0's output_parse asks it first (VR labo off) */
+#endif
 #ifndef GAME_BOTW190
 static _Atomic uint64_t page[8];
 #endif
