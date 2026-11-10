@@ -4335,7 +4335,12 @@ static void wb_write_list_body(wb_ent **list, int nl, int force) {
         uint32_t upf; int ubpp;
         if (fresh[i] == 2 || !mt) { wb_ent_free(e); continue; }   // !mt: copy evicted (pkg_evict_sweep) before the GPU rendered into it
         TILELOG(t, "write-back request: %s", !fresh[i] ? "CPU wrote since the render, skip" : "write back");
-        if (tilelog_match(t) && !fresh[i]) {   // who wrote it
+#ifdef GAME_BOTW   /* local diagnostic (2026-11-09, sinking legs in snow and sand): the first 24 skips and every 20th after them name the texture, its writers and its changed bytes */
+        int wbs = !fresh[i] && (g_wb_skip_cpu < 24 || (g_wb_skip_cpu + 1) % 20 == 0);
+#else
+        int wbs = 0;
+#endif
+        if ((tilelog_match(t) || wbs) && !fresh[i]) {   // who wrote it
             extern int runtime_module_offset(uint64_t pc, const char **name, uint64_t *off);
             nvn_dirty_rec rec[64]; int nr = nvn_dirty_recent((uintptr_t)t->mem & ~(uintptr_t)16383, (uintptr_t)t->mem + t->L.size, rec, 64);
             char line[900]; size_t o2 = 0; int shown = 0; uint64_t seen[8]; int ns = 0;
@@ -4347,11 +4352,14 @@ static void wb_write_list_body(wb_ent **list, int nl, int force) {
                                okl ? ln : "-", (unsigned long long)(okl ? lo2 : 0), (unsigned long long)(rec[q].page - (uintptr_t)t->mem)); shown++;
             }
             TILELOG(t, "writers since the render (%d records):%s", nr, line);
+            if (wbs) MLOG("[wbskip] skip %llu f%llu ser=%llu mem=%p %ux%u nvnfmt=%#x lv%u size %#llx, writers since the render (%d records):%s", (unsigned long long)g_wb_skip_cpu + 1, (unsigned long long)atomic_load(&g_cur_frame),
+                          (unsigned long long)t->serial, (void *)t->mem, t->d.width, t->d.height, t->d.format, t->d.levels, (unsigned long long)t->L.size, nr, nr ? line : " none");
         }
-        if (!fresh[i] && tilelog_match(t) && e->snap && e->snap_n == t->L.size) {   // which of its own bytes the CPU changed
+        if (!fresh[i] && (tilelog_match(t) || wbs) && e->snap && e->snap_n == t->L.size) {   // which of its own bytes the CPU changed
             const uint8_t *a = e->snap, *b = t->mem; size_t nd = 0, lo = 0, hi = 0, nz = 0;
             for (size_t q = 0; q < e->snap_n; q++) if (a[q] != b[q]) { if (!nd++) lo = q; hi = q; nz += b[q] != 0; }
             TILELOG(t, "own bytes changed since the render: %zu (offsets %#zx..%#zx, %zu now non-zero)", nd, lo, hi, nz);
+            if (wbs) MLOG("[wbskip] skip %llu own bytes changed since the render: %zu of %zu (offsets %#zx..%#zx, %zu now non-zero)", (unsigned long long)g_wb_skip_cpu + 1, nd, e->snap_n, lo, hi, nz);
         }
         if (!fresh[i]) {   // the CPU wrote it since: its bytes are newer
             if (++g_wb_skip_cpu <= 24) MLOG("[writeback] skipped (CPU wrote since the render) ser=%llu %ux%u nvnfmt=%#x lv%u", (unsigned long long)t->serial, t->d.width, t->d.height, t->d.format, t->d.levels);
