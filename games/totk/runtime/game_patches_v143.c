@@ -18,6 +18,7 @@
 #include "native_screen.h"   /* TOTK_OUTPUT_RES=screen: the main display's native size (shared with Breath of the Wild) */
 #include "prompt_cache_v143.h"
 #include "pchtxt.h"
+#include "suit_equip_v143.h"   /* local mod: suit auto-equip */
 _Static_assert(PAD_V143_ASPECT_LEN == 4 * ASPECT_STUB && PAD_V143_VERT_LEN == 2 * ASPECT_VSTUB, "1.4.3 padding: aspect stub sizes");
 #if !TARGET_OS_IPHONE
 #include <mach/mach.h>
@@ -1507,6 +1508,7 @@ void runtime_game_patches(Module *m) {
     if (strcmp(m->name, "main")) runtime_fail("1.4.3 game patches expect main");
     patch_pchtxt(m);   /* first: the patches below check the original words they replace */
     prompt_cache_install(m);
+    suit_equip_install(m);
     runtime_survey_init(m);
     patch_realtime(m);
     patch_output_res(m);
