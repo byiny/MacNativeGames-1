@@ -1416,6 +1416,13 @@ static int usnap_on(void) {
     if (v < 0) { const char *e = getenv("TOTK_UBO_SNAPSHOT"); v = !(e && !strcmp(e, "0")); atomic_store(&g_usnap_on, v); fprintf(stderr, "[dm] [nvn-mtl] uniform 内容按提交时刻快照：%s\n", v ? "开" : "关（读实时内存，旧行为）"); }
     return v;
 }
+#ifdef TOTK_GAME_V143
+/* 1.4.3 (local 0020, from Breath of the Wild's Game Over title fix): read-only storage buffers read the submit-time copy, as uniforms do. The game refills
+   its per-frame rings after the submit call returns, so a late GPU read of live memory can show another frame's data. A writable binding still drops the copy
+   (usnap_drop). TOTK_SSBO_SNAPSHOT=0 reads live memory as before; TOTK_SSBO_SNAPSHOT_COUNT=1 counts the bindings whose copy differs from memory at encode time. */
+static uint64_t g_ssnap_n, g_ssnap_changed;
+static int totk_ssbo_snap_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("TOTK_SSBO_SNAPSHOT"); v = !(e && !strcmp(e, "0")); MLOG("TOTK_SSBO_SNAPSHOT: read-only storage buffers read %s", v ? "the submit-time copy" : "live memory (the old behaviour)"); } return v; }
+#endif
 static int usnap_first(uint64_t a) {   // first region whose end is above a
     int lo = 0, hi = g_nusnap;
     while (lo < hi) { int m = (lo + hi) / 2; if (g_usnap[m].hi <= a) lo = m + 1; else hi = m; }
@@ -2026,6 +2033,15 @@ static void usnap_collect(usnap_rngs *v, const uint8_t *p, int depth) {
                 v->r[v->n++] = (usnap_rng){b->addr, b->addr + b->size};
             }
         }
+#ifdef TOTK_GAME_V143
+        else if (h.op == OP_BIND_SSBO && totk_ssbo_snap_on()) {   // 1.4.3 (local 0020): read-only storage buffers too (encode_args drops the copy of a writable one)
+            const p_bind_buf *b = (const p_bind_buf *)(p + 8);
+            if (b->addr && b->size && b->size <= 65536) {
+                if (v->n == v->cap) { v->cap = v->cap ? v->cap * 2 : 4096; v->r = realloc(v->r, v->cap * sizeof *v->r); if (!v->r) MDIE("uniform copy ranges"); }
+                v->r[v->n++] = (usnap_rng){b->addr, b->addr + b->size};
+            }
+        }
+#endif
         p += h.size;
     }
 }
@@ -13399,6 +13415,15 @@ static void bz_bind(id<MTLCommandEncoder> en) {
     }
     enc_r_args((id<MTL4RenderCommandEncoder>)en, MTLRenderStageFragment, gpu, BLEND_ZERO_BUFFER);
 }
+#ifdef TOTK_GAME_V143
+static void totk_ssbo_snap_count(const usnap_t *c, const p_bind_buf *u) {   // TOTK_SSBO_SNAPSHOT_COUNT=1: a read-only storage binding read from its copy, and whether memory differs from the copy now (a late refill, or a pending write the copy holds)
+    static int on = -1; if (on < 0) { const char *e = getenv("TOTK_SSBO_SNAPSHOT_COUNT"); on = e && !strcmp(e, "1"); }
+    if (!on || !c) return;
+    uint64_t n = u->size ? u->size : 1, seen = __atomic_add_fetch(&g_ssnap_n, 1, __ATOMIC_RELAXED); void *mb; uint64_t mo;
+    if (mtl_addr(u->addr, n, &mb, &mo) && memcmp(c->cpu + (u->addr - c->lo), (const uint8_t *)[(__bridge id<MTLBuffer>)mb contents] + mo, n)) __atomic_add_fetch(&g_ssnap_changed, 1, __ATOMIC_RELAXED);
+    if (seen % 20000 == 0) MLOG("[ssbo-snap] read-only storage bindings read from the submit-time copy %llu, copy differs from memory at encode time %llu", (unsigned long long)seen, (unsigned long long)__atomic_load_n(&g_ssnap_changed, __ATOMIC_RELAXED));
+}
+#endif
 static int encode_args(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, int metal_vertex) {
     bind_trace(sh, nvn_stage);
     if (nvn_stage == 1 && !metal_vertex && sh->has_bz) bz_bind(en);
@@ -13655,6 +13680,9 @@ static int encode_args(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, in
             uint64_t sgpu = !ren && b->kind == NVN_RB_SBUFP && !b->rw && u && u->addr && u->size && sbuf_snap_on() ? sbuf_snap_get(u) : 0;   // OOT: a small read-only storage buffer as of the encode: the GPU reads no live memory, so no read-fence mark either
             if (b->kind == NVN_RB_SBUFP && u && u->addr && !sgpu) gpu_read_input(u->addr, u->size, sh ? sh->key : NULL, b->rw ? 'w' : 's');   // OOT_RACE_CHECK / OOT_GPU_READ_FENCE (GPU writes do not fault and are not counted)
             const usnap_t *usc = !ren && (b->kind == NVN_RB_UBOP || BOTW_SSBO_SNAP_RO(b)) && u && u->addr && !usnap_skipped(u->size, 1) ? usnap_find(u->addr, u->size ? u->size : 1) : NULL;   // TOTK: compute uniforms as of the submit call (BOTW: read-only storage buffers too)
+#ifdef TOTK_GAME_V143
+            if (!ren && b->kind == NVN_RB_SBUFP && !b->rw && u && u->addr && totk_ssbo_snap_on()) { usc = usnap_find(u->addr, u->size ? u->size : 1); totk_ssbo_snap_count(usc, u); }   // 1.4.3 (local 0020): read-only storage buffers as of the submit call too
+#endif
             if (ren) { slots[aid] = ren; USE(dummy_buf(), MTLResourceUsageRead); }
             else if (usc) { slots[aid] = usc->gpu + (u->addr - usc->lo); USE(dummy_buf(), MTLResourceUsageRead); }
             else if (sgpu) { slots[aid] = sgpu; USE(dummy_buf(), MTLResourceUsageRead); }
