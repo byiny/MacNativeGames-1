@@ -284,14 +284,6 @@ void botw_wb_landed(const void *mem);
 uint64_t botw_wb_gen(void);
 int botw_wb_newer(const void *mem, uint64_t gen);
 #define BOTW_PKG_FIELDS uint64_t wb_gen;
-/* Game Over title (2026-11-06, local 0020): read-only storage buffers are read from the submission's snapshot, as
-   uniforms are (see usnap_take in nvn_mtl.m). The ui2d text draw takes its glyph instances from a storage buffer in a
-   CPU-written ring that the game refills for the next frame while this submission still runs; the Game Over title is
-   drawn into a capture texture in one frame only, so a late read kept "ME" plus other text's glyphs for the whole screen.
-   A writable binding still drops the copy (usnap_drop). TOTK_BOTW_SSBO_SNAPSHOT=0 reads live memory as before. */
-int botw_ssbo_snap_on(void);
-#define BOTW_SSBO_SNAP_OP(op) ((op) == OP_BIND_SSBO && botw_ssbo_snap_on())
-#define BOTW_SSBO_SNAP_RO(b) ((b)->kind == NVN_RB_SBUFP && !(b)->rw && botw_ssbo_snap_on())
 #define BOTW_WB_LANDED(t) botw_wb_landed((t)->mem);
 #define BOTW_PKG_WB_SEEN(pk) (pk)->wb_gen = botw_wb_gen();
 #define BOTW_PKG_WB_TAKE() uint64_t wbg_ = botw_wb_gen();
@@ -373,8 +365,6 @@ void botw_ashot_poll(const void *t, long cur);   /* OOT (2026-11-09): "ashot" / 
 #endif
 #define BOTW_REUP_TRACKED(pk, t)
 #define BOTW_PKG_FIELDS TOTK_PKG_UPB
-#define BOTW_SSBO_SNAP_OP(op) 0
-#define BOTW_SSBO_SNAP_RO(b) 0
 #define BOTW_WB_LANDED(t)
 #define BOTW_PKG_WB_SEEN(pk)
 #define BOTW_PKG_WB_TAKE()

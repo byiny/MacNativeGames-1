@@ -1317,13 +1317,11 @@ static uint32_t cbz_x_to(uint64_t site, uint64_t target, unsigned rt) {   /* cbz
     return 0xb4000000u | (((uint32_t)(delta >> 2) & 0x7ffffu) << 5) | (rt & 31u);
 }
 typedef struct { uint32_t off, word; } SwrWord;
-static int swr_apply(Module *m, const SwrWord *orig, size_t no, const SwrWord *put, size_t np, const char *what) {
-    for (size_t i = 0; !CODE_PATCHED_AT_BUILD && i < no; i++) {
-        uint32_t w; memcpy(&w, m->base + orig[i].off, 4);
-        if (w != orig[i].word) {
-            fprintf(stderr, "[botw] %s: main+%#x is %08x, not the shipped %08x (a mod or another patch uses it): off\n", what, orig[i].off, w, orig[i].word);
-            return 0;
-        }
+static int swr_apply(Module *m, const view_guard *orig, size_t no, const SwrWord *put, size_t np, const char *what) {
+    uint32_t w; const int bad = CODE_PATCHED_AT_BUILD ? 0 : verify_words(m->base, orig, (unsigned)no, &w);
+    if (bad) {
+        fprintf(stderr, "[botw] %s: main+%#x is %08x, not the shipped %08x (a mod or another patch uses it): off\n", what, orig[bad - 1].off, w, orig[bad - 1].original);
+        return 0;
     }
     for (size_t i = 0; i < np; i++) put_word(m, put[i].off, put[i].word, what);
     return 1;
@@ -1340,14 +1338,14 @@ static void patch_kf_angle(Module *m) {
         0x1e223861u, 0x1e220863u,   /* fsub s1, s3, s2 (w^2 - S) / fmul s3, s3, s2 */
         0x1e21c060u, 0x1e202800u,   /* fsqrt s0, s3 (|w| |xyz|) / fadd s0, s0, s0; then b atan2f */
     };
-    static const SwrWord orig[] = {   /* the call (bl main+0xb06d4) and the five empty pads; literal rows, so that
+    static const view_guard orig[] = {   /* the call (bl main+0xb06d4) and the five empty pads; literal rows, so that
                                          scripts/patch_sites.py reserves them for the build's --mod */
         {0x12d57fcu, 0x97b76bb6u},
         {0x120aed4u, 0}, {0x120aed8u, 0}, {0x120aedcu, 0}, {0x120b964u, 0}, {0x120b968u, 0}, {0x120b96cu, 0},
         {0x120b9b4u, 0}, {0x120b9b8u, 0}, {0x120b9bcu, 0}, {0x120bac4u, 0}, {0x120bac8u, 0}, {0x120baccu, 0},
         {0x120baf4u, 0}, {0x120baf8u, 0}, {0x120bafcu, 0},
     };
-    if (bl_to(KF_SITE, KF_GETANGLE) != orig[0].word) runtime_fail("keyframed bodies' turn angle: call word");
+    if (bl_to(KF_SITE, KF_GETANGLE) != orig[0].original) runtime_fail("keyframed bodies' turn angle: call word");
     SwrWord put[1 + 3 * KF_PADS]; size_t np = 0;
     for (unsigned p = 0; p < KF_PADS; p++) {
         const uint32_t pad = g_kf_pad[p];
@@ -1365,16 +1363,16 @@ enum { SA_HELPER = 0x120bc40, SA_ASK = 0x14c1850, SA_INLINE = 0xdea400, SA_PAD =
 static void patch_stale_actor(Module *m) {
     if (swr_off("TOTK_BOTW_STALE_ACTOR")) { fprintf(stderr, "[botw] actor link reads as shipped (TOTK_BOTW_STALE_ACTOR=0)\n"); return; }
     const uint32_t h = SA_HELPER;
-    static const SwrWord horig[] = {   /* cbz x0, ret / ldr x8, [x0, #0x570] / ldr x0, [x8, #0x88] / b main+0x14c1850 / ret / pad */
+    static const view_guard horig[] = {   /* cbz x0, ret / ldr x8, [x0, #0x570] / ldr x0, [x8, #0x88] / b main+0x14c1850 / ret / pad */
         {0x120bc40u, 0xb4000080u}, {0x120bc44u, 0xf942b808u}, {0x120bc48u, 0xf9404500u}, {0x120bc4cu, 0x140ad701u},
         {0x120bc50u, 0xd65f03c0u}, {0x120bc54u, 0}, {0x120bc58u, 0},
     };
-    if (horig[0].word != cbz_x_to(h, h + 0x10, 0) || horig[3].word != branch_to(h + 0xc, SA_ASK)) runtime_fail("actor link helper: words");
+    if (horig[0].original != cbz_x_to(h, h + 0x10, 0) || horig[3].original != branch_to(h + 0xc, SA_ASK)) runtime_fail("actor link helper: words");
     const SwrWord hput[] = {   /* cbz x0, ret / ldr x8, [x0, #0x570] / cbz x8, none / ldr x0, [x8, #0x88] / b ask / none: mov x0, xzr / ret */
         {h, cbz_x_to(h, h + 0x18, 0)}, {h + 0x8, cbz_x_to(h + 0x8, h + 0x14, 8)}, {h + 0xc, 0xf9404500u},
         {h + 0x10, branch_to(h + 0x10, SA_ASK)}, {h + 0x14, 0xaa1f03e0u}, {h + 0x18, 0xd65f03c0u},
     };
-    static const SwrWord iorig[] = {   /* the epilogue's first word, the two loads, the empty pad */
+    static const view_guard iorig[] = {   /* the epilogue's first word, the two loads, the empty pad */
         {0xdea3b8u, 0x6d43a3e9u}, {0xdea400u, 0xf942ba68u}, {0xdea404u, 0xf9404500u}, {0xdea014u, 0}, {0xdea018u, 0}, {0xdea01cu, 0},
     };
     const SwrWord iput[] = {   /* the pad: ldr x8, [x19, #0x570] / cbz x8, no target / b back to the +0x88 load */
@@ -1408,13 +1406,11 @@ enum { PHONE_RENDER = 0x1266114u, PHONE_RENDER_STR = 0xf9090a68u };   /* str x8,
 #endif
 static void patch_phone_render(Module *m) {
     if (!ios_code()) return;
-    const struct { uint32_t off, original; } check[] = {{PHONE_RENDER, 0xd2a89408u}, {PHONE_RENDER + 4, 0xf2e89408u}, {PHONE_RENDER + 8, PHONE_RENDER_STR}};
-    for (size_t i = 0; !CODE_PATCHED_AT_BUILD && i < sizeof check / sizeof *check; i++) {
-        uint32_t w; memcpy(&w, m->base + check[i].off, 4);
-        if (w != check[i].original) {
-            fprintf(stderr, "[botw] handheld render size main+%#x: found %08x expected %08x\n", check[i].off, w, check[i].original);
-            runtime_fail("the phone's render size requires the " TOTK_GAME_VERSION " handheld display-mode instructions");
-        }
+    const view_guard check[] = {{PHONE_RENDER, 0xd2a89408u}, {PHONE_RENDER + 4, 0xf2e89408u}, {PHONE_RENDER + 8, PHONE_RENDER_STR}};
+    uint32_t w; const int bad = CODE_PATCHED_AT_BUILD ? 0 : verify_words(m->base, check, sizeof check / sizeof *check, &w);
+    if (bad) {
+        fprintf(stderr, "[botw] handheld render size main+%#x: found %08x expected %08x\n", check[bad - 1].off, w, check[bad - 1].original);
+        runtime_fail("the phone's render size requires the " TOTK_GAME_VERSION " handheld display-mode instructions");
     }
     put_word(m, PHONE_RENDER + 4, 0xf2e88e08u, "handheld render size");   /* movk x8, #0x4470, lsl #48: 960.0 */
     fprintf(stderr, "[botw] handheld render size 960x540, the game's own upscale to the 1280x720 canvas (phone)\n");
