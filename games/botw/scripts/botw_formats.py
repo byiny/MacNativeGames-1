@@ -8,6 +8,7 @@ the original stream, so a few kilobytes of texture cost a few kilobytes, not a r
 import re
 import struct
 import sys
+import zlib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'totk' / 'scripts'))   # the shared Yaz0 reader and SARC tools
@@ -132,37 +133,31 @@ def sarc_member_edits(sarc, name, edits):
 RSTB = 'System/Resource/ResourceSizeTable.product.srsizetable'
 
 
-def rstb_sizes(table, names):
-    """The sizes the decoded RSTB `table` lists for the resource `names`, as name -> size. A name it does not list by its CRC32
-    is refused."""
-    import zlib
+def rstb_sizes_at(table, names):
+    """name -> the offset of the size field of the entry that the decoded RSTB `table` lists for the resource `names`, by their
+    CRC32. A name it does not list is refused."""
     if table[:4] != b'RSTB':
         raise ValueError('not an RSTB')
-    crcs = struct.unpack_from('<I', table, 4)[0]
-    at = dict(struct.unpack_from('<II', table, 12 + 8 * i) for i in range(crcs))
-    sizes = {}
+    at = {struct.unpack_from('<I', table, 12 + 8 * i)[0]: 12 + 8 * i + 4 for i in range(struct.unpack_from('<I', table, 4)[0])}
+    found = {}
     for name in names:
         if zlib.crc32(name.encode()) not in at:
             raise ValueError(f'{name}: not in the resource size table')
-        sizes[name] = at[zlib.crc32(name.encode())]
-    return sizes
+        found[name] = at[zlib.crc32(name.encode())]
+    return found
+
+
+def rstb_sizes(table, names):
+    """The sizes the decoded RSTB `table` lists for the resource `names`, as name -> size. A name it does not list by its CRC32
+    is refused."""
+    return {name: struct.unpack_from('<I', table, at)[0] for name, at in rstb_sizes_at(table, names).items()}
 
 
 def rstb_edits(table, growth):
     """Same-size edits of the decoded RSTB `table` that raise the entries of `growth` (resource name, e.g. Layout/Common.blarc,
     -> bytes it grew) by that much. A name the table does not list by its CRC32 is refused."""
-    import zlib
-    if table[:4] != b'RSTB':
-        raise ValueError('not an RSTB')
-    crcs, names = struct.unpack_from('<II', table, 4)
-    at = {struct.unpack_from('<I', table, 12 + 8 * i)[0]: 12 + 8 * i for i in range(crcs)}
-    edits = []
-    for name, grow in sorted(growth.items()):
-        entry = at.get(zlib.crc32(name.encode()))
-        if entry is None:
-            raise ValueError(f'{name}: not in the resource size table')
-        edits.append((entry + 4, struct.pack('<I', struct.unpack_from('<I', table, entry + 4)[0] + grow)))
-    return edits
+    at = rstb_sizes_at(table, sorted(growth))
+    return [(at[name], struct.pack('<I', struct.unpack_from('<I', table, at[name])[0] + growth[name])) for name in sorted(growth)]
 
 
 # ---- BFLYT ------------------------------------------------------------------------------------------------------------
@@ -172,16 +167,24 @@ PANE_MAGICS = (b'pan1', b'pic1', b'txt1', b'wnd1', b'bnd1', b'prt1', b'ali1', b'
 PANE_TRANSLATION = 44       # a pane section's (x, y, z) floats start this far into the section
 
 
+def sections(blob):
+    """(magic, offset, size) of each section of a layout (FLYT) or a font (FFNT): the header size is the 16 bits at 6, the section
+    count the 16 bits at 0x10, and each section starts with its magic and its size."""
+    pos = struct.unpack_from('<H', blob, 6)[0]
+    for _ in range(struct.unpack_from('<H', blob, 0x10)[0]):
+        size = struct.unpack_from('<I', blob, pos + 4)[0]
+        yield bytes(blob[pos:pos + 4]), pos, size
+        pos += size
+
+
 def bflyt_panes(blob):
     """The panes of a layout (FLYT) as (section offset, name, parent name or None) in file order: a pas1 section opens the
     children of the pane before it and a pae1 closes them. A pane's translation (x, y) is the two floats at
     offset + PANE_TRANSLATION."""
     if blob[:4] != b'FLYT':
         raise ValueError('not a bflyt')
-    head, count = struct.unpack_from('<H', blob, 6)[0], struct.unpack_from('<H', blob, 0x10)[0]
-    pos, stack, last, panes = head, [], None, []
-    for _ in range(count):
-        magic, size = bytes(blob[pos:pos + 4]), struct.unpack_from('<I', blob, pos + 4)[0]
+    stack, last, panes = [], None, []
+    for magic, pos, _ in sections(blob):
         if magic in PANE_MAGICS:
             last = bytes(blob[pos + 12:pos + 36]).split(b'\0')[0].decode()
             panes.append((pos, last, stack[-1] if stack else None))
@@ -189,7 +192,6 @@ def bflyt_panes(blob):
             stack.append(last)
         elif magic == b'pae1' and stack:
             stack.pop()
-        pos += size
     return panes
 
 
@@ -203,6 +205,7 @@ TILE_BLOCK_LINEAR = 0
 class Texture:
     """One BRTI of a BNTX: where its pixels are and how they are laid out."""
     def __init__(self, bntx, brti):
+        self.brti = brti
         (self.tile_mode, _, self.mips, _, self.format, _, self.width, self.height, self.depth, self.layers,
          layout) = struct.unpack_from('<HHHIIIIIIII', bntx, brti + 0x12)
         self.block_height = 1 << (layout & 7)
@@ -264,14 +267,6 @@ def check_rg8(texture):
     if (texture.format, texture.tile_mode, texture.mips, texture.layers, texture.depth) != (R8G8_UNORM, TILE_BLOCK_LINEAR, 1, 1, 1):
         raise ValueError(f'{texture.name}: expected a plain single-mip R8G8 block-linear texture, got format 0x{texture.format:x}, '
                          f'tile mode {texture.tile_mode}, {texture.mips} mips, {texture.layers} layers')
-
-
-def rg8_read(bntx, texture):
-    """The pixels of an R8G8 texture as two pictures (grey rows, alpha rows), each a list of bytes, top row first."""
-    check_rg8(texture)
-    base, w = texture.offset, texture.width
-    at = [[base + gob_address(x, y, w, 2, texture.block_height) for x in range(w)] for y in range(texture.height)]
-    return [bytes(bntx[a] for a in row) for row in at], [bytes(bntx[a + 1] for a in row) for row in at]
 
 
 def rg8_image(bntx, texture, grey, alpha):
@@ -359,7 +354,7 @@ def bntx_resize(bntx, images):
     blob, edits = bytearray(), []
     for name, (width, height, image, bh) in sorted(images.items()):
         texture = textures[name]
-        brti = next(m.start() for m in re.finditer(b'BRTI', bntx) if Texture(bntx, m.start()).name == name)
+        brti = texture.brti
         while (rlt + len(blob)) % 0x200:
             blob += b'\0'
         at = rlt + len(blob); blob += image
@@ -448,35 +443,6 @@ def coverage_rect(contours, width, height, oversample=8):
     return rows
 
 
-def coverage(contours, size, oversample=8):
-    """coverage_rect() over a square size x size picture."""
-    return coverage_rect(contours, size, size, oversample)
-
-
-def enclosed_marks(rows, window=(8, 8, 40, 40), dark=0xE0, largest=400):
-    """The dark marks (a letter cut out of a white shape): connected groups of pixels below `dark` that lie inside `window`
-    (x0, y0, x1, y1) and have at most `largest` pixels. Returns a list of pixel-coordinate sets; the outline of a shape is
-    longer than `largest` and stays out."""
-    height, width = len(rows), len(rows[0])
-    seen, marks = set(), []
-    for y in range(height):
-        for x in range(width):
-            if rows[y][x] >= dark or (x, y) in seen:
-                continue
-            group, todo = set(), [(x, y)]
-            while todo:
-                px, py = todo.pop()
-                if (px, py) in group or not (0 <= px < width and 0 <= py < height) or rows[py][px] >= dark:
-                    continue
-                group.add((px, py))
-                todo += [(px + dx, py + dy) for dx in (-1, 0, 1) for dy in (-1, 0, 1) if dx or dy]
-            seen |= group
-            xs, ys = [p[0] for p in group], [p[1] for p in group]
-            if len(group) <= largest and min(xs) >= window[0] and min(ys) >= window[1] and max(xs) < window[2] and max(ys) < window[3]:
-                marks.append(group)
-    return marks
-
-
 # ---- BC4 (one-channel block compression: 8 bytes for a 4x4 block) and the glyph sheet of a BFFNT ----------------------------
 def bc4_decode(block):
     r0, r1 = block[0], block[1]
@@ -538,10 +504,7 @@ class Bffnt:
     def __init__(self, data):
         if data[:4] != b'FFNT':
             raise ValueError('not a BFFNT')
-        position, self.sections = struct.unpack_from('<H', data, 6)[0], {}
-        for _ in range(struct.unpack_from('<H', data, 16)[0]):
-            self.sections[data[position:position + 4]] = position
-            position += struct.unpack_from('<I', data, position + 4)[0]
+        self.sections = {magic: position for magic, position, _ in sections(data)}
         tglp = self.sections[b'TGLP']
         self.cell, self.cell_height, self.sheets, _, size, _, _, self.columns, self.rows, _, _, sheet = struct.unpack_from('<BBBBIHHHHHHI', data, tglp + 8)
         if self.sheets != 1:
@@ -589,13 +552,10 @@ class Bffnt:
         edits += [moved(0x0c), moved(tglp + 4), moved(tglp + 12)]
         finf = self.sections[b'FINF']
         edits += [moved(finf + k) for k in (20, 24, 28) if struct.unpack_from('<I', data, finf + k)[0] >= after]
-        position = struct.unpack_from('<H', data, 6)[0]
-        for _ in range(struct.unpack_from('<H', data, 16)[0]):
-            magic, size = data[position:position + 4], struct.unpack_from('<I', data, position + 4)[0]
+        for magic, position, _ in sections(data):
             link = {b'CWDH': 12, b'CMAP': 20}.get(magic)
             if link and struct.unpack_from('<I', data, position + link)[0] >= after:
                 edits.append(moved(position + link))
-            position += size
         return edits
 
     def cell_box(self, code):

@@ -2107,6 +2107,15 @@ def source_commit():
     return result.stdout.strip() if result.returncode == 0 else ''
 
 
+# The files both icon tools import (make_button_icons.py and botw_prompts.py with their lazy imports, the closure found with
+# modulefinder), under games/; controller_map.h is read by prompt_layout.py. An edit of any other script leaves the kit id alone.
+ICON_KIT_FILES = (
+    'totk/runtime/controller_map.h', 'totk/scripts/make_button_icons.py', 'totk/scripts/make_mod_manifest.py', 'totk/scripts/make_romfs_patches.py',
+    'totk/scripts/prepare_shader_seed.py', 'totk/scripts/prompt_assets.py', 'totk/scripts/prompt_layout.py', 'totk/scripts/sarc_repack.py',
+    'totk/scripts/shader_list.py', 'totk/scripts/totk_controller_art.py', 'totk/scripts/totk_prompt_art.py',
+    'botw/scripts/botw_controller_art.py', 'botw/scripts/botw_formats.py', 'botw/scripts/botw_prompts.py')
+
+
 def button_icons_kit(tree, res, version, game):
     """The button icon tools inside the app (Contents/Resources/totk/button-icons, app/launcher.m button_icons): at each start
     the launcher makes, once, the prompts for the controller type, face mode and controls.txt in use (docs/mods.md). The
@@ -2114,13 +2123,8 @@ def button_icons_kit(tree, res, version, game):
     folder's Python (fontTools: requirements.txt), the tool and an id over the scripts and the RomFS the app plays, so a
     set made for an earlier build is never loaded."""
     kit = res / 'button-icons'
-    files = sorted((tree / 'scripts').glob('*.py')) + [tree / 'runtime/controller_map.h']   # prompt_layout.py reads the header
-    if game == 'botw':
-        files += sorted((tree.parent / 'botw/scripts').glob('*.py'))
-    else:   # the Tears of the Kingdom prompts are drawn with the Breath of the Wild art (make_button_icons.py --our-art)
-        files += [tree.parent / 'botw/scripts' / f'{name}.py' for name in ('botw_controller_art', 'botw_formats', 'botw_prompts')]
     digest = hashlib.sha256()
-    for path in files:
+    for path in (tree.parent / name for name in ICON_KIT_FILES):
         rel = Path('games') / path.relative_to(tree.parent)
         (kit / rel).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(path, kit / rel)

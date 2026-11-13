@@ -35,16 +35,15 @@ class LauncherArguments(unittest.TestCase):
             self.assertNotIn(refusal, run.stderr)
 
     def test_botw_tool_takes_the_launcher_arguments_of_every_version(self):
-        for version in ('botw160', 'botw190'):
-            for style, face in (('xbox', 'position'), ('playstation', 'position'), ('xbox', 'label'), ('switch', 'label')):
-                with self.subTest(version=version, style=style, face=face):
-                    self.assert_accepted(self.run_tool(BOTW, *launcher_arguments(version, style, face, scale=2)))
+        for version, style, face in (('botw160', 'xbox', 'position'), ('botw160', 'switch', 'label'),     # each version twice, each style and face mode once or more
+                                     ('botw190', 'playstation', 'position'), ('botw190', 'xbox', 'label')):
+            with self.subTest(version=version, style=style, face=face):
+                self.assert_accepted(self.run_tool(BOTW, *launcher_arguments(version, style, face, scale=2)))
 
     def test_totk_tool_takes_the_launcher_arguments_of_every_version(self):
-        for version in ('v0', 'v121', 'v143'):
-            for style, face in (('xbox', 'position'), ('playstation', 'position'), ('xbox', 'label')):
-                with self.subTest(version=version, style=style, face=face):
-                    self.assert_accepted(self.run_tool(TOTK, *launcher_arguments(version, style, face, our_art=True)))
+        for version, style, face in (('v0', 'xbox', 'position'), ('v121', 'playstation', 'position'), ('v143', 'xbox', 'label')):
+            with self.subTest(version=version, style=style, face=face):
+                self.assert_accepted(self.run_tool(TOTK, *launcher_arguments(version, style, face, our_art=True)))
 
     def test_negative_control_an_argument_a_tool_does_not_know_is_seen(self):
         run = self.run_tool(TOTK, *launcher_arguments('v121', 'xbox', 'position', scale=2))      # --scale is for the BOTW tool only

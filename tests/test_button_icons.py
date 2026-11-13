@@ -8,11 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT/'games/totk/scripts'
 sys.path.insert(0, str(SCRIPTS))
-try:
-    import make_button_icons as mbi         # needs Python 3.14 (compression.zstd) and fontTools; it exits without them
-except SystemExit as error:
-    mbi = None
-    SKIP = str(error)
+import make_button_icons as mbi         # noqa: E402  (needs Python 3.14: compression.zstd, and fontTools)
 import prompt_layout as pl      # noqa: E402
 
 OWNER = 'north = a\nsouth = x\nwest = y\neast = b\n'
@@ -38,7 +34,6 @@ def letter(make, controls, codepoint):
     return g.texts[-1] if g.texts else '<symbol>'
 
 
-@unittest.skipIf(mbi is None, 'needs Python 3.14 and fontTools')
 class StylesFollowControls(unittest.TestCase):
     A, B, X, Y, L, ZR, PLUS = 0xE040, 0xE041, 0xE042, 0xE043, 0xE044, 0xE047, 0xE04B
 
@@ -85,7 +80,6 @@ class StylesFollowControls(unittest.TestCase):
 
 
 
-@unittest.skipIf(mbi is None, 'needs Python 3.14 and fontTools')
 class TexturePackTable(unittest.TestCase):
     """With the HD texture pack on, the icons grow the pack's resource size table (--texture-pack), so one table holds the
     pack's raised textures and the fonts' growth; its manifest line names the pack's file as the original (runtime/romfs.c
@@ -129,7 +123,6 @@ class Command(unittest.TestCase):
         return subprocess.run([sys.executable, str(SCRIPTS/'make_button_icons.py'), 'mod', '--romfs', 'nowhere', *args],
                               capture_output=True, text=True)
 
-    @unittest.skipIf(mbi is None, 'needs Python 3.14 and fontTools')
     def test_controls_needs_the_face_mode(self):
         with tempfile.NamedTemporaryFile('w', suffix='.txt') as f:
             f.write(OWNER); f.flush()
@@ -137,7 +130,6 @@ class Command(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn('--controls needs --face-buttons', result.stderr)
 
-    @unittest.skipIf(mbi is None, 'needs Python 3.14 and fontTools')
     def test_a_bad_controls_file_names_its_line(self):
         with tempfile.NamedTemporaryFile('w', suffix='.txt') as f:
             f.write('east = a\nsout = b\n'); f.flush()
@@ -145,7 +137,6 @@ class Command(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn('line 2: unknown controller button', result.stderr)
 
-    @unittest.skipIf(mbi is None, 'needs Python 3.14 and fontTools')
     def test_keyboard_keys_do_not_follow_a_controller(self):
         result = self.run_tool('--style', 'keyboard', '--face-buttons', 'label')
         self.assertNotEqual(result.returncode, 0)

@@ -52,7 +52,6 @@ PAD_BODY_PS = art.both_halves(art.outline((290, 34), (196, 34), ((156, 34), (128
 PAD_TOUCHPAD = art.outline((256, 40), (324, 40), ((330, 40), (334, 44), (333, 50)), (325, 112), ((324, 117), (320, 120), (314, 120)),
     (266, 120), ((260, 120), (256, 117), (255, 112)), (247, 50), ((246, 44), (250, 40), (256, 40)))
 PAD_LIGHTS = ([(243.5, 50), (247, 50), (255, 112), (251.5, 112)], [(336.5, 50), (333, 50), (325, 112), (328.5, 112)])
-CONSOLE_LIGHTS = ([(110, 50), (113.5, 50), (131.5, 127), (128, 127)], [(466, 50), (462.5, 50), (444.5, 127), (448, 127)])   # BOTW's, before the shift
 LINEAR = [round(255 * (v / 255 / 12.92 if v <= 10 else ((v / 255 + 0.055) / 1.055) ** 2.4)) for v in range(256)]
 
 TILT_PICTURES = {'console': ('Controller_Console1^w', 'ControllerSh_Console1^s'),
@@ -146,7 +145,7 @@ def decor(cv, kind, ps, face):
         cv.paint([art.inset(shifted(art.PANEL), 1.5)], 118, clip=[face])
         cv.paint([shifted(art.TOUCHPAD)], art.RIM)
         cv.paint([art.inset(shifted(art.TOUCHPAD), 2)], 214)
-        for side in CONSOLE_LIGHTS:
+        for side in art.CONSOLE_LIGHTS:      # BOTW's, before the shift
             cv.paint([shifted(side)], 236)
         ps_button(290, 172)
         mute(280, 190, 300, 197)
@@ -268,14 +267,7 @@ def shadow_rows(alpha):
 
 
 def shadow_bc4(rows, original, block_height):
-    out = bytearray(original)
-    w, h = SHADOW_FACTS[1], SHADOW_FACTS[2]
-    for by in range(h // 4):
-        for bx in range((w + 3) // 4):
-            values = [rows[by * 4 + i // 4][bx * 4 + i % 4] if bx * 4 + i % 4 < w else 0 for i in range(16)]
-            at = bf.gob_address(bx, by, (w + 3) // 4, 8, block_height)
-            out[at:at + 8] = bf.bc4_encode(values)
-    return bytes(out)
+    return bc4_texture(rows, SHADOW_FACTS[1], SHADOW_FACTS[2], block_height, original)
 
 
 def _differs(bntx, brti, t, facts, selector):
@@ -293,7 +285,7 @@ def redraw_pictures(bntx, controls, style, letters):
     """(the BNTX bytes, same length, with the controller pictures redrawn; the picture names drawn; notes). A kind whose
     textures differ from the facts above keeps the Switch picture and gets a note."""
     textures = bf.bntx_textures(bntx)
-    at = {bf.Texture(bntx, m.start()).name: m.start() for m in re.finditer(b'BRTI', bntx)}
+    at = {name: t.brti for name, t in textures.items()}
     out, drawn, notes = bytearray(bntx), [], []
     for kind, (picture, shadow) in PICTURES.items():
         problem = None
@@ -516,7 +508,7 @@ def redraw_tilted(bntx, controls, style, letters):
     """(the BNTX bytes, same length, with the tilted pictures, their shadows and R/ZR masks redrawn; the picture names drawn;
     notes). A kind whose six textures differ from the facts keeps the Switch art and gets a note."""
     textures = bf.bntx_textures(bntx)
-    at = {bf.Texture(bntx, m.start()).name: m.start() for m in re.finditer(b'BRTI', bntx)}
+    at = {name: t.brti for name, t in textures.items()}
     out, drawn, notes = bytearray(bntx), [], []
     for kind, (picture, shadow) in TILT_PICTURES.items():
         checks = [(picture, PICTURE_FACTS, RGBA_SELECTOR), (shadow, SHADOW_FACTS, None)]
@@ -553,7 +545,7 @@ def redraw_tilted(bntx, controls, style, letters):
 def dpad_masks(bntx, style, letters, drawer=None):
     """(the BNTX bytes, same length, with the d-pad shortcut icon ButtonIconL46NN_00^s and its glow _01^s redrawn; notes)."""
     textures = bf.bntx_textures(bntx)
-    at = {bf.Texture(bntx, m.start()).name: m.start() for m in re.finditer(b'BRTI', bntx)}
+    at = {name: t.brti for name, t in textures.items()}
     for name in DPAD_MASKS:
         found = f'{name} is not in the layout archive' if name not in textures else _differs(bntx, at[name], textures[name], DPAD_FACTS, MASK_SELECTOR)
         if found:

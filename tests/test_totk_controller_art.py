@@ -8,10 +8,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'games/totk/scripts'))
-try:
-    import totk_controller_art as tca
-except (SystemExit, ImportError):     # needs Python 3.14 (compression.zstd) and fontTools
-    tca = None
+import totk_controller_art as tca       # noqa: E402  (needs Python 3.14: compression.zstd, and fontTools)
 import prompt_layout as pl      # noqa: E402
 
 OWNER = 'north = a\nsouth = x\nwest = y\neast = b\n'      # owner-map/controls.txt, without its comments
@@ -112,7 +109,6 @@ def labels(text='', face='position', style='xbox'):
     return tca.face_labels(pl.prompt_controls(text, face), style)
 
 
-@unittest.skipUnless(tca, 'needs Python 3.14 and fontTools')
 class Geometry(unittest.TestCase):
     def test_sizes_of_the_three_pictures(self):
         for kind, (k, rf) in {'console': (1.017, 9.83), 'grip': (1.303, 12.5), 'pro': (1.189, 12.5)}.items():
@@ -151,7 +147,6 @@ class Geometry(unittest.TestCase):
         self.assertIn('Switch A', notes[0])
 
 
-@unittest.skipUnless(tca, 'needs Python 3.14 and fontTools')
 class Encoding(unittest.TestCase):
     def test_linear_table(self):
         self.assertEqual((tca.LINEAR[0], tca.LINEAR[255]), (0, 255))
@@ -210,7 +205,6 @@ class Encoding(unittest.TestCase):
             self.assertEqual(out[new[name].offset:new[name].offset + new[name].image_size], blob[old[name].offset:old[name].offset + old[name].image_size])
 
 
-@unittest.skipUnless(tca, 'needs Python 3.14 and fontTools')
 class Tilted(unittest.TestCase):
     def test_masks(self):
         for kind, shoulders in tca.MASKS.items():
