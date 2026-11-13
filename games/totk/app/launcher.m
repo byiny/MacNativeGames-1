@@ -30,6 +30,9 @@
 #include "../third_party/d2r_gfx/gfx/nvn/include/totk_ui_lang.h"
 #include "../third_party/d2r_gfx/gfx/nvn/totk_shader_contrib.h"
 #include "../third_party/d2r_gfx/gfx/nvn/totk_contrib_upload.h"
+#ifdef TOTK_GAME_V143
+#include "settings_txt.h"   /* <data>/settings.txt, TOTK 1.4.3 local build only */
+#endif
 
 static void show_error(NSString *detail) {
     NSAlert *alert = [NSAlert new];
@@ -388,6 +391,13 @@ int runtime_app_launch(int argc, char **argv, char ***boot) {
            TOTK_GAME_SLOT_DIR shares one game slot with another build of the game: one game at a time on the Mac). */
         NSString *(^env_or)(const char *, NSString *) = ^NSString *(const char *name, NSString *fallback) {
             const char *v = getenv(name); return v && *v ? @(v) : fallback; };
+#ifdef TOTK_GAME_V143
+        /* Local build only: the player's settings, <data>/settings.txt, one TOTK_NAME=value per line (# starts a comment), read at
+           each launch. A line here wins over the app's Info.plist environment; a bad line shows an alert instead of a start. */
+        { NSString *path = [data stringByAppendingPathComponent:@"settings.txt"];
+          int badline = settings_txt_apply([NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil]);
+          if (badline) { show_error([NSString stringWithFormat:@"%@, line %d: expected TOTK_NAME=value", path, badline]); return 1; } }
+#endif
         NSString *profile = env_or("TOTK_PROFILE_DIR", [data stringByAppendingPathComponent:@"profile"]);
         NSString *slot = env_or("TOTK_GAME_SLOT_DIR", [data stringByAppendingPathComponent:@"game-slot"]);
         NSString *cache = env_or("TOTK_SHADER_CACHE", [data stringByAppendingPathComponent:[NSString stringWithFormat:@"shader-cache/rt-%s", DMSH_CHAIN]]);
