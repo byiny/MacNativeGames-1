@@ -16,7 +16,7 @@
      do it inside an autorelease pool (BOTW 0004, 2026-10-27: without one no tile was ever freed). The 30 s log line
      counts live tiles. */
 #pragma once
-#include "../../../../runtime/totk_fog_core.h"
+#include "totk_fog_core.h"   /* nvn/include: shared with the 1.4.3 runtime (fog_map_v143.h) */
 #include "totk_fog_kernel.h"
 #include <os/lock.h>
 

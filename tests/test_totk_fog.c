@@ -1,6 +1,6 @@
-/* games/totk/runtime/totk_fog_core.h: grid paint and sample, footprint.sav parse, fog table, shares and shrine
+/* games/totk/third_party/d2r_gfx/gfx/nvn/include/totk_fog_core.h: grid paint and sample, footprint.sav parse, fog table, shares and shrine
    reveal, the tower text suffix, the grid file and the slot order (load, save, epochs). Synthetic data only. */
-#include "../games/totk/runtime/totk_fog_core.h"
+#include "../games/totk/third_party/d2r_gfx/gfx/nvn/include/totk_fog_core.h"
 #include <stdio.h>
 #include <sys/stat.h>
 

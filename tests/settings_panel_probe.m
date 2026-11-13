@@ -1546,20 +1546,20 @@ int main(int argc, const char **argv) { @autoreleasepool {
        swaps places), key 1 cancels, Command keys pass, a right-click clears, the two resets. */
     g_settings_bindings_list = YES; [settingsPanel selectPage:SETTINGS_PAGE_BINDINGS]; tick();
     assert(!settingsPanel.drawings && settingsPanel.frame.size.width == SETTINGS_W);
-    assert(settingsPanel.rows.count == 2 && settingsPanel.controllerTargets.count == 22 && !settingsPanel.resetButtons[0].hidden && !settingsPanel.resetButtons[1].hidden &&
+    assert(settingsPanel.rows.count == 2 && settingsPanel.controllerTargets.count == 24 && !settingsPanel.resetButtons[0].hidden && !settingsPanel.resetButtons[1].hidden &&
            [settingsPanel.listToggle.title isEqualToString:@"Show drawings"] && settingsPanel.listToggle.enabled);
     /* Tilt mode's two menus under the list (user 2026-10-30), after its rows for a controller: left / right changes them. */
-    assert(!settingsPanel.tiltStrip.hidden && settingsPanel.controllerTargets[17] == menu(@"Tilt speed").superview && settingsPanel.controllerTargets[18] == menu(@"Reverse tilt").superview);
-    settingsPanel.controllerIndex = 17; [settingsPanel controllerChange:1 select:NO]; assert(fakeTiltSpeed == 90);
+    assert(!settingsPanel.tiltStrip.hidden && settingsPanel.controllerTargets[18] == menu(@"Tilt speed").superview && settingsPanel.controllerTargets[19] == menu(@"Reverse tilt").superview);
+    settingsPanel.controllerIndex = 18; [settingsPanel controllerChange:1 select:NO]; assert(fakeTiltSpeed == 90);
     [settingsPanel controllerChange:-1 select:NO]; assert(fakeTiltSpeed == 60);
-    settingsPanel.controllerIndex = 18; [settingsPanel controllerChange:-1 select:NO]; assert(fakeTiltInvert == TILT_INVERT_RX);
+    settingsPanel.controllerIndex = 19; [settingsPanel controllerChange:-1 select:NO]; assert(fakeTiltInvert == TILT_INVERT_RX);
     [settingsPanel controllerChange:1 select:YES]; assert(fakeTiltInvert == 0); settingsPanel.controllerIndex = 0;
     /* A controller with a gyro of its own (DualSense, Switch Pro): no tilt menus, the list takes their row back. */
     CGFloat listH = settingsPanel.bindingsScroll.frame.size.height;
     fakeMotionLive = 1; [settingsPanel refresh];
-    assert(settingsPanel.tiltStrip.hidden && settingsPanel.controllerTargets.count == 20 && settingsPanel.bindingsScroll.frame.size.height == listH + SETTINGS_ROW_H + 6);
+    assert(settingsPanel.tiltStrip.hidden && settingsPanel.controllerTargets.count == 22 && settingsPanel.bindingsScroll.frame.size.height == listH + SETTINGS_ROW_H + 6);
     fakeMotionLive = 0; [settingsPanel refresh];
-    assert(!settingsPanel.tiltStrip.hidden && settingsPanel.controllerTargets.count == 22 && settingsPanel.bindingsScroll.frame.size.height == listH);
+    assert(!settingsPanel.tiltStrip.hidden && settingsPanel.controllerTargets.count == 24 && settingsPanel.bindingsScroll.frame.size.height == listH);
     fakePadDetected = -1; fakePadType = GAMEPAD_TYPE_AUTO; [settingsPanel refreshBindings];
     assert(titled(box(KEYMAP_X, 0), @"Space") && titled(box(KEYMAP_X, 1), @"—") && titled(box(KEYMAP_X, 2), @"Y"));   /* Xbox names: Switch X sits where Xbox Y is */
     assert(titled(box(KEYMAP_Y, 0), @"Left click") && titled(box(KEYMAP_ZL, 1), @"Wheel click") && titled(box(KEYMAP_A, 0), @"E") && titled(box(KEYMAP_A, 1), @"Return"));
@@ -1722,7 +1722,7 @@ int main(int argc, const char **argv) { @autoreleasepool {
     for (NSMenuItem *i in actions.itemArray) if (i.tag == SETTINGS_BIND_PANEL) [settingsPanel menuPicked:i];
     assert(fakeSettingsButton == 3); [settingsPanel assignPad:3 action:KEYMAP_X]; assert(fakeSettingsButton == -1 && fakeMap[3] == 1u << KEYMAP_X);
     [settingsPanel assignPad:3 action:KEYMAP_ZR]; assert(fakeMap[3] == 1u << KEYMAP_ZR && fakeMap[9] == 1u << KEYMAP_ZR && [diagram_missing(1) isEqualToString:@"No button: Jump"]);
-    assert(settingsPanel.controllerTargets.count == 21 && pd.selected == -1 && !settingsPanel.tiltStrip.hidden);   /* tilt mode's menus under the controller */
+    assert(settingsPanel.controllerTargets.count == 22 && pd.selected == -1 && !settingsPanel.tiltStrip.hidden);   /* tilt mode's menus under the controller */
     [settingsPanel controllerPad:(RuntimeGamepadState){.connected = 1} time:200 active:YES];
     [settingsPanel controllerPad:(RuntimeGamepadState){.connected = 1, .buttons = 1u << 15} time:200.1 active:YES];   /* shows where it is */
     assert(settingsPanel.controllerIndex == 0 && settingsPanel.deviceTabs.layer.borderWidth == 2 && pd.selected == -1);
