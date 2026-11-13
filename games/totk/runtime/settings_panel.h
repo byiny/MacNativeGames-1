@@ -51,15 +51,15 @@
                                                              at once; graphics-aniso.txt; TOTK_ANISO first
      ambient occlusion    off / 1.5x / 2x / 3x, default off  dm_gfx_ssao_* (gfx/nvn/totk_ssao.h, PR #1316), saved in ssao.txt
                                                              (off or the strength and radius in percent); Tears of the
-                                                             Kingdom 1.2.1 / 1.4.3 and Breath of the Wild 1.9.0 only. Its shaders
+                                                             Kingdom 1.2.1 / 1.4.3 and Breath of the Wild 1.9.0 / 1.6.0 only. Its shaders
                                                              are always the patched ones on the Mac (off: the stock AO,
                                                              bit for bit), so every choice acts at once (user 2026-10-30);
                                                              TOTK_SSAO / _STRENGTH / _RADIUS decide first (greyed out)
-     shadow resolution    off / as the game has it / 2048     Breath of the Wild 1.9.0 (PR #1447): runtime_shadow_res_save
+     shadow resolution    off / as the game has it / 2048     Breath of the Wild 1.9.0 and 1.6.0 (PR #1447): runtime_shadow_res_save
                           per cascade                        (game_patches_botw.c, botw_shadow_res.h), shadows.txt (off or
                                                              2048); the game sizes the map once, so the choice is the next
                                                              launch's (its title says so); TOTK_SHADOW_RES decides first;
-                                                             off is the effect switch "shadow", at once (botw_effects.h)
+                                                             off (1.9.0 only) is the effect switch "shadow", at once (botw_effects.h)
      model detail distance 1x / 2x / 4x / 10x / 20x / 50x / runtime_lod_scale_set (game_patches_v143.c): the level of
                                                              detail a model gets at a distance is the one it had at
      100x                                                    1/K of it; graphics-lod.txt (x100); TOTK_LOD_SCALE first
@@ -69,26 +69,34 @@
                                                              first
      field of view        0.8x .. 1.5x                       runtime_fov_scale_set: the game camera's vertical FOV
                                                              (its zooms scale too); graphics-fov.txt (x100)
-     field of view        1x .. 1.5x                         Breath of the Wild 1.9.0: runtime_fov_scale_set
+     field of view        1x .. 1.5x                         Breath of the Wild 1.9.0 and 1.6.0: runtime_fov_scale_set
                                                              (game_patches_botw.c, botw_fov.h: the main camera's vertical
                                                              FOV x K at its setFovy call, at once; tried in play); graphics-fov.txt, x100
      model detail distance also "always the finest" (graphics-lod.txt "max": the level a model has up close)
+     model detail distance 1x .. 100x, "always the finest"  Breath of the Wild 1.9.0 and 1.6.0: runtime_lod_scale_set
+                                                             (game_patches_botw.c, botw_view_patches.h: calcLodLevel's depth
+                                                             sum z x 1/K + bias, at once; tried in play: the level choice changes, no picture change seen); graphics-lod.txt
+     render distance      1x / 1.25x / 1.5x                  Breath of the Wild 1.9.0 and 1.6.0: runtime_far_scale_set: the object and
+                                                             actor display distance x K (the camera's far plane spans the
+                                                             map; more actors alive; 2x and 3x crashed the 1.9.0 world load, so 1.5x at most); graphics-far.txt (percent)
      shadow resolution    off / 1x (800) / 2x / 3x / 4x      runtime_shadow_scale_set (game_patches_v143.c: the cascades'
                                                              size x K where the game works it out); off = the effect
                                                              switch "shadow" (totk_ssao.h); graphics-shadow.txt (x100)
      anti-aliasing       Off / FXAA / SMAA; quality         1.4.3: totk_aa_config.h; graphics-aa-method.txt, graphics-fxaa-quality.txt,
                                                              graphics-smaa-quality.txt. FXAA Original / Quality; SMAA Low / Medium / High / Ultra
      FXAA anti-aliasing   switch                             other versions: dm_gfx_fxaa_set; graphics-fxaa.txt
-                                                             (Breath of the Wild 1.9.0: gfx/nvn/botw_finish.h; greyed while
+                                                             (Breath of the Wild 1.9.0 and 1.6.0: gfx/nvn/botw_finish.h; greyed while
                                                              MetalFX replaces its FXAA / upscale draw)
      depth of field       switch                             runtime_dof_set (game_patches_v143.c: no DOF request stored
                                                              while off; events still complete); graphics-dof.txt
+                                                             Breath of the Wild 1.9.0: runtime_dof_set (botw_view_patches.h:
+                                                             the draw entry returns while off, at once; not tried in play)
      sharpening           off / 25% / 50% / 75% / 100%       dm_gfx_sharpen_set: FSR 1 RCAS on the 3D picture;
-                                                             graphics-sharpen.txt (percent); Breath of the Wild 1.9.0: on
+                                                             graphics-sharpen.txt (percent); Breath of the Wild 1.9.0 and 1.6.0: on
                                                              the canvas before the UI (gfx/nvn/botw_finish.h)
      one switch per effect                                   dm_gfx_fx_set (gfx/nvn/totk_fx.h): its passes left out while
                                                              off; graphics-effects.txt lists the ones that are off;
-                                                             Breath of the Wild 1.9.0: ambient occlusion (botw_effects.h)
+                                                             Breath of the Wild 1.9.0 and 1.6.0: ambient occlusion (botw_effects.h)
    User (runtime/users.h, docs/users.md; the save area is named after the user's id, so another user
    plays on their own saves; a running game keeps its user)
      user this run        fixed (greyed)                     runtime_users_active: the user this run opened with
@@ -140,10 +148,16 @@ void dm_gfx_set_flag(const char *name, int value);
 void dm_gfx_ssao_start(int pct); int dm_gfx_ssao_locked(void); int dm_gfx_ssao_live(void); void dm_gfx_ssao_set(int pct);   /* totk_ssao.h */
 void dm_gfx_aniso_start(int n); int dm_gfx_aniso_locked(void); int dm_gfx_aniso(void); void dm_gfx_aniso_set(int n);   /* gfx/nvn/nvn_mtl.m */
 void dm_gfx_keepalive_start(int on); int dm_gfx_keepalive_locked(void); int dm_gfx_keepalive(void); void dm_gfx_keepalive_set(int on);   /* gfx/nvn/nvn_mtl.m */
-#ifdef GAME_BOTW190
+#if defined(GAME_BOTW190) || defined(GAME_BOTW160)
+#define SETTINGS_BOTW_PAGE 1   /* Breath of the Wild 1.9.0 and 1.6.0 have the same effects page: shadow size, FOV, FXAA, sharpening, AO */
+#endif
+#ifdef SETTINGS_BOTW_PAGE
 int runtime_shadow_res_available(void); int runtime_shadow_res_locked(void); int runtime_shadow_res_saved(void);
 void runtime_shadow_res_save(int size);   /* game_patches_botw.c */
 double runtime_fov_scale(void); void runtime_fov_scale_set(double k); int runtime_fov_scale_locked(void); int runtime_fov_available(void);
+double runtime_lod_scale(void); void runtime_lod_scale_set(double k); int runtime_lod_scale_locked(void); int runtime_lod_available(void);   /* botw_view_patches.h */
+double runtime_far_scale(void); void runtime_far_scale_set(double k); int runtime_far_scale_locked(void); int runtime_far_available(void);
+void runtime_dof_set(int on); int runtime_dof_on(void); int runtime_dof_available(void);
 #endif
 void nvn_fps_lock_set(int fps);   /* gfx/nvn/hle_nvn.c: the shared totk_fps_limits choices */
 #ifdef TOTK_GAME_V143   /* the effects page: its shader keys and patch sites are 1.4.3's */
@@ -209,7 +223,7 @@ static void settings_save_frame(void) {
 }
 /* Ambient occlusion (PR #1316): ssao.txt holds off or the strength and radius in percent, read before the guest starts
    because the shaders are patched as they load. The levels the row offers; a hand-written percent is kept too. */
-#if defined(TOTK_GAME_V143) || defined(GAME_BOTW190) || defined(TOTK_GAME_V121)
+#if defined(TOTK_GAME_V143) || defined(SETTINGS_BOTW_PAGE) || defined(TOTK_GAME_V121)
 #define SETTINGS_SSAO 1
 #endif
 static int settingsSsao;   /* the saved choice: 0 off, else percent */
@@ -222,7 +236,7 @@ static void settings_ssao_restore(void) {
  settingsSsao=(int)pct;dm_gfx_ssao_start(settingsSsao);
 #endif
 }
-/* A number from a setting file, within lo..hi (1.4.3's graphics rows; Breath of the Wild 1.9.0's sharpening, PR #1637). */
+/* A number from a setting file, within lo..hi (1.4.3's graphics rows; Breath of the Wild 1.9.0 and 1.6.0's sharpening, PR #1637). */
 static inline int settings_read_number(const char *name, double lo, double hi, double *value) {
  char word[32],*end;if(!runtime_setting_word(name,word,sizeof word))return 0;
  double d=strtod(word,&end);while(*end==' '||*end=='\n'||*end=='\r'||*end=='\t')end++;
@@ -264,7 +278,7 @@ static void settings_effects_restore(void) {
  if(runtime_setting_word("graphics-dof.txt",word,sizeof word)&&!strncmp(word,"off",3))runtime_dof_set(0);
  if(!runtime_far_scale_locked()&&settings_read_number("graphics-far.txt",0.1,1000,&d))runtime_far_scale_set(d/100);
 }
-#elif defined(GAME_BOTW190)
+#elif defined(SETTINGS_BOTW_PAGE)
 static void settings_effects_restore(void);   /* botw_effects.h */
 #else
 static void settings_effects_restore(void) {}
@@ -683,6 +697,8 @@ static TOTKSettingRow *settings_shadow_row(void) {
   if(v){runtime_shadow_scale_set(v/100.0);settings_save_int("graphics-shadow.txt",v,"shadow resolution");}
   settings_effects_save();});
 }
+#endif
+#if defined(TOTK_GAME_V143) || defined(SETTINGS_BOTW_PAGE)   /* the HDR rows: 1.4.3 and both Breath of the Wild versions (botw_effects.h) */
 /* HDR / EDR (PR #1129, the RenoDX approach; Mac, 1.4.3): the switch and the game's brightness (its white in SDR-white
    units). hdr.txt holds on / off; each tone-mapping value its own hdr-<name>.txt (totk_hdr.h lists all thirteen; the
    others, peak (0: the display's headroom), UI white, exposure, ..., are set in their files; the page has no room). Off leaves every shader, pipeline and texture as without HDR (nvn_mtl.m keeps both compose shaders).
@@ -702,6 +718,8 @@ static void settings_hdr_rows(NSMutableArray<TOTKSettingRow *> *rows){
  [rows addObject:settings_hdr_choice(TOTK_HDR_GAME_WHITE,settings_text("HDR 游戏亮度","HDR game brightness"),white,5,^NSString *(int v){
   return [NSString stringWithFormat:@"%g×",v/1000.0];})];
 }
+#endif
+#ifdef TOTK_GAME_V143
 static NSArray<TOTKSettingRow *> *settings_effect_rows(void) {
  NSMutableArray<TOTKSettingRow *> *rows=[NSMutableArray arrayWithObjects:settings_fov_row(),settings_distance_row(1),settings_distance_row(0),settings_shadow_row(),nil];
  /* FXAA (the game's edge smoothing of the 3D picture) and sharpening (FSR 1 RCAS on the 3D picture, not the UI) */
@@ -729,8 +747,8 @@ static NSArray<TOTKSettingRow *> *settings_effect_rows(void) {
 #else
 static TOTKSettingRow *settings_botw_shadow_row(void);   /* below: Breath of the Wild 1.9.0's, greyed elsewhere */
 static TOTKSettingRow *settings_botw_fov_row(void);      /* below: Breath of the Wild 1.9.0's, greyed elsewhere */
-#ifdef GAME_BOTW190
-#include "botw_effects.h"   /* Breath of the Wild 1.9.0's page: the effect switches its shaders allow (PR #1602) */
+#ifdef SETTINGS_BOTW_PAGE
+#include "botw_effects.h"   /* Breath of the Wild 1.9.0's and 1.6.0's page: the effect switches its shaders allow (PR #1602) */
 #else
 static NSArray<TOTKSettingRow *> *settings_effect_rows(void) {   /* other versions: the page says so */
  NSString *none=settings_text("这个版本没有","Not in this version");
@@ -766,31 +784,31 @@ static void settings_effects_reset(void) {
  for(const char *const *f=(const char *const[]){"graphics-fov.txt","graphics-lod.txt","graphics-far.txt","graphics-fxaa.txt","graphics-smaa-quality.txt","graphics-aa-method.txt","graphics-fxaa-quality.txt","graphics-sharpen.txt","graphics-effects.txt","graphics-shadow.txt","graphics-dof.txt",NULL};*f;f++)
   runtime_setting_remove(*f);
 #endif
-#ifdef GAME_BOTW190
+#ifdef SETTINGS_BOTW_PAGE
  if(runtime_shadow_res_available()&&!runtime_shadow_res_locked()){runtime_shadow_res_save(0);runtime_setting_remove("shadows.txt");}
  if(runtime_fov_available()&&!runtime_fov_scale_locked()){runtime_fov_scale_set(1);runtime_setting_remove("graphics-fov.txt");}
  settings_botw_effects_reset();
 #endif
  fprintf(stderr,"[totk] settings: the effects page back to the defaults\n");
 }
-/* Sun shadows (Breath of the Wild 1.9.0, botw_shadow_res.h): off, the game's sizes or 2048 per cascade. The game sizes its
+/* Sun shadows (Breath of the Wild 1.9.0 and 1.6.0, botw_shadow_res.h): off (1.9.0 only), the game's sizes or 2048 per cascade. The game sizes its
    map once, at the start, so for the sizes the row shows and saves the next launch's choice, never this run's; off acts at
    once (P9, 2026-11-05: on the Great Plateau the shadows of Link, rocks and cliffs go, with no other evident fault in that scene; AO and other conditions not checked). Where the patch does not act
    (the iOS export's run) the row offers nothing to save. On the effects page of the other versions (TOTK 1.4.3 has its own). */
 #ifndef TOTK_GAME_V143
 static TOTKSettingRow *settings_botw_shadow_row(void) {
  NSString *t=settings_text("阴影分辨率","Shadow resolution");
-#ifndef GAME_BOTW190
+#ifndef SETTINGS_BOTW_PAGE
  return settings_fixed(t,settings_text("这个版本没有","Not in this version"));
 #else
  return settings_botw190_shadow_row(t);   /* botw_effects.h */
 #endif
 }
-/* The field of view (Breath of the Wild 1.9.0, botw_fov.h): as 1.4.3's row, in hundredths of the game's own, at once; from
+/* The field of view (Breath of the Wild 1.9.0 and 1.6.0, botw_fov.h): as 1.4.3's row, in hundredths of the game's own, at once; from
    1x up only (1x to 1.5x is the useful range, PR #1575). A file or TOTK_FOV_SCALE value outside it is still shown. */
 static TOTKSettingRow *settings_botw_fov_row(void) {
  NSString *t=settings_text("视野（FOV）","Field of view (FOV)");
-#ifndef GAME_BOTW190
+#ifndef SETTINGS_BOTW_PAGE
  return settings_fixed(t,settings_text("这个版本没有","Not in this version"));
 #else
  if(!runtime_fov_available())return settings_fixed(t,settings_text("这个版本没有","Not in this version"));

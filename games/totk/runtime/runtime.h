@@ -186,6 +186,9 @@ extern int (*runtime_vr_pad)(int plain, uint64_t *buttons, int32_t *lx, int32_t 
 void runtime_gamepad_text_capture(int on);
 void runtime_gamepad_text_read(RuntimeGamepadState *out);
 int runtime_gamepad_game_input(void);   /* any thread: 1 while the game gets the controllers (no capture, nor its release wait) */
+#ifdef GAME_BOTW160
+uint32_t runtime_zr_frames(void);   /* the bow thread: frames ZR has been held in the state the game reads (input.c) */
+#endif
 /* macOS opts in; the controller's settings button (L3 + R3 together, or the one picked in the key bindings) is latched
    independently of guest polling. */
 void runtime_gamepad_settings_enable(int enabled);

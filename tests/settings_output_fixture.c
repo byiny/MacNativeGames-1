@@ -44,6 +44,27 @@ void settings_test_output_size(unsigned w, unsigned h) {
     assert(runtime_output_size_current() == pack_size(w, h));
 #endif
 }
+#ifdef GAME_BOTW
+/* TOTK_OUTPUT_RES=screen through the production parser, on this machine's main display. Returns the modes the Resolution row
+   then offers (runtime_output_modes), or -1 where the display has no 16:9 size above 1080p (a headless runner: nothing to check). Both Breath
+   of the Wild versions take it: the largest size at the start, native = that size, 2K + MetalFX = 2560x1440. */
+int settings_test_output_screen(unsigned *largest, unsigned *native_w, unsigned *mfx_w) {
+    static _Atomic uint64_t screen_page[8];
+    int mode = g_out_mode, big = g_out_start_big; unsigned w = g_out_w, h = g_out_h; _Atomic uint64_t *pg = g_out_page;
+    char *old = getenv("TOTK_OUTPUT_RES"), *keep = old ? strdup(old) : NULL;
+    setenv("TOTK_OUTPUT_RES", "screen", 1);
+    g_out_mode = -1; g_out_start_big = 0; g_out_page = screen_page;
+    output_parse();
+    unsigned sw, sh, nh, mh; native_screen_pixels(&sw, &sh);
+    int modes = native_k_from_screen(sw, sh) ? runtime_output_modes() : -1;
+    *largest = g_out_w; *native_w = *mfx_w = 0;
+    if (modes >= 0) { runtime_output_native(OUTPUT_MODE_NATIVE, native_w, &nh); runtime_output_native(OUTPUT_MODE_NATIVE_METALFX, mfx_w, &mh); }
+    if (keep) setenv("TOTK_OUTPUT_RES", keep, 1); else unsetenv("TOTK_OUTPUT_RES");
+    free(keep);
+    g_out_mode = mode; g_out_start_big = big; g_out_w = w; g_out_h = h; g_out_page = pg;
+    return modes;
+}
+#endif
 /* A swapchain as if the app carried the 4K heap overlay, for the native-4K mode tests; restore before the rows matter. */
 void settings_test_output_4k(int on) {
 #ifndef GAME_BOTW
@@ -70,13 +91,15 @@ void settings_test_aspect_init(double view) {
     runtime_aspect_view(view * 1080, 1080);
 }
 
-#ifdef GAME_BOTW190
+#ifdef GAME_BOTW   /* both versions have the field of view's row */
 /* The field of view's row as it is when patch_fov found the camera code not as shipped (it never runs here). */
 void settings_test_fov_refused(int refused) { g_fov_refused = refused; }
 /* The factor's word as the stub reads it, on a synthetic data-page slot (patch_fov never runs here). */
 static _Atomic uint32_t testFovFactor;
 void settings_test_fov_init(void) { g_fov_factor = &testFovFactor; }
 uint32_t settings_test_fov_word(void) { return atomic_load(&testFovFactor); }
+/* The model detail distance's (0), render distance's (1) and depth of field's (2) rows as they are when patch_view found the game code not as shipped. */
+void settings_test_view_refused(int which, int refused) { if (which == 0) g_lod_refused = refused; else if (which == 1) g_disp_refused = refused; else g_dof_refused = refused; }
 #endif
 void settings_test_aspect_frame(void) {
 #ifdef GAME_BOTW

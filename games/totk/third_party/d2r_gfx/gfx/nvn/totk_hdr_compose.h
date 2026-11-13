@@ -4,8 +4,57 @@
  */
 #pragma once
 #import <Foundation/Foundation.h>
+#ifdef GAME_BOTW
+/* Breath of the Wild: the compose (TAA_COMPOSE in nvn_obj.h) writes the RGB10A2 picture that the FXAA / upscale draw
+ * bd7ffdd4 reads into the RGB10A2 canvas; the UI is drawn into the canvas and ecb4242e copies it to the swapchain.
+ * Same tone curve, luma weights, saturation grade and output as 1.4.3's; 1.6.0's MSL differs from 1.9.0's only in
+ * fast:: / precise::. No EASU: no post twin (a prefix no shader key has). */
+#ifdef GAME_BOTW190   /* the 1.6.0 graphics objects have GAME_BOTW only (Makefile), as TAA_COMPOSE in nvn_obj.h */
+#define TOTK_HDR_COMPOSE_KEY "f7ee6fe10b925543e905dfc9437ce67dc21a118d465b03bb3c9eccafdf2e33c4-"
+#else
+#define TOTK_HDR_COMPOSE_KEY "d14b1c38f70d2ed8355a18183099d088e798b831f919c8be4d1f797a3cdc2689-"
+#endif
+#define TOTK_HDR_POST_KEY "-"
+/* The final copy into the swapchain (hdr_capture): fragment ecb4242e, a plain sample; it also copies UI side targets,
+ * so the swapchain-serial test alone picks the draw (no vertex key test). */
+#define HDR_COPY_FS "ecb4242efaf4042be5db42db3b06b93d16e1087c47db79882dc534df9e646f73-"
+#define HDR_COPY_VS_BAD(pr) 0
+/* The picture and the canvas are RGB10A2Unorm: a companion base besides R11G11B10F. Its alpha is stored, so the
+ * RGB-only rules (alpha read as one, blend factors on destination alpha) hold only for an R11G11B10F base. */
+#define HDR_BASE_BAD(f) ((f)!=MTLPixelFormatRG11B10Float && (f)!=MTLPixelFormatRGB10A2Unorm)
+#define HDR_RGB_ONLY(t) ((t).pixelFormat==MTLPixelFormatRG11B10Float)
+#define HDR_RGB_ONLY_DRAW ==1
+#define HDR_DRAW_NATIVE(base) (HDR_RGB_ONLY(base)?1:2)
+#define HDR_SW_ALPHA(src) (HDR_RGB_ONLY(src)?MTLTextureSwizzleAlpha:(MTLTextureSwizzle)0xff)
+/* hdr_shadow_copy's back copy: one pipeline per base format. */
+#define HDR_TO10 static id<MTLRenderPipelineState> to10;
+#define HDR_TO11(dst) ((dst).pixelFormat==MTLPixelFormatRGB10A2Unorm?to10:to11)
+#define HDR_TO10_SET(dst) if((dst).pixelFormat==MTLPixelFormatRGB10A2Unorm)to10=pso;else
+/* The runner's "flag hdr 0|1" (game-test): HDR switched live for an A/B in one run, as the panel's row does. */
+extern void runtime_front_hdr_set(int enabled) __attribute__((weak_import));
+/* The twin compiles with relaxed maths (Inf / NaN kept): with the translations' safe maths its scene map took 7.7 ms a
+ * frame at 3456x1944 on an M1 Pro (game run 2026-11-04; a game-free bench: 1.47 ms safe, 0.37 ms relaxed). */
+/* An interrupted compiler connection is retried, as totk_msl_library does (else HDR stays off until a restart). */
+#define HDR_TWIN_LIBRARY(src, err) ({ MTLCompileOptions *hdr_o_ = [MTLCompileOptions new]; hdr_o_.mathMode = MTLMathModeRelaxed; id<MTLLibrary> hdr_l_ = nil; \
+    for (int hdr_a_ = 0; hdr_a_ < 4 && !hdr_l_; hdr_a_++) { NSError *hdr_e_ = nil; hdr_l_ = [g_dev newLibraryWithSource:(src) options:hdr_o_ error:&hdr_e_]; *(err) = hdr_e_; \
+        if (!hdr_l_ && ![hdr_e_.localizedDescription containsString:@"XPC_ERROR_CONNECTION_INTERRUPTED"]) break; } hdr_l_; })
+#define HDR_FLAG(name, v) if (!strcmp(name, "hdr")) { if (runtime_front_hdr_set) runtime_front_hdr_set(v < 0 ? !totk_hdr_active() : v); return; }
+#else
 #define TOTK_HDR_COMPOSE_KEY "0ac9a54938974396134d911dc0f29c79ce43e3d8cd50b11ee8b85a48ead6d2a5-"
 #define TOTK_HDR_POST_KEY "ac58fc18eda5f3878b16074dc28cd441644a66710f1b73954d39e57ac357561b-"
+#define HDR_COPY_FS "dd3d1e0ebf73242845970b5655fac199a30f5acf747975c5e771caa49af8b12b-"
+#define HDR_COPY_VS_BAD(pr) strncmp(pr->sh[0]->key,"1a40e5f5ff257e13293c01b8e293a619d2ae8cdcffd8e4083e04dd7f59fd2273-",65)
+#define HDR_BASE_BAD(f) f!=MTLPixelFormatRG11B10Float
+#define HDR_RGB_ONLY(t) 1
+#define HDR_RGB_ONLY_DRAW
+#define HDR_DRAW_NATIVE(base) 1
+#define HDR_SW_ALPHA(src) MTLTextureSwizzleAlpha
+#define HDR_TO10
+#define HDR_TO11(dst) to11
+#define HDR_TO10_SET(dst)
+#define HDR_FLAG(name, v)
+#define HDR_TWIN_LIBRARY(src, err) totk_msl_library(src, err)
+#endif
 static NSString *totk_hdr_scene_msl(void) {
     return @"\n"
         "// Scene tone mapping: C1 extension of the original exponential toe, SDR hue /\n"
@@ -125,6 +174,23 @@ static NSString *totk_hdr_uniform(NSString *s) {
     s=[s stringByReplacingOccurrencesOfString:@"using namespace metal;" withString:@"using namespace metal;\nstruct TotkHDRUniform { float4 display; float4 tone; float4 color; float4 art; };\n"];
     return [s stringByReplacingOccurrencesOfString:@"[[buffer(0)]]" withString:@"[[buffer(0)]], constant TotkHDRUniform& hdrConfig [[buffer(30)]]"];
 }
+#ifdef GAME_BOTW
+/* Breath of the Wild's compose: t0 is the scene (_63 _65 _71, each min(x, 10000)), t1 the bloom (_57 _59 _61); the
+ * game adds them unweighted, so the bloom control scales the second term. */
+static inline NSString *totk_hdr_compose_source(NSString *source) {
+    NSString *anchor=@"    out.m_34.w = 0.0;";
+    if(![source containsString:anchor] ||
+       ![source containsString:@"float _67 = _63 + _57;"] ||
+       ![source containsString:@"float _69 = _65 + _59;"] ||
+       ![source containsString:@"float _75 = _71 + _61;"] ||
+       ![source containsString:@"(*spvDescriptorSet0.fp_c3)._m0[0].y"])return nil;
+    NSString *s=totk_hdr_uniform(source);if(!s)return nil;
+    s=[s stringByReplacingOccurrencesOfString:@"using namespace metal;" withString:[@"using namespace metal;\n" stringByAppendingString:totk_hdr_scene_msl()]];
+    NSString *body=@"    if (hdrConfig.display.x > 0.5) {\n"
+      "        out.m_34.xyz = hdr_scene_map(float3(_63+_57*hdrConfig.color.y,_65+_59*hdrConfig.color.y,_71+_61*hdrConfig.color.y), float3(0.2989000082,(*spvDescriptorSet0.fp_c1)._m0[0].x,(*spvDescriptorSet0.fp_c1)._m0[0].y), (*spvDescriptorSet0.fp_c1)._m0[0].z, (*spvDescriptorSet0.fp_c3)._m0[0].xy, hdrConfig.display.y, hdrConfig.tone, hdrConfig.color, hdrConfig.art) * hdrConfig.display.z;\n    }\n";
+    return [s stringByReplacingOccurrencesOfString:anchor withString:[body stringByAppendingString:anchor]];
+}
+#else
 static inline NSString *totk_hdr_compose_source(NSString *source) {
     NSString *anchor=@"    out.m_34.w = 0.0;";
     if(![source containsString:anchor] ||
@@ -138,6 +204,7 @@ static inline NSString *totk_hdr_compose_source(NSString *source) {
       "        out.m_34.xyz = hdr_scene_map(float3(_63*hdrConfig.color.y+_57,_65*hdrConfig.color.y+_59,_67*hdrConfig.color.y+_61), float3(0.2989000082,(*spvDescriptorSet0.fp_c1)._m0[0].x,(*spvDescriptorSet0.fp_c1)._m0[0].y), (*spvDescriptorSet0.fp_c1)._m0[0].z, (*spvDescriptorSet0.fp_c3)._m0[0].xy, hdrConfig.display.y, hdrConfig.tone, hdrConfig.color, hdrConfig.art) * hdrConfig.display.z;\n    }\n";
     return [s stringByReplacingOccurrencesOfString:anchor withString:[body stringByAppendingString:anchor]];
 }
+#endif
 /* EASU's 1/3.5 input and 3.5 output scaling are retained; its final SDR bounds
  * are removed, including negative extended-sRGB channels. Edge weights retain
  * their original clamps. */

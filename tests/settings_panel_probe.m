@@ -20,12 +20,19 @@ void mfxup_set(int on);
 void mfxup_output_set(int on);
 int mfxup_output_enabled(void);
 void settings_test_output_init(void);
+#ifdef GAME_BOTW
+int settings_test_output_screen(unsigned *largest, unsigned *native_w, unsigned *mfx_w);
+#endif
 void settings_test_output_size(unsigned w, unsigned h);
 void settings_test_output_4k(int on);
 void settings_test_aspect_init(double view);
 void settings_test_aspect_frame(void);
-#ifdef GAME_BOTW190
+#if defined(GAME_BOTW190) || defined(GAME_BOTW160)   /* the effects page both Breath of the Wild versions have: shadow size, FOV, FXAA, sharpening, AO */
+#define BOTW_PAGE 1
+#endif
+#ifdef BOTW_PAGE
 void settings_test_fov_refused(int refused); void settings_test_fov_init(void); uint32_t settings_test_fov_word(void);
+void settings_test_view_refused(int which, int refused);
 static uint32_t float_bits(float f) { uint32_t b; memcpy(&b, &f, 4); return b; }
 #endif
 
@@ -47,7 +54,7 @@ void dm_gfx_ssao_set(int pct) { if (fakeSsaoLive) fakeSsaoSet = pct; }
 #else
 #define TOTK_V143 0
 #endif
-#ifdef GAME_BOTW190   /* PR #1602: Breath of the Wild 1.9.0's effects page has 1.4.3's rows; of the switches only AO acts */
+#ifdef BOTW_PAGE   /* PR #1602: Breath of the Wild 1.9.0's and 1.6.0's effects page has 1.4.3's rows; of the switches only AO acts */
 #define BOTW_V190 1
 #else
 #define BOTW_V190 0
@@ -217,16 +224,8 @@ void nvn_fps_lock_set(int fps) { if (totk_fps_limit_valid(fps)) fakeLock = fps; 
 int nvn_fps_lock(void) { return fakeLock; }
 /* runtime/gamepad_feedback.m's DualSense bow trigger switch without a controller. */
 static int fakeTriggers = 1, fakeTriggersLocked;
-#ifndef GAME_BOTW160
 static int fakeTriggersAvailable = 1;
-#endif
-int runtime_triggers_available(void) {
-#ifdef GAME_BOTW160
-    return 0;   /* This game version has no bow-state reader. */
-#else
-    return fakeTriggersAvailable;
-#endif
-}
+int runtime_triggers_available(void) { return fakeTriggersAvailable; }
 int runtime_triggers_locked(void) { return fakeTriggersLocked; }
 int runtime_triggers_choice(void) { return fakeTriggers; }
 void runtime_triggers_choose(int on) { fakeTriggers = !!on; }
@@ -1002,6 +1001,15 @@ int main(int argc, const char **argv) { @autoreleasepool {
     unsetenv("TOTK_MFX"); /* priority/disabled row covered by the headless frame probe */
     setenv("TOTK_OUTPUT_RES", "2560x1440", 1);   /* the native size the resolution row names */
     settings_test_output_init();
+#ifdef GAME_BOTW
+    {   /* TOTK_OUTPUT_RES=screen: 1.6.0 offers the Resolution row's choices 1.9.0 does (this machine's display; skipped where it has no 16:9 size above 1080p) */
+        unsigned largest, nativeW, mfxW; int modes = settings_test_output_screen(&largest, &nativeW, &mfxW);
+        if (modes >= 0) {
+            assert(modes == (1 << OUTPUT_MODE_OFF | 1 << OUTPUT_MODE_METALFX | 1 << OUTPUT_MODE_720P | 1 << OUTPUT_MODE_NATIVE | 1 << OUTPUT_MODE_NATIVE_METALFX));
+            assert(nativeW == largest && largest > 1920 && (largest < 2560 || mfxW == 2560));
+        }
+    }
+#endif
     // In-memory fixture only: do not start the timer or touch a player's profile.
     playtime=[[TOTKPlaytime alloc] initWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString]];
     window = probe_window();
@@ -1012,7 +1020,7 @@ int main(int argc, const char **argv) { @autoreleasepool {
     runtime_input_key_synthetic(18, 1); runtime_input_key_synthetic(18, 1); tick(); runtime_input_key_synthetic(18, 0); tick();
     assert(settingsOpen && fakeSettingsCapture && settingsPanel && !settingsPanel.hidden && settingsPanel.superview == window.contentView);
     assert(NSContainsRect(window.contentView.bounds, settingsPanel.frame));
-    assert(settingsPanel.allRows.count == 28 + 3*TOTK_V143 + BOTW_V190 + (TOTK_V143 && totk_hdr_available() ? SETTINGS_HDR_ROWS : 0));   /* + the HDR rows (PR #1129) */   /* 17 (anisotropy last on the display page, controller
+    assert(settingsPanel.allRows.count == 28 + 3*TOTK_V143 + BOTW_V190 + ((TOTK_V143 || BOTW_V190) && totk_hdr_available() ? SETTINGS_HDR_ROWS : 0));   /* + the HDR rows on 1.4.3 and 1.9.0 (PR #1129) */   /* 17 (anisotropy last on the display page, controller
                                                                  background input on the input page), the user page's
                                                                  two, then the effects page: FOV, two distances, shadows,
                                                                  depth of field, FXAA, sharpening and effect switches
@@ -1146,7 +1154,7 @@ int main(int argc, const char **argv) { @autoreleasepool {
     pick(@"Edge smoothing", @"Off"); assert(!taa_enabled()); shows(@"Edge smoothing", @"Off");
     /* Stronger ambient occlusion (PR #1316): off by default; every level acts at once (the Mac's shaders always carry the
        parameters) and is saved; a run without them (TOTK_SSAO=0) shows off, greyed out (rows are made at each opening). */
-#if defined(TOTK_GAME_V143) || defined(GAME_BOTW190) || defined(TOTK_GAME_V121)
+#if defined(TOTK_GAME_V143) || defined(BOTW_PAGE) || defined(TOTK_GAME_V121)
     shows(@"Stronger ambient occlusion", @"Off (as the game has it)"); assert(fakeSsaoStart == -1);
     pick(@"Stronger ambient occlusion", @"1.5×"); assert(settingsSsao == 150 && fakeSsaoSet == 150 && !strcmp(savedName, "ssao.txt") && !strcmp(savedWord, "150"));
     pick(@"Stronger ambient occlusion", @"2×"); assert(fakeSsaoSet == 200 && !strcmp(savedWord, "200"));
@@ -1215,10 +1223,10 @@ int main(int argc, const char **argv) { @autoreleasepool {
     flip(@"Ambient occlusion", NO); assert(!strcmp(savedWord, "ao bloom"));
     flip(@"Bloom", YES); flip(@"Ambient occlusion", YES); assert(fakeFxOn[0] && fakeFxOn[1] && !strcmp(savedWord, "none"));
 #else
-    /* Shadow resolution (Breath of the Wild 1.9.0, the production calls of game_patches_botw.c): the next launch's choice,
+    /* Shadow resolution (Breath of the Wild 1.9.0 and 1.6.0, the production calls of game_patches_botw.c): the next launch's choice,
        saved in shadows.txt (this run keeps the size it started with: tests/test_botw_shadow_res.c); greyed out while
        TOTK_SHADOW_RES decides (rows are made at each opening). */
-#  ifdef GAME_BOTW190
+#  ifdef BOTW_PAGE
     assert([row(@"Shadow resolution").title isEqualToString:@"Shadow resolution (from the next launch)"]);
     shows(@"Shadow resolution", @"As the game has it");
     pick(@"Shadow resolution", @"2048 per cascade"); assert(runtime_shadow_res_saved() == 2048 && !strcmp(savedName, "shadows.txt") && !strcmp(savedWord, "2048"));
@@ -1236,7 +1244,6 @@ int main(int argc, const char **argv) { @autoreleasepool {
     shows(@"Bloom", @"Not in this version"); assert(!menu(@"Bloom").enabled);
     assert(switched(@"Ambient occlusion")); flip(@"Ambient occlusion", NO);
     assert(!fakeFxOn[0] && !strcmp(savedName, "graphics-effects.txt") && !strcmp(savedWord, "ao"));
-    shows(@"Depth of field", @"Not in this version"); shows(@"Model detail distance (LOD)", @"Not in this version");
     /* FXAA and sharpening (gfx/nvn/botw_finish.h): 1.4.3's rows and files; while MetalFX replaces the FXAA / upscale draw
        the FXAA row says so (rows are made at each opening). */
     assert(switched(@"FXAA anti-aliasing")); flip(@"FXAA anti-aliasing", NO);
@@ -1252,7 +1259,7 @@ int main(int argc, const char **argv) { @autoreleasepool {
     assert(!runtime_shadow_res_saved() && fakeFxOn[0] && strstr(removedAll, "shadows.txt ") && strstr(removedAll, "graphics-effects.txt "));
     assert(fakeFxaa && !fakeSharpen && strstr(removedAll, "graphics-fxaa.txt ") && strstr(removedAll, "graphics-sharpen.txt "));
     [settingsPanel selectPage:SETTINGS_PAGE_DISPLAY]; tick();
-    /* The field of view (Breath of the Wild 1.9.0, the production calls of game_patches_botw.c; the stub itself:
+    /* The field of view (Breath of the Wild 1.9.0 and 1.6.0, the production calls of game_patches_botw.c; the stub itself:
        tests/test_botw_fov.c): 1x, as the game has it; each choice acts at once and is saved in graphics-fov.txt (x100). */
     settings_test_fov_init(); assert(!settings_test_fov_word());
     shows(@"Field of view (FOV)", @"1x (as the game has it)");
@@ -1275,12 +1282,45 @@ int main(int argc, const char **argv) { @autoreleasepool {
     removedAll[0] = 0; [settingsPanel.effectsButtons[0] performClick:nil]; tick();
     assert(runtime_fov_scale() == 1 && settings_test_fov_word() == float_bits(1.0f) && strstr(removedAll, "graphics-fov.txt "));
     [settingsPanel selectPage:SETTINGS_PAGE_DISPLAY]; tick();
+    /* The model detail distance, the render distance and depth of field (botw_view_patches.h, the production calls of
+       game_patches_botw.c; the stubs: tests/test_botw_view_patches.c): 1.4.3's rows and files, in force at once; the render
+       distance offers 1x to 3x only. */
+    shows(@"Model detail distance (LOD)", @"1x (as the game has it)"); shows(@"Render distance", @"1x (as the game has it)");
+    assert(menu(@"Render distance").numberOfItems == 3 && [[menu(@"Render distance") itemTitleAtIndex:2] isEqual:@"1.5×"] && menu(@"Model detail distance (LOD)").numberOfItems == 8);
+    pick(@"Model detail distance (LOD)", @"4×"); assert(runtime_lod_scale() == 4 && !strcmp(savedName, "graphics-lod.txt") && !strcmp(savedWord, "400"));
+    pick(@"Render distance", @"1.25×"); assert(runtime_far_scale() == 1.25 && !strcmp(savedName, "graphics-far.txt") && !strcmp(savedWord, "125"));
+    pick(@"Render distance", @"1.5×"); assert(runtime_far_scale() == 1.5 && !strcmp(savedWord, "150"));
+    pick(@"Model detail distance (LOD)", @"Always the finest"); assert(runtime_lod_scale() >= 1e6 && !strcmp(savedName, "graphics-lod.txt") && !strcmp(savedWord, "max"));
+    runtime_far_scale_set(0); runtime_far_scale_set(2); runtime_lod_scale_set(0); runtime_lod_scale_set(NAN);
+    assert(runtime_far_scale() == 1.5 && runtime_lod_scale() >= 1e6);   /* outside 0.1..1.5 and 0.1..1e6: never taken */
+    assert(switched(@"Depth of field")); flip(@"Depth of field", NO); assert(!runtime_dof_on() && !strcmp(savedName, "graphics-dof.txt") && !strcmp(savedWord, "off"));
+    flip(@"Depth of field", YES); assert(runtime_dof_on() && !strcmp(savedWord, "on"));
+    press(18); setenv("TOTK_LOD_SCALE", "4", 1); setenv("TOTK_FAR_SCALE", "2", 1); press(18);
+    assert(settingsOpen && !menu(@"Model detail distance (LOD)").enabled && !menu(@"Render distance").enabled);
+    press(18); unsetenv("TOTK_LOD_SCALE"); unsetenv("TOTK_FAR_SCALE"); press(18); assert(settingsOpen && menu(@"Model detail distance (LOD)").enabled && menu(@"Render distance").enabled);
+    press(18); setenv("TOTK_EXPORT_IOS", "/nonexistent", 1); press(18);
+    assert(settingsOpen && !menu(@"Model detail distance (LOD)").enabled && !menu(@"Render distance").enabled && !menu(@"Depth of field").enabled);
+    shows(@"Depth of field", @"Not in this version");
+    press(18); unsetenv("TOTK_EXPORT_IOS"); press(18); assert(settingsOpen && menu(@"Depth of field").enabled);
+    for (int which = 0; which < 3; which++) {   /* the game code was not as shipped: nothing patched */
+        press(18); settings_test_view_refused(which, 1); press(18);
+        NSString *title = which == 0 ? @"Model detail distance (LOD)" : which == 1 ? @"Render distance" : @"Depth of field";
+        assert(settingsOpen && !menu(title).enabled); shows(title, @"Not in this version");
+        press(18); settings_test_view_refused(which, 0); press(18); assert(settingsOpen && menu(title).enabled);
+    }
+    /* "Reset to defaults" sets them back (1x, on) and removes graphics-lod.txt, graphics-far.txt and graphics-dof.txt. */
+    pick(@"Model detail distance (LOD)", @"10×"); pick(@"Render distance", @"1.5×"); flip(@"Depth of field", NO);
+    [settingsPanel selectPage:SETTINGS_PAGE_EFFECTS]; tick();
+    removedAll[0] = 0; [settingsPanel.effectsButtons[0] performClick:nil]; tick();
+    assert(runtime_lod_scale() == 1 && runtime_far_scale() == 1 && runtime_dof_on());
+    assert(strstr(removedAll, "graphics-lod.txt ") && strstr(removedAll, "graphics-far.txt ") && strstr(removedAll, "graphics-dof.txt "));
+    [settingsPanel selectPage:SETTINGS_PAGE_DISPLAY]; tick();
 #  else
     shows(@"Shadow resolution", @"Not in this version"); assert(!menu(@"Shadow resolution").enabled);
     shows(@"Field of view (FOV)", @"Not in this version"); assert(!menu(@"Field of view (FOV)").enabled);
-#  endif
     shows(@"Render distance", @"Not in this version"); assert(!menu(@"Render distance").enabled);
-#  ifndef GAME_BOTW190
+#  endif
+#  ifndef BOTW_PAGE
     shows(@"Effect switches", @"Not in this version");
     shows(@"Sharpening", @"Not in this version");
 #  endif
@@ -1293,10 +1333,6 @@ int main(int argc, const char **argv) { @autoreleasepool {
 
     /* The DualSense bow trigger: a switch; greyed out while TOTK_DUALSENSE_TRIGGERS or a test session decides, and on a
        game version without the bow's state (rows are made at each opening). */
-#ifdef GAME_BOTW160
-    shows(@"DualSense bow trigger", @"Not in this version");
-    assert(!menu(@"DualSense bow trigger").enabled);
-#else
     assert(switched(@"DualSense bow trigger")); flip(@"DualSense bow trigger", NO); assert(!fakeTriggers && !switched(@"DualSense bow trigger"));
     flip(@"DualSense bow trigger", YES); assert(fakeTriggers);
     press(18); fakeTriggersLocked = 1; fakeTriggers = 0; press(18); assert(settingsOpen);
@@ -1304,7 +1340,6 @@ int main(int argc, const char **argv) { @autoreleasepool {
     press(18); fakeTriggersLocked = 0; fakeTriggersAvailable = 0; press(18);
     assert(!menu(@"DualSense bow trigger").enabled && [menu(@"DualSense bow trigger").titleOfSelectedItem isEqualToString:@"Not in this version"]);
     press(18); fakeTriggersAvailable = 1; fakeTriggers = 1; press(18); assert(settingsOpen && switched(@"DualSense bow trigger"));
-#endif
 
     /* Controller type: auto names the controller it sees. */
     shows(@"Controller type", @"Auto (PlayStation)");
@@ -1694,11 +1729,7 @@ int main(int argc, const char **argv) { @autoreleasepool {
     assert([row(@"本次运行的用户").control isKindOfClass:[NSPopUpButton class]]);
     shows(@"用户（下次启动生效）", @"Local");
     assert([settingsPanel.userButtons[0].title isEqualToString:@"添加用户…"]);
-#ifdef GAME_BOTW160
-    shows(@"DualSense 拉弓扳机", @"这个版本没有"); assert(!menu(@"DualSense 拉弓扳机").enabled);
-#else
     assert(switched(@"DualSense 拉弓扳机"));
-#endif
     fakePadDetected = GAMEPAD_TYPE_SWITCH; shows(@"手柄类型", @"自动（Switch）");
     pick(@"补帧", @"50+50"); assert(mfx_requested() == MFX_50);
     shows(@"震动强度", @"1×（默认）"); assert(switched(@"震动") && switched(@"体感瞄准"));

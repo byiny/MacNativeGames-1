@@ -15,8 +15,9 @@
 #include "game_version.h"
 #include "pchtxt.h"
 #include "aspect_math.h"   /* the aspect ratio: TOTK_ASPECT parsing */
-#include "botw_shadow_res.h"   /* 1.9.0's sun shadow map at 2048 (TOTK_SHADOW_RES, shadows.txt) */
-#include "botw_fov.h"   /* 1.9.0's field of view (TOTK_FOV_SCALE, graphics-fov.txt) */
+#include "botw_shadow_res.h"   /* 1.9.0 and 1.6.0: the sun shadow map at 2048 (TOTK_SHADOW_RES, shadows.txt) */
+#include "botw_fov.h"   /* 1.9.0 and 1.6.0: the field of view (TOTK_FOV_SCALE, graphics-fov.txt) */
+#include "botw_view_patches.h"   /* 1.9.0 and 1.6.0: model detail distance, render distance, depth of field (TOTK_LOD_SCALE, TOTK_FAR_SCALE) */
 #include "botw_heap_patch.h"   /* startup/root heap sizes above 4 GiB */
 #include "botw_output_heaps.h"
 #include "../zeldaVR/gfx/vr_resolution_policy.h"
@@ -210,7 +211,7 @@ static void pad_tick_advance(void) {
    the data page; at each present while it falls and moves, one line: the frame ratio, the actor's position (its matrix
    at +0x398), the shot's start (+0x11c), the velocity (+0x110, per 30 fps frame), the speed (+0xb4) and the gravity
    (+0x108). Reads go through vm_read_overwrite: the object may be gone. */
-enum { ARROW_SLOT = 0x58 };   /* the data page: +0 the frame step, +0x10 the output size, +0x20 the aspect, +0x48 the FOV */
+enum { ARROW_SLOT = 0x58 };   /* the data page: +0 the frame step, +0x10 the output size, +0x20 the aspect, +0x48 the FOV; this slot is 8 bytes (+0x58 .. +0x5f); the view slots are +0x60 .. +0x68 (botw_view_patches.h) */
 static _Atomic uint64_t *g_arrow_slot;
 static int arrow_read(uint64_t a, void *out, size_t n) {
     vm_size_t got = 0;
@@ -498,7 +499,7 @@ static void patch_realtime(Module *m) {
             sizeof put / sizeof *put, sizeof check / sizeof *check);
     patch_pad_repeat(m, page);
     patch_slink_rate(m, page);
-    patch_blend_first_step(m, ((m->text_end + 15) & ~15ULL) + 16);   /* after the sound-link veneer (4 words) */
+    patch_blend_first_step(m, ((m->text_end + 15) & ~15ULL) + 16);   /* after the sound-link veneer (4 words); the FOV stubs follow at +48 */
 }
 #else
 /* Breath of the Wild 1.9.0: the same real-time step at the 1.9.0 sites (found by disassembly; MacNativeGames
@@ -722,7 +723,7 @@ static void patch_realtime(Module *m) {
     patch_pad_repeat(m, page);
     patch_sound_step(m);
     patch_blend_first_step(m, ((m->text_end + 15) & ~15ULL) + 80);   /* after the FOV stub (+32, 11 words) */
-    patch_arrow_gravity(m, page, ((m->text_end + 15) & ~15ULL) + 104);   /* after the camera blend veneer (+80, 6 words), before the VR camera's (+128) */
+    patch_arrow_gravity(m, page, ((m->text_end + 15) & ~15ULL) + 104);   /* after the camera blend veneer (+80, 6 words), before the VR camera's (+128 .. +200); the view stubs are at +352 .. +424 (botw_view_patches.h), the heap stubs at +256 and +272 (botw_heap_patch.h) */
 }
 #endif
 /* Diagnostics (TOTK_JQ_CHECK=1): random crashes look like one job run twice (two threads in the same skinning job, a list
@@ -832,7 +833,7 @@ static void patch_render_1080(Module *m) {
     put_word(m, RENDER_MOVK, movk, "docked render size");
     fprintf(stderr, "[botw] docked render size 1920x1080 (shipped: 1600x900; TOTK_RENDER_RES=900 keeps it)\n");
 }
-#ifdef GAME_BOTW190
+#if defined(GAME_BOTW190) || defined(GAME_BOTW160)   /* the size helpers below: 1.6.0 takes TOTK_OUTPUT_RES=screen too */
 /* Native size, 1.9.0: the sizes and heaps for patch_output_res (the output-size block after the JQ diagnostics, shared
    with 1.6.0; the settings panel switches the size in play). The docked canvas size is a static {1920, 1080} (main+0x1e43dc0) set by
    three guarded inits (two in nnMain, one in its getter main+0x1261880); nnMain hands it to the graphics init and
@@ -859,12 +860,15 @@ static int native_k_from_screen(unsigned w, unsigned h) {   /* 0 = 1920x1080 or 
     if (k > NATIVE_K_MAX) k = NATIVE_K_MAX;
     return k > 120 ? (int)k : 0;
 }
+#ifdef GAME_BOTW190
 static int native_k_parse(const char *e) {   /* -1 = not a size this mode takes */
     unsigned w, h; char end;
     if (sscanf(e, "%ux%u%c", &w, &h, &end) != 2 || w % 128 || w / 16 * 9 != h || w / 16 <= 120 || w / 16 > NATIVE_K_MAX) return -1;
     return (int)(w / 16);
 }
+#endif
 #include "native_screen.h"
+#ifdef GAME_BOTW190
 static unsigned native_round_up(double mib, unsigned step) { return (unsigned)ceil(mib / step) * step; }
 static void native_heaps(int k, unsigned *display_mib, unsigned *gpu_mib, unsigned *extra_mib) {
     double px = 144.0 * k * k, f = (px - 2560.0 * 1440) / (3456.0 * 1944 - 2560.0 * 1440);
@@ -889,6 +893,7 @@ static uint32_t native_word(uint32_t original, int kind, int k) {   /* the same 
     return (original & ~(0xffffu << 5)) | (imm & 0xffffu) << 5;
 }
 #endif
+#endif   /* the size helpers (GAME_BOTW190 or GAME_BOTW160) */
 #if defined(GAME_BOTW190) || defined(GAME_BOTW160)
 /* HD heaps, 1.9.0 and 1.6.0 (TOTK_BOTW_HD_HEAPS=1, Mac only, default off; the owner, 2026-10-24: "make the pack work in 1.9.0, rise
    any mem cap if needed"). The HDPacks 4k texture pack (made for 1.6.0, with its own 1.6.0 heap patch) crashed 1.9.0 in
@@ -942,7 +947,6 @@ static void patch_phone_render(Module *m) {
     put_word(m, PHONE_RENDER + 4, 0xf2e88e08u, "handheld render size");   /* movk x8, #0x4470, lsl #48: 960.0 */
     fprintf(stderr, "[botw] handheld render size 960x540, the game's own upscale to the 1280x720 canvas (phone)\n");
 }
-#ifdef GAME_BOTW190
 /* The sun shadow map at 2048 per cascade (botw_shadow_res.h): TOTK_SHADOW_RES=2048, or 2048 in shadows.txt (the settings
    panel's row), read once before the guest starts; Mac only (the phone's memory is tighter and it was not tried there),
    off by default. A value that is neither leaves the game's sizes and says so; a site that is not as shipped stops the
@@ -971,8 +975,6 @@ void runtime_shadow_res_save(int size) {   /* the settings panel: the next launc
     shadow_res_save(&g_shadow, size);
     runtime_setting_save("shadows.txt", g_shadow.saved ? "2048" : "off", "sun shadow size");
 }
-#endif
-#ifdef GAME_BOTW190
 /* The field of view (botw_fov.h): TOTK_FOV_SCALE=<K> first, else graphics-fov.txt (x100, the settings panel's row), read
    before the guest starts; the row changes it at once. Mac only. A value that is neither keeps 1x and says so; code that
    is not as shipped leaves the game's code and field of view, and the row unavailable, without stopping the game. */
@@ -1000,8 +1002,9 @@ static void patch_fov(Module *m) {
     }
     g_fov_factor = (_Atomic uint32_t *)(void *)(m->base + data + FOV_FACTOR_SLOT);
     g_fov_game = (const float *)(void *)(m->base + data + FOV_GAME_SLOT);
-    fprintf(stderr, "[botw] field of view x%g (the main camera's vertical FOV at main+%#x), stub +%#llx\n", g_fov_k, FOV_SITE,
-            (unsigned long long)fov_stub_at(m->text_end));
+    fprintf(stderr, "[botw] field of view x%g (the main camera's vertical FOV at main+%#x", g_fov_k, fov_guard[fov_load[0]].off);
+    for (unsigned s = 1; s < FOV_SITES; s++) fprintf(stderr, ", +%#x", fov_guard[fov_load[s]].off);
+    fprintf(stderr, "), stub +%#llx\n", (unsigned long long)fov_stub_at(m->text_end));
 }
 int runtime_fov_available(void) { return !ios_code() && !g_fov_refused; }   /* the settings panel: where patch_fov acts */
 int runtime_fov_scale_locked(void) { const char *e = getenv("TOTK_FOV_SCALE"); return e && *e; }
@@ -1017,6 +1020,27 @@ void runtime_fov_scale_set(double k) {   /* the settings panel: at once (the cam
     fprintf(stderr, "[botw] fovscale: field of view x%g (the game's vertical FOV now %.1f degrees; %.1f with it, computed)\n", k,
             now * 57.29578f, fov_result(now, f) * 57.29578f);
 }
+/* Model detail distance, render distance (the object and actor display distance: the camera's far plane spans the map
+   already) and depth of field (botw_view_patches.h; 1.9.0 and 1.6.0, whose tables differ; 1.6.0's model detail
+   distance is 32 sites with one stub each): TOTK_LOD_SCALE / TOTK_FAR_SCALE first (the panel's restore reads the
+   files, graphics-lod.txt / graphics-far.txt / graphics-dof.txt, through the setters before the guest starts, and the rows
+   change them at once). Mac only, always installed: 1x / on is the game's own result bit for bit. An env value that is not
+   valid keeps 1x and says so; code that is not as shipped leaves the game's code and the row unavailable, without
+   stopping the game. */
+#ifdef GAME_BOTW160
+#define VIEW_LOD_PATCH view_lod160
+#define VIEW_LOD_APPLY view_lod160_apply
+#define VIEW_DISP_PATCH view_far160
+#define VIEW_DISP_APPLY view_far160_apply
+#define VIEW_DOF_PATCH view_dof160
+#define VIEW_DOF_APPLY view_dof160_apply
+#else
+#define VIEW_LOD_PATCH view_lod
+#define VIEW_LOD_APPLY view_lod_apply
+#define VIEW_DISP_PATCH view_disp
+#define VIEW_DISP_APPLY view_disp_apply
+#define VIEW_DOF_PATCH view_dof
+#define VIEW_DOF_APPLY view_dof_apply
 #endif
 #ifdef GAME_BOTW
 /* Font raster size, 1.9.0 and 1.6.0 (the owner, 2026-10-23: "patch the font size up by canvas height / 720"). The Chinese and Korean
@@ -1276,6 +1300,73 @@ static void patch_font_size(Module *m) {
 #include "botw_pchtxt_sites.h"
 
 static void patch_pchtxt(Module *m) { pchtxt_apply(m, "botw", g_pchtxt_reserved, sizeof g_pchtxt_reserved / sizeof *g_pchtxt_reserved); }
+static _Atomic uint32_t *g_lod_slot, *g_disp_slot, *g_dof_slot;
+static double g_lod_k = 1, g_disp_k = 1;
+static int g_dof_off, g_lod_refused, g_disp_refused, g_dof_refused;
+static int view_install(const char *what, int bad, uint32_t found, const view_patch *p, uint64_t text_end, int *refused) {
+    if (bad > 0) fprintf(stderr, "[botw] %s main+%#x: found %08x expected %08x\n", what, p->guard[bad - 1].off, found, p->guard[bad - 1].original);
+    if (bad) {
+        *refused = 1;
+        fprintf(stderr, "[botw] %s as shipped: the game code or its room is not as expected (the row unavailable)\n", what);
+        return 0;
+    }
+    if (p->sites > 1) fprintf(stderr, "[botw] %s at %u sites from main+%#x, stubs +%#llx\n", what, p->sites, p->site, (unsigned long long)view_stub_at(p, text_end));
+    else fprintf(stderr, "[botw] %s at main+%#x, stub +%#llx\n", what, p->site, (unsigned long long)view_stub_at(p, text_end));
+    return 1;
+}
+static void patch_view(Module *m) {
+    if (ios_code()) return;
+    const char *env = getenv("TOTK_LOD_SCALE");
+    if (env && *env) {
+        double k = view_lod_parse_env(env);
+        if (k) g_lod_k = k; else fprintf(stderr, "[botw] TOTK_LOD_SCALE=%s: not 0.1 to 100 or max; the game's model detail distance\n", env);
+    }
+    env = getenv("TOTK_FAR_SCALE");
+    if (env && *env) {
+        double k = view_disp_parse_env(env);
+        if (k) g_disp_k = k; else fprintf(stderr, "[botw] TOTK_FAR_SCALE=%s: not 0.1 to 10; the game's render distance\n", env);
+    }
+    uint64_t data = (m->file_size + 0x3fff) & ~0x3fffULL; uint32_t found = 0;
+    const int page = data + 0x4000 == m->size;
+    const uint64_t base = (uintptr_t)m->base;
+    char what[64];
+    snprintf(what, sizeof what, "model detail distance x%g", g_lod_k);
+    if (view_install(what, page ? VIEW_LOD_APPLY(m->base, base, m->text_end, data, m->size, g_lod_k, &found) : -1, found, &VIEW_LOD_PATCH, m->text_end, &g_lod_refused))
+        g_lod_slot = (_Atomic uint32_t *)(void *)(m->base + data + VIEW_LOD_SLOT);
+    snprintf(what, sizeof what, "render distance x%g (display distance)", g_disp_k);
+    if (view_install(what, page ? VIEW_DISP_APPLY(m->base, base, m->text_end, data, m->size, g_disp_k, &found) : -1, found, &VIEW_DISP_PATCH, m->text_end, &g_disp_refused))
+        g_disp_slot = (_Atomic uint32_t *)(void *)(m->base + data + VIEW_DISP_SLOT);
+    snprintf(what, sizeof what, "depth of field %s", g_dof_off ? "off" : "on");
+    if (view_install(what, page ? VIEW_DOF_APPLY(m->base, base, m->text_end, data, m->size, g_dof_off, &found) : -1, found, &VIEW_DOF_PATCH, m->text_end, &g_dof_refused))
+        g_dof_slot = (_Atomic uint32_t *)(void *)(m->base + data + VIEW_DOF_SLOT);
+}
+int runtime_lod_available(void) { return !ios_code() && !g_lod_refused; }   /* the settings panel: where patch_view acts */
+int runtime_far_available(void) { return !ios_code() && !g_disp_refused; }
+int runtime_dof_available(void) { return !ios_code() && !g_dof_refused; }
+int runtime_lod_scale_locked(void) { const char *e = getenv("TOTK_LOD_SCALE"); return e && *e; }
+int runtime_far_scale_locked(void) { const char *e = getenv("TOTK_FAR_SCALE"); return e && *e; }
+double runtime_lod_scale(void) { return g_lod_k; }
+double runtime_far_scale(void) { return g_disp_k; }
+void runtime_lod_scale_set(double k) {   /* the settings panel: at once (the stub reads the word at every call) */
+    uint32_t bits;
+    if (!view_lod_bits(k, &bits)) { fprintf(stderr, "[botw] lodscale: x%g is not 0.1 to 1000000; x%g kept\n", k, g_lod_k); return; }
+    g_lod_k = k;
+    if (g_lod_slot) atomic_store(g_lod_slot, bits);
+    fprintf(stderr, "[botw] lodscale: model detail distance x%g\n", k);
+}
+void runtime_far_scale_set(double k) {
+    uint32_t bits;
+    if (!view_disp_bits(k, &bits)) { fprintf(stderr, "[botw] farscale: x%g is not 0.1 to 10; x%g kept\n", k, g_disp_k); return; }
+    g_disp_k = k;
+    if (g_disp_slot) atomic_store(g_disp_slot, bits);
+    fprintf(stderr, "[botw] farscale: render distance (the object and actor display distance) x%g\n", k);
+}
+void runtime_dof_set(int on) {
+    g_dof_off = !on;
+    if (g_dof_slot) atomic_store(g_dof_slot, (uint32_t)g_dof_off);
+    fprintf(stderr, "[botw] depth of field %s\n", on ? "on" : "off");
+}
+int runtime_dof_on(void) { return !g_dof_off; }
 void runtime_game_patches(Module *m) {
     fprintf(stderr, "[botw] %s game-code patches\n", TOTK_GAME_VERSION);
     botw_stereo_install(m);
@@ -1286,12 +1377,9 @@ void runtime_game_patches(Module *m) {
 #if defined(GAME_BOTW190) || defined(GAME_BOTW160)
     patch_hd_heaps(m);
 #endif
-#ifdef GAME_BOTW190
     patch_shadow_res(m);
-#endif
-#ifdef GAME_BOTW190
     patch_fov(m);
-#endif
+    patch_view(m);   /* 1.9.0 and 1.6.0 (the tables differ) */
     patch_font_size(m);
     botw_aspect_install(m);
     botw_vr_camera_install(m);
@@ -1722,7 +1810,7 @@ int runtime_render_res(unsigned *w, unsigned *h) { (void)w; (void)h; return 0; }
    1.9.0 values (changed in play, the screen size kept): unset or auto as 1.6.0; 1440p the same
    cycle, starting at 2560x1440; screen takes the largest 16:9 size of the main display (native_k_from_screen), starts at
    it, and the settings panel's picture offers off, MetalFX 2K, native (the screen size) and native 2K + MetalFX (the
-   2560x1440 canvas that MetalFX scales to the window);
+   2560x1440 canvas that MetalFX scales to the window; 1.6.0 takes screen the same way, with its own heaps, heaps160);
    0 or 1080p the shipped size; a 16:9 <w>x<h> (native_k_parse) that size, fixed. The swapchain and the heaps are made for
    the largest size (native_heaps: 1.9.0 needs more than 1.6.0, see the GAME_BOTW190 block above). */
 enum { OUT_OFF, OUT_AUTO, OUT_FIXED };
@@ -1756,6 +1844,7 @@ static int native_5k_app(void) {
     return v;
 }
 #ifdef GAME_BOTW160
+static int g_out_start_big;   /* 1: the canvas starts at the largest size (screen), as on 1.9.0 */
 static void output_parse(void) {
     if (g_out_mode >= 0) return;
     if (ios_code()) { g_out_mode = OUT_OFF; return; }   /* the phone: the game's own size (handheld 720p) */
@@ -1772,8 +1861,14 @@ static void output_parse(void) {
     const char *e = getenv("TOTK_OUTPUT_RES"); unsigned a, b; char tail;
     if (e && !strcmp(e, "0")) { g_out_mode = OUT_OFF; return; }
     if (!e || !*e || !strcmp(e, "auto")) { g_out_mode = OUT_AUTO; g_out_w = native_5k_app() ? 5120 : native_4k_app() ? 3840 : 2560; g_out_h = native_5k_app() ? 2880 : native_4k_app() ? 2160 : 1440; return; }
+    if (!strcmp(e, "screen")) {   /* the largest 16:9 size of the main display, switchable (as 1.9.0's screen: native_k_from_screen) */
+        unsigned w, h; native_screen_pixels(&w, &h); int k = native_k_from_screen(w, h);
+        if (!k) { fprintf(stderr, "[botw] native size from the screen: main display %ux%u has no 16:9 size above 1920x1080; shipped canvas\n", w, h); g_out_mode = OUT_OFF; return; }
+        fprintf(stderr, "[botw] native size from the screen: main display %ux%u (native mode) -> %ux%u\n", w, h, 16u * k, 9u * k);
+        g_out_mode = OUT_AUTO; g_out_start_big = 1; g_out_w = 16u * k; g_out_h = 9u * k; return;
+    }
     if (sscanf(e, "%ux%u%c", &a, &b, &tail) != 2 || a < 1280 || b < 720 || a > 5120 || b > 2880)
-        runtime_fail("TOTK_OUTPUT_RES must be auto, 0 or <width>x<height> (1280x720 .. 5120x2880)");
+        runtime_fail("TOTK_OUTPUT_RES must be auto, screen, 0 or <width>x<height> (1280x720 .. 5120x2880)");
     g_out_mode = OUT_FIXED; g_out_w = a; g_out_h = b;
 }
 #else
@@ -1943,8 +2038,9 @@ static int patch_output_res(Module *m) {
     const uint64_t page = (uintptr_t)m->base + data_off;
     g_out_main = m->base; g_out_page = (_Atomic uint64_t *)(void *)(page + 16);
     uint64_t initial_vr=atomic_load(&g_out_vr_requested);
-    output_page(g_out_vr?(unsigned)initial_vr:g_out_mode==OUT_AUTO?1920:w,
-                g_out_vr?(unsigned)(initial_vr>>32):g_out_mode==OUT_AUTO?1080:h);
+    int small = g_out_mode == OUT_AUTO && !g_out_start_big;   /* auto starts at 1080p, screen at the screen size */
+    output_page(g_out_vr?(unsigned)initial_vr:small?1920:w,
+                g_out_vr?(unsigned)(initial_vr>>32):small?1080:h);
     uint32_t mw = movz_x(9, w, 0), mh = movk_x(9, h, 2);   /* the swapchain at the largest size */
     for (size_t i = 0; i < sizeof size_init / sizeof *size_init; i++) { memcpy(m->base + size_init[i], &mw, 4); memcpy(m->base + size_init[i] + 12, &mh, 4); }
     const uint32_t branch[4] = {
@@ -1969,7 +2065,7 @@ static int patch_output_res(Module *m) {
     else if (!botw_heap_patch(m->base, m->size, m->text_end, 0xe53fa0, 0x52b82015u, 21, 1, (uint64_t)(3088 + extra) << 20))
         runtime_fail("the output size: cannot install the 64-bit root heap size");
     fprintf(stderr, "[botw] output: a %ux%u swapchain, starting at %s; heaps: render %u MiB, graphics %u MiB, +%u MiB (25 instructions verified)%s\n",
-            w, h, g_out_mode == OUT_AUTO ? "1920x1080" : "that size", render, gfx, extra, g_out_mode == OUT_AUTO ? "; the settings panel switches" : "");
+            w, h, small ? "1920x1080" : "that size", render, gfx, extra, g_out_mode == OUT_AUTO ? "; the settings panel switches" : "");
     return 1;
 }
 #else
@@ -2179,7 +2275,7 @@ int runtime_game_fps_limit(void) {
 /* The settings panel's picture (runtime.h OUTPUT_MODE_*). MetalFX 2K: MetalFX replaces the game's own upscale of the
    scene into the 1080p canvas (nvn_mtl.m mfxup_dock, BOTW_MFXUP_DOCK_KEY) and upscales the canvas into a window or full
    screen bigger than 1080p at the present (the output stage). With a switchable start (TOTK_OUTPUT_RES auto, the default;
-   on 1.9.0 also 1440p and screen) the panel also offers native: the canvas and the scene at the largest size of the
+   screen on both versions, and on 1.9.0 also 1440p) the panel also offers native: the canvas and the scene at the largest size of the
    session (output_switch; 2560x1440, or the screen size under TOTK_OUTPUT_RES=screen), and native + MetalFX: the
    2560x1440 canvas that MetalFX scales to the window (1.9.0 on a screen bigger than 2K: bog 2026-10-24, clean edges at 51
    FPS, native 2K 50, the screen size 42-44). Both versions also offer 720p (the canvas and the scene at 1280x720).
@@ -2198,7 +2294,7 @@ int runtime_output_native(int mode, unsigned *w, unsigned *h) {
     if (mode == OUTPUT_MODE_NATIVE) { *w = g_out_w; *h = g_out_h; return 1; }
     if (mode != OUTPUT_MODE_NATIVE_METALFX) return 0;
 #ifdef GAME_BOTW160
-    if (app4k) { *w = 2560; *h = 1440; } else { *w = g_out_w; *h = g_out_h; }
+    if (g_out_w >= 2560) { *w = 2560; *h = 1440; } else { *w = g_out_w; *h = g_out_h; }   /* as 1.9.0; a screen below 2K keeps its size */
 #else
     if (g_out_w < 2560) return 0;   /* a screen below 2560x1440: the swapchain cannot take the 2K canvas */
     *w = 2560; *h = 1440;   /* the largest size is 2560x1440 or bigger (screen); MetalFX scales this canvas to the window */

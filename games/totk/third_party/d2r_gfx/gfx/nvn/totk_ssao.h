@@ -5,7 +5,7 @@
 // stay out of the pipeline archive).
 // Why the shader and not the game's settings: the AO the player sees is computed inside the shadow pre-pass fragment
 // shader (TOTK 1.4.3 9a5e3335514e4cbb / abbbf48f9b5e6598 and TotK 1.2.1 dd93068627010533 / 67acb7c322ece44d at render/4,
-// BotW 1.9.0 0eeb23f2b287a638 at render/2) and written to the shadow mask's .z. Pair count, radius and strength are
+// BotW 1.9.0 0eeb23f2b287a638 at render/2, 1.6.0 d5e832b905b4de22) and written to the shadow mask's .z. Pair count, radius and strength are
 // literals or the shader's own c1 constants, so the game's ssao_parameter data and its agl::sdw::SSAO fields do not reach
 // the screen.
 
@@ -277,6 +277,11 @@ static const struct { const char *prefix; int slot; const char *helper, *store, 
     {"0eeb23f2b287a638", 3, k_ssao_helper_botw,
      "_302 = as_type<int>(_1051);",
      "_302 = as_type<int>(totk_ssao_botw(_1051, (*spvDescriptorSet0.fp_c1)._m0[3], (*spvDescriptorSet0.fp_c1)._m0[0], (*spvDescriptorSet0.fp_c1)._m0[1], (*spvDescriptorSet0.fp_c1)._m0[2], (*spvDescriptorSet0.fp_c3)._m0[16].x, spvDescriptorSet0.fp_t_tcb_20, spvDescriptorSet0.fp_t_tcb_20Smplr, _853, _851, _847, _849, _839, _78, _891, _893, _905, _909));", NULL, NULL},
+#if defined(GAME_BOTW) && !defined(GAME_BOTW190)   /* (the graphics layer of 1.6.0 is built with GAME_BOTW alone, Makefile)  1.6.0's AO shader: 0eeb23f2's translation but for 17 `precise::` -> `fast::` (every id equal, the store line once); same slot, helper, store and call */
+    {"d5e832b905b4de22", 3, k_ssao_helper_botw,
+     "_302 = as_type<int>(_1051);",
+     "_302 = as_type<int>(totk_ssao_botw(_1051, (*spvDescriptorSet0.fp_c1)._m0[3], (*spvDescriptorSet0.fp_c1)._m0[0], (*spvDescriptorSet0.fp_c1)._m0[1], (*spvDescriptorSet0.fp_c1)._m0[2], (*spvDescriptorSet0.fp_c3)._m0[16].x, spvDescriptorSet0.fp_t_tcb_20, spvDescriptorSet0.fp_t_tcb_20Smplr, _853, _851, _847, _849, _839, _78, _891, _893, _905, _909));", NULL, NULL},
+#endif
 };
 static int ssao_entry(const char *key) {
     for (int i = 0; i < (int)(sizeof k_ssao_keys / sizeof *k_ssao_keys); i++) if (!strncmp(key, k_ssao_keys[i].prefix, 16)) return i;

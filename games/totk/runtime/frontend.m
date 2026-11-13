@@ -919,7 +919,7 @@ void runtime_front_run(void(*callback)(void)){
   if(totk_hdr_available()){
    front_hdr_present_mode(front_hdr_enabled());front_hdr_update();
    [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(NSTimer *timer){(void)timer;front_hdr_update();}];
-   fprintf(stderr,"[hdr] TOTK 1.4.3 scene HDR: EDR %s, FP16 extended linear sRGB, RenoDX-style tone mapping\n",front_hdr_enabled()?"on":"off");
+   fprintf(stderr,HDR_START_LOG,front_hdr_enabled()?"on":"off");
   }
   metalLayer.drawableSize=CGSizeMake(ww,wh);runtime_aspect_view(ww,wh);
   metalLayer.framebufferOnly=NO;window.contentView.wantsLayer=YES;window.contentView.layer=metalLayer;

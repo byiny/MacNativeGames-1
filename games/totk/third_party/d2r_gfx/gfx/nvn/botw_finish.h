@@ -1,5 +1,5 @@
-// FXAA off and sharpening (Mac, Breath of the Wild 1.9.0; the effects page's rows, as 1.4.3's totk_finish.h).
-// Game-specific and never needed to run the game; included by nvn_mtl.m right after totk_finish.h, on GAME_BOTW190 only.
+// FXAA off and sharpening (Mac, Breath of the Wild 1.9.0 and 1.6.0; the effects page's rows, as 1.4.3's totk_finish.h).
+// Game-specific and never needed to run the game; included by nvn_mtl.m right after totk_finish.h, on GAME_BOTW (both versions) only.
 // The game's FXAA bd7ffdd4 (FXAA 3.11, as TOTK's 22a61cb1) is also its upscale: the one draw reads the finished picture
 // and writes the canvas (RGB only, mask 0x7), and the UI is drawn into the canvas after it. With MetalFX upscaling on and
 // a picture smaller than the canvas, mfxup_dock replaces the whole draw (MetalFX anti-aliases instead); at the native

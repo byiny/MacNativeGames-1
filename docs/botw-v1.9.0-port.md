@@ -425,6 +425,8 @@ The panel's Resolution row names the native size (2560x1440, or the screen size 
 | `0` or `1080p` | the game's own 1920x1080 | 1920x1080 | 1080p, 1080p + MetalFX |
 | another 16:9 size above 1920x1080, up to 3456x1944, with a width that is a multiple of 128 | that size, fixed, for tests (`2944x1656`) | that size | 1080p, 1080p + MetalFX |
 
+1.6.0 takes `auto`, `0`, `screen` and a fixed `<w>x<h>`: `screen` gives the same size as above (`native_k_from_screen`, the same log line), starts at it, and offers the same Resolution choices as 1.9.0 (720p, 1080p, 1080p + MetalFX, native = the screen size, 2K + MetalFX), with 1.6.0's own heaps made for the screen size; with no 16:9 size above 1920x1080 it keeps the shipped canvas. `<w>x<h>` stays fixed.
+
 "2K + MetalFX" is the 2560x1440 canvas that MetalFX scales to the window (on a screen bigger than 2K: clean edges at 51
 FPS in the bog, against 50 for native 2K and 42-44 for the screen size, 2026-10-24). With `screen`, plain native 2K is not
 a choice. 1.9.0 offers no 720p choice (1.6.0 does; it is not tested on 1.9.0). A start above 1080p turns off MetalFX 2K
@@ -574,6 +576,103 @@ stopped voice's last samples (Ryujinx.Audio `CommandGenerator.GenerateVoice`: `V
 - Not tested: a listening test by the owner (pause menu, map, shrine, fast travel) and splitter voices (BOTW opens none).
 - A run that ends in Game Over has no world sound (digital zero): the first runs of this check, started from the legs
   save on a build without the legs cure, were silent for that reason.
+
+## LOD, render distance and depth of field (1.9.0)
+
+Three effects-page rows (`graphics-lod.txt`, `graphics-far.txt`, `graphics-dof.txt`; `TOTK_LOD_SCALE`, `TOTK_FAR_SCALE`).
+Each is a branch from one game word to a stub in main's text padding (`botw_view_patches.h`, `patch_view` in
+`game_patches_botw.c`). The stub reads its word on the data page after main (+0x50, +0x54, +0x58) at every call, so a
+change acts at once. Installed on the Mac only, always: at 1x / on the game gets its own result bit for bit. Each site is
+checked first (8, 9 and 5 words); a mismatch leaves the game's code and greys the row. Tried in the game (2026-11-04 and -05, both versions): render distance at 0.1x hides the Bokoblin and the chest by a ruin wall that 1x shows, depth of field off removes the scope view's background blur, and the model detail distance runs but shows no picture change (see "Model detail in the game" below). Not tried yet: render distance 1.5x on 1.6.0, the actor count and heap use at 1.5x on both versions, depth of field on far scenery and in cutscenes. 1.6.0 has its own sites for two of the three (below).
+
+| Effect | Function (main+) | Site (main+) | Word | Stub |
+|---|---|---|---|---|
+| Model detail distance | `gsys::ModelViewInfo::calcLodLevel` 0x10575a4 (x0 view info, +0x18 depth z, negative in front; w1 level count; x2 LOD table, [0] bias, [2] k; s0 threshold; 33 callers) | 0x10575e8, after `ldr s1, [x0, #0x18]` / `ldr s2, [x2]`, before `fcmp s1, s0` | `1e222821` `fadd s1, s1, s2` | `adrp x11` / `ldr s3, [x11, #0x50]` / `fmadd s1, s1, s3, s2` / `b 0x10575ec`; the word is c = 1/K |
+| Render distance | `ksys::map::Object::getDispDistance` 0x10a4640: (distance > 0 ? distance : 100) x `ActorDebug::mDispDistanceMultiplier` ([0x1e39348] + 0x310) | 0x10a4688 | `1e210800` `fmul s0, s0, s1` | `fmul s0, s0, s1` / `adrp x8` / `ldr s1, [x8, #0x54]` / `fmul s0, s0, s1` / `b 0x10a468c`; the word is K |
+| Depth of field | draw entry of gsys `DepthOfField` 0xfe09e4 (wrapper `ModelScenePfx::drawDOF` 0x102b5d8, called from 0xfb8e0c); the enable byte is at object +0x1310 | 0xfe09ec | `34000269` `cbz w9, 0xfe0a38` (a plain `ret`) | `adrp x10` / `ldr w10, [x10, #0x58]` / `cbnz w10` and `cbz w9` to a `b 0xfe0a38`, else `b 0xfe09f0`; the word is 0 for on |
+
+- The camera's far plane is 25000 m (`main+0xd55f6c`, the default far clip, as on TOTK), more than the map, so a far
+  plane times K shows nothing. The row scales the display distance instead. It sets how many actors the placement keeps
+  alive and the `_Far` model swap. On 2026-11-04 (1.9.0, Great Plateau save) 2x and 3x crashed the world load right
+  after the `_Far` actor packs streamed in (guest jumps at main+0x154d130, a SIGSEGV at main+0x151a358); 1.5x ran twice
+  without a fault. So the panel offers 1x, 1.25x and 1.5x, and the file (percent) and the setter take 0.1x to 1.5x.
+- Model detail: the level is the one the game picks at depth d / K. `max` is K = 1e6, the level a model has up close.
+  The LOD zoom ratio the camera adds (`main+0x1273a3c`, 0 at the default FOV) is left alone.
+- Model detail in the game (2026-11-04 and -05, both versions): the row acts on the level choice as TOTK 1.4.3's does.
+  With a probe on 1.9.0 the game picked level 0 (the full model) for every call at `max`, and for 40% of calls at the
+  default. No picture change was seen in four scenes (Great Plateau near and far, two tower views, a ruin over a plain
+  with trees at 100-400 m): runs at the default, a second default run and `max` with no input line up pixel for pixel and
+  differ only by weather. `max` costs no fps that the runs resolve (1.9.0 58.8 / 58.4 / 61.2, 1.6.0 69.4 / 69.3 / 69.6).
+  Terrain, grass and the `_Far` swap have their own distance code, which the row does not reach.
+- Depth of field: a page of zeros means "on", so the game's own test stays. Event cameras and the DOF manager only write
+  parameters, so cutscenes go on. x11 and s3 (LOD), x8 and s1 (distance) and x10 (DOF) are free at the sites.
+- Padding after the text end (16-byte aligned): +32 FOV stub (11 words), +80 camera blend (6 words), +112 LOD (4),
+  +128 render distance (5), +160 depth of field (6). Data page: +0 frame step, +8 pad tick, +16 / +24 output size, +0x20
+  aspect, +0x48 / +0x4c FOV, +0x50 LOD, +0x54 render distance, +0x58 depth of field.
+- `tests/test_botw_view_patches.c` (run by `tests/test_botw_view_patches.py`) runs each stub in a small interpreter on a
+  fake main: K = 1 gives the game's bits, K = 2 gives z x 0.5 + bias, d x m x K for the distance, and no draw for DOF off.
+
+### 1.6.0 sites
+
+Same slots, same files, same flag meaning. The tables `view_lod160`, `view_far160` and `view_dof160` in `botw_view_patches.h`;
+`patch_view` picks them under `#ifdef GAME_BOTW160`. Checked against the 1.6.0 analysis ELF (the words also match the app's rewritten main).
+
+| Effect | Function (main+) | Site (main+) | Word | Stub |
+|---|---|---|---|---|
+| Render distance | `getDispDistance` is inlined at 26 places, each multiplying by `ActorDebug` +0x310 (instance at [main+0x2cc43b0]); the game never makes that instance (its pointer stayed 0 in a whole 1.6.0 run), so every place takes its null path and m = 1.0. 21 places take d from `getTraverseDist` 0x1561f80; the 5 others compute d inline (the first at 0x38a0c) | 6 sites: `getTraverseDist`'s exit 0x1562038, then the 5 null paths' `fmov sN, #1.0` at 0x38a14, 0x15656f8, 0x1565948, 0x1566b70, 0x1c1da74 | `a9437bfd` `ldp x29, x30, [sp, #0x30]` (the exit, every path reaches it with d in s0); the 5: `fmov sN, #1.0` (just before an `adrp x8`) | exit: `ldp x29, x30, [sp, #0x30]` / `adrp x8` / `ldr s1, [x8, #0x54]` / `fmul s0, s0, s1` / `b 0x156203c`. Each null path: `adrp x8` / `ldr sN, [x8, #0x54]` / `b site+4`. The word is K's bits |
+| Depth of field | `agl::pfx::DepthOfField::draw` 0x14140b0; the enable byte is at object +0x1350 (one caller, the inlined `drawDOF`, `bl` at 0x13ecbc0) | 0x14140e8 | `34012108` `cbz w8, 0x1416508` (the epilogue, `add sp, sp, #0x1d0`, not a `ret`) | `adrp x10` / `ldr w10, [x10, #0x58]` / `cbnz w10` and `cbz w8` to a `b 0x1416508`, else `b 0x14140ec`; the word is 0 for on |
+| Model detail distance | `calcLodLevel` is inlined into 32 `gsys` draw functions (main+0x14e2c30 to 0x14ecb90). Each has the 1.9.0 sum v = z + bias. z is the first source of the `fadd`: the float just stored at view info +0x18 or at unit +0x50. The bias is the second: `[unit+8]`, units 0x58 bytes apart. No site has the two swapped. `s31` is read or written in none of the 32 functions | 30 sites `fadd s1, s1, s2` (`1e222821`) and 2 sites `fadd s5, s5, s6` (`1e2628a5`): main+0x14e36b4 and 0x14e4314. All 32 are in `view_lod160_guard` | `str x16, [sp, #-16]!` / `adrp x16` / `ldr s31, [x16, #0x50]` / `ldr x16, [sp], #16` / `fmadd sd, sn, s31, sm` / `b site+4`; the word is c = 1/K. `runtime_lod_available()` is true when the patch is in, and the log line says "model detail distance x%g at 32 sites from main+0x14e2eac, stubs +0x..." |
+
+- The 1.6.0 factor gives each place (d > 0 ? d : 100) x K, as 1.9.0's (d > 0 ? d : 100) x m x K with m = 1. At the 21 places d
+  comes from `getTraverseDist`, and each caller applies `d > 0 ? d : 100` (100 = the float at main+0x260e280) after the call. So the
+  exit stub substitutes 100 for d <= 0 before it scales: a plain d x K would leave a 0 at 0 and the caller at 100 m for any K.
+  At K = 1 the stub returns d untouched (the `fcmp s1, s2` with 1.0 skips the rest), so the game's own value stays, 0 included.
+  The stub uses x8, x9, s1 and s2: a scan from each of the 21 calls to its `fcsel` found none of them read before written. The 5 inline
+  places load K in place of the null path's 1.0. K = 1 loads the word `0x3f800000`, the game's own value bit for bit.
+- The 1.6.0 render distance writes only the slot (+0x54), as 1.9.0's does: `runtime_far_scale_set` stores the word and
+  nothing writes the game's `ActorDebug` any more, so a change acts at the next call of a stub. Checks: 4 words of
+  `getTraverseDist` and 5 words around each of the 5 null paths, then the stubs' padding and the slot.
+- Model detail distance, checks and room. Each site has five checked words, at -8, -4, 0, +4 and +8: 160 in all, and
+  nothing is written unless all 160, the stubs' padding and the slot (+0x50) hold. The rewriter's module
+  (`main.patched.bin`) changes the words at -16 and +12 of 6 sites (`madd x10, ..., x16, x18` becomes a `b` to its code:
+  main+0x14e6700, 0x14e7668, 0x14eb8f0, 0x14ebe78, 0x14ec47c, 0x14eca04). The checked words are the same in the ELF and
+  in the rewritten module. The stub saves and restores `x16` because the game reads it after many sites (the `madd` at
+  +12 of 7 sites, `str w28, [x16]` after the 2 `s5` sites). Nothing in the 32 functions uses a negative `sp` offset,
+  so the push below `sp` is free. The data page is about 13 MB from the padding, out of `ldr`-literal range, hence the
+  `adrp`. With c = 1.0 (K = 1) `fmadd` gives the `fadd`'s bits. `TOTK_LOD_SCALE` and "max" act as on 1.9.0.
+- Padding after the text end (main+0x2129ba4, 16-byte aligned main+0x2129bb0, page end main+0x212a000): +0 sound-link veneer
+  (4 words), +16 camera blend (6 words), +48 to +180 the three FOV stubs (11 words each), +192 to +960 the 32 model detail stubs (6 words each, site i at +192 + 24 i), +960 depth of field (6),
+  +984 to +1092 render distance (27 words: the exit's 12, then 3 for each of the 5 null paths); 12 bytes of the 1104 stay free. The app's main is 0x2e0e988 bytes, so the data
+  page is main+0x2e10000 and the slots are the 1.9.0 ones (+0x50, +0x54, +0x58).
+- Tried in the game (plateau-ruin-legs, 2026-11-04): the render distance at 0.1x logs "render distance x0.1 (display distance) at 6 sites from main+0x1562038" and hides the Bokoblin and the chest by the ruin wall that 1x shows, at the same fps. Not tried: the 26 places were not counted again here (only that 0x38a0c loads +0x310), render distance 1.5x, the actor count and heap use at 1.5x. The model detail distance patch was checked by the disassembly, the
+  interpreter in `tests/test_botw_view_patches.c` and the game runs above ("max" logs its line, no picture change, no fps cost).
+
+## HDR / EDR (2026-11-04)
+
+TOTK 1.4.3's scene HDR (PR #1129, the RenoDX approach) acts on both BOTW versions, Mac only. The compose draw is the
+game's tone mapping: 1.9.0 `f7ee6fe1`, 1.6.0 `d14b1c38` (the same MSL, `fast::` against `precise::`). Its maths,
+constants and output equal 1.4.3's `0ac9a549`, so its HDR twin calls the same `hdr_scene_map`; only the anchors differ
+(scene in t0, bloom in t1). The frame after it (pass profile of 2026-10-22, docked 1080p):
+
+| Draw | Target | HDR path |
+|---|---|---|
+| compose | RGB10A2Unorm picture | HDR twin writes its FP16 companion |
+| FXAA / upscale `bd7ffdd4` (or MetalFX, key 3) | RGB10A2Unorm canvas | reads and writes FP16 companions; no clamp in the shader |
+| UI | canvas | blends into the FP16 canvas, at UI white |
+| copy `ecb4242e` | sRGB swapchain | `hdr_capture` keeps the FP16 canvas for the EDR present |
+
+Unlike 1.4.3's R11G11B10F targets, RGB10A2Unorm stores alpha: its companions keep alpha and the RGB-only blend
+remap does not apply (`HDR_RGB_ONLY`, `totk_hdr_compose.h`). The files are 1.4.3's: `hdr.txt` (on / off) and
+`hdr-<name>.txt` (`totk_hdr.h`). The effects page shows 1.4.3's two HDR rows on 1.9.0; 1.6.0 gets them with its page.
+`flag hdr 0|1` switches HDR live (game-test runner). Frame interpolation stays SDR, as on 1.4.3. Sharpening (RCAS)
+runs on the HDR canvas values.
+
+Cost (M1 Pro, 1.9.0, `TOTK_OUTPUT_RES=screen` 3456x1944, MetalFX keys on, forest campfire save, 2026-11-04): GPU p50
+18.1 ms with HDR off, 23.2 ms on; 38.6 fps off, 31-34 fps on. The compose twin takes 2.3 ms of it (the game's own 0.3 ms).
+It compiles with relaxed maths (`HDR_TWIN_LIBRARY`): with the translations' safe maths it took 7.7 ms.
+1.6.0 (same save, `TOTK_OUTPUT_RES=3456x1944`): GPU p50 17.5 ms off, 22.5 ms on; 49.0 fps off, 37-39 fps on. Its drawable
+readback with HDR on: peak 17.1 SDR-white units, 284,329 of 6,718,464 pixels above white, none nonfinite. The 1.6.0
+graphics objects are built with `GAME_BOTW` only, so the compose key tests `GAME_BOTW190`, as `TAA_COMPOSE` does.
 
 ## Not tested and known issues
 

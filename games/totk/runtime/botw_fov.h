@@ -1,4 +1,4 @@
-/* Breath of the Wild 1.9.0's field of view (the settings panel's effects page, graphics-fov.txt, TOTK_FOV_SCALE; Mac
+/* Breath of the Wild 1.9.0's and 1.6.0's field of view (the settings panel's effects page, graphics-fov.txt, TOTK_FOV_SCALE; Mac
    only), without the runtime, so tests/test_botw_fov.c can check it.
    The main camera's update (main+0x10eda5c, the camera singleton's views at +0x28 / +0x118) loads the camera's vertical
    FOV (radians, [x20, #0x74]) at main+0x10edad8 and passes it to sead's PerspectiveProjection::setFovy (main+0xeb4898:
@@ -13,25 +13,58 @@
    are not touched. The game's zooms scale with it when they go
    through the camera's FOV, as on 1.4.3. Nothing is written unless every check holds; a mismatch leaves the game's code
    and the field of view as shipped. Not tried in the game yet: the picture, the live change, zooms, cutscenes, the
-   edges of the culling frustum at 1.5x. */
+   edges of the culling frustum at 1.5x.
+   1.6.0 (2026-11-04): setFovy is inlined there, so the same load sits at three places (FOV_SITES): the main camera's
+   update main+0x15c2030 for its two views (x22 / x21 the camera, +0x74; each followed by fmov s1, #0.5, fmul s8 and the
+   store to the projection's +0xa0) and the generic per-view copy main+0x15c3450. Each site gets its own stub (the
+   sound-link veneer and the camera-blend veneer come first in the padding) and returns to the instruction after it; x8
+   and s2 are dead after each load. All three read the one factor. */
 #pragma once
 #include <math.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef GAME_BOTW160
+#define FOV_SITES 3
+#define FOV_SITE 0x15c20e4u         /* the first site, for the log: view 1's load in the main camera's update */
+#define FOV_BACK 0x15c20e8u
+#define FOV_STUB_SKIP 48u           /* past the sound-link veneer (4 words at +0) and the camera-blend veneer (6 words at +16) */
+#else
+#define FOV_SITES 1
 #define FOV_SITE 0x10edad8u
 #define FOV_BACK 0x10edadcu         /* bl main+0xeb4898: setFovy */
 #define FOV_STUB_SKIP 32u           /* the stub's place in the padding after the text, past 32 bytes left free */
+#endif
 #define FOV_STUB_WORDS 11
 #define FOV_CAP 2.875f            /* rad: fmov s2, #2.875 */
 #define FOV_FACTOR_SLOT 0x48u       /* the data page: 1.9.0 uses +0 (the frame step) and +0x20 (the aspect) */
 #define FOV_GAME_SLOT 0x4cu
-#define FOV_GUARDS 5
 #define FOV_MIN 0.5
 #define FOV_MAX 2.0
 
 /* The words checked before anything is written: the camera update around the load, the call and setFovy's store. */
+#ifdef GAME_BOTW160
+#define FOV_GUARDS 12
+/* Per site, four words: the store before the load, the load (the stub's first word), fmov s1, #0.5 and the store of the
+   FOV into the projection's +0xa0. fov_load[s] indexes the load in fov_guard. */
+static const struct { uint32_t off, original; } fov_guard[FOV_GUARDS] = {
+    {0x15c20e0u, 0xb900f268u},   /* str w8, [x19, #0xf0] */
+    {0x15c20e4u, 0xbd4076c0u},   /* ldr s0, [x22, #0x74]: the camera's vertical FOV (view 1) */
+    {0x15c20e8u, 0x1e2c1001u},   /* fmov s1, #0.5 */
+    {0x15c20f0u, 0xbd00da60u},   /* str s0, [x19, #0xd8]: projection +0xa0 */
+    {0x15c21b0u, 0xb901e268u},
+    {0x15c21b4u, 0xbd4076a0u},   /* ldr s0, [x21, #0x74]: view 2 */
+    {0x15c21b8u, 0x1e2c1001u},
+    {0x15c21c0u, 0xbd01ca60u},   /* str s0, [x19, #0x1c8] */
+    {0x15c3578u, 0xb900ca68u},
+    {0x15c357cu, 0xbd4076c0u},   /* ldr s0, [x22, #0x74]: the per-view copy */
+    {0x15c3580u, 0x1e2c1001u},
+    {0x15c3588u, 0xbd00b260u},   /* str s0, [x19, #0xb0] */
+};
+static const unsigned fov_load[FOV_SITES] = {1, 5, 9};
+#else
+#define FOV_GUARDS 5
 static const struct { uint32_t off, original; } fov_guard[FOV_GUARDS] = {
     {0x10edad0u, 0x39006276u},   /* strb w22, [x19, #0x18] */
     {0x10edad4u, 0xbd00ca60u},   /* str s0, [x19, #0xc8] */
@@ -39,6 +72,8 @@ static const struct { uint32_t off, original; } fov_guard[FOV_GUARDS] = {
     {0x10edadcu, 0x97f71b6fu},   /* bl main+0xeb4898 */
     {0xeb48acu, 0xbd00a000u},    /* str s0, [x0, #0xa0]: setFovy keeps its argument */
 };
+static const unsigned fov_load[FOV_SITES] = {2};
+#endif
 
 static inline uint32_t fov_branch(uint64_t site, uint64_t target) {   /* b <target>; 0 outside the range */
     int64_t delta = (int64_t)target - (int64_t)site;
@@ -51,12 +86,13 @@ static inline uint32_t fov_adrp(unsigned rd, uint64_t pc, uint64_t target) {   /
     uint32_t imm = (uint32_t)pages & 0x1fffffu;
     return 0x90000000u | ((imm & 3u) << 29) | ((imm >> 2) << 5) | (rd & 31u);
 }
-static inline uint64_t fov_stub_at(uint64_t text_end) { return ((text_end + 15) & ~15ULL) + FOV_STUB_SKIP; }
+static inline uint64_t fov_stub_at(uint64_t text_end) { return ((text_end + 15) & ~15ULL) + FOV_STUB_SKIP; }   /* site 0's; site s is 44 * s further */
 
-/* The stub at main+stub (base: where main is mapped, for the adrp; data: the data page's offset in main). 0 = a branch
-   or the adrp is out of range. */
-static inline int fov_stub_words(uint32_t w[FOV_STUB_WORDS], uint64_t base, uint64_t stub, uint64_t data) {
-    w[0] = fov_guard[2].original;                          /* ldr s0, [x20, #0x74]: the game's FOV */
+/* Site s's stub at main+stub (base: where main is mapped, for the adrp; data: the data page's offset in main). 0 = a
+   branch or the adrp is out of range. */
+static inline int fov_site_stub_words(unsigned s, uint32_t w[FOV_STUB_WORDS], uint64_t base, uint64_t stub, uint64_t data) {
+    const uint64_t site = fov_guard[fov_load[s]].off;
+    w[0] = fov_guard[fov_load[s]].original;                /* ldr s0, [x<camera>, #0x74]: the game's FOV */
     w[1] = fov_adrp(8, base + stub + 4, base + data);      /* adrp x8, <data page> */
     w[2] = 0xbd000100u | ((FOV_GAME_SLOT / 4) << 10);      /* str s0, [x8, #0x4c]: kept for the log */
     w[3] = 0xb9400108u | ((FOV_FACTOR_SLOT / 4) << 10);    /* ldr w8, [x8, #0x48]: the factor, read once */
@@ -66,8 +102,12 @@ static inline int fov_stub_words(uint32_t w[FOV_STUB_WORDS], uint64_t base, uint
     w[7] = 0x1e220800u;                                    /* fmul s0, s0, s2 */
     w[8] = 0x1e20f002u;                                    /* fmov s2, #2.875 */
     w[9] = 0x1e225800u;                                    /* fmin s0, s0, s2: a NaN stays a NaN */
-    w[10] = fov_branch(stub + 40, FOV_BACK);               /* b main+0x10edadc: the setFovy call */
+    w[10] = fov_branch(stub + 40, site + 4);               /* b <site + 4>: the instruction after the load */
     return w[1] && w[10];
+}
+/* The first site's stub (the only one on 1.9.0). */
+static inline int fov_stub_words(uint32_t w[FOV_STUB_WORDS], uint64_t base, uint64_t stub, uint64_t data) {
+    return fov_site_stub_words(0, w, base, stub, data);
 }
 /* What the stub hands setFovy for the game's FOV g and the factor's word k (the log's "computed" degrees). */
 static inline float fov_result(float g, float k) {
@@ -98,10 +138,10 @@ static inline double fov_parse_env(const char *text) {
     double d; return fov_number(text, &d) && d >= FOV_MIN && d <= FOV_MAX ? d : 0;
 }
 
-/* Install: the five words are checked first, then the stub's padding (zero, inside the 4 KiB page after the text), the
-   data page and its two slots (zero), the ranges and the factor. Only when all hold are the factor, the stub and, last,
-   the branch written. 0 = done; 1-5 = that guard is not as shipped (its word in *found); -1 = no room; -2 = the factor
-   is not 0.5..2. Nothing is written unless 0 is returned. */
+/* Install: every guard word is checked first, then the stubs' padding (zero, inside the 4 KiB page after the text), the
+   data page and its two slots (zero), the ranges and the factor. Only when all hold are the factor, the stubs and, last,
+   the branches written. 0 = done; 1-FOV_GUARDS = that guard is not as shipped (its word in *found); -1 = no room; -2 =
+   the factor is not 0.5..2. Nothing is written unless 0 is returned. */
 static inline int fov_apply(uint8_t *main, uint64_t base, uint64_t text_end, uint64_t data, uint64_t size, double k,
                             uint32_t *found) {
     uint32_t bits;
@@ -110,14 +150,18 @@ static inline int fov_apply(uint8_t *main, uint64_t base, uint64_t text_end, uin
         uint32_t have; memcpy(&have, main + fov_guard[i].off, 4);
         if (have != fov_guard[i].original) { if (found) *found = have; return (int)i + 1; }
     }
-    const uint64_t stub = fov_stub_at(text_end);
-    if (stub + 4 * FOV_STUB_WORDS > ((text_end + 0xfff) & ~0xfffULL) || data & 0xfff || data + 0x50 > size) return -1;
-    for (unsigned i = 0; i < 4 * FOV_STUB_WORDS; i++) if (main[stub + i]) return -1;
+    const uint64_t stub = fov_stub_at(text_end), stubs = 4 * FOV_STUB_WORDS * FOV_SITES;
+    if (stub + stubs > ((text_end + 0xfff) & ~0xfffULL) || data & 0xfff || data + 0x50 > size) return -1;
+    for (unsigned i = 0; i < stubs; i++) if (main[stub + i]) return -1;
     for (unsigned i = FOV_FACTOR_SLOT; i < FOV_GAME_SLOT + 4; i++) if (main[data + i]) return -1;
-    uint32_t w[FOV_STUB_WORDS], jump = fov_branch(FOV_SITE, stub);
-    if (!jump || !fov_stub_words(w, base, stub, data)) return -1;
+    uint32_t w[FOV_SITES][FOV_STUB_WORDS], jump[FOV_SITES];
+    for (unsigned s = 0; s < FOV_SITES; s++) {
+        const uint64_t at = stub + 4 * FOV_STUB_WORDS * s;
+        jump[s] = fov_branch(fov_guard[fov_load[s]].off, at);
+        if (!jump[s] || !fov_site_stub_words(s, w[s], base, at, data)) return -1;
+    }
     memcpy(main + data + FOV_FACTOR_SLOT, &bits, 4);   /* first: no frame may read a factor of 0 */
-    memcpy(main + stub, w, sizeof w);
-    memcpy(main + FOV_SITE, &jump, 4);
+    for (unsigned s = 0; s < FOV_SITES; s++) memcpy(main + stub + 4 * FOV_STUB_WORDS * s, w[s], sizeof w[s]);
+    for (unsigned s = 0; s < FOV_SITES; s++) memcpy(main + fov_guard[fov_load[s]].off, &jump[s], 4);
     return 0;
 }

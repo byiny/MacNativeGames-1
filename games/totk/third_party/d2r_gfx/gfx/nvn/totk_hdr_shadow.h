@@ -23,7 +23,7 @@ static int g_hdr_companion_store = 1;
 static int g_hdr_companion_store;
 #endif
 static id<MTLTexture> hdr_shadow_find(id<MTLTexture> source) {
-    if(!source || !hdr_shadow_enabled() || source.pixelFormat!=MTLPixelFormatRG11B10Float)return nil;
+    if(!source || !hdr_shadow_enabled() || HDR_BASE_BAD(source.pixelFormat))return nil;
     id<MTLTexture> base=source.parentTexture?:source;
     if(source.width!=base.width || source.height!=base.height || source.mipmapLevelCount!=1)return nil;
     uint64_t frame=atomic_load(&g_cur_frame);
@@ -38,10 +38,10 @@ static id<MTLTexture> hdr_shadow_find(id<MTLTexture> source) {
 static id<MTLTexture> hdr_shadow_sample(id<MTLTexture> source) {
     id<MTLTexture> hdr=hdr_shadow_find(source);if(!hdr)return nil;
     MTLTextureSwizzleChannels sw=source.swizzle;
-    if(sw.red==MTLTextureSwizzleAlpha)sw.red=MTLTextureSwizzleOne;
-    if(sw.green==MTLTextureSwizzleAlpha)sw.green=MTLTextureSwizzleOne;
-    if(sw.blue==MTLTextureSwizzleAlpha)sw.blue=MTLTextureSwizzleOne;
-    if(sw.alpha==MTLTextureSwizzleAlpha)sw.alpha=MTLTextureSwizzleOne;
+    if(sw.red==HDR_SW_ALPHA(source))sw.red=MTLTextureSwizzleOne;
+    if(sw.green==HDR_SW_ALPHA(source))sw.green=MTLTextureSwizzleOne;
+    if(sw.blue==HDR_SW_ALPHA(source))sw.blue=MTLTextureSwizzleOne;
+    if(sw.alpha==HDR_SW_ALPHA(source))sw.alpha=MTLTextureSwizzleOne;
     uint64_t bits=(uint64_t)sw.red|((uint64_t)sw.green<<8)|((uint64_t)sw.blue<<16)|((uint64_t)sw.alpha<<24)|((uint64_t)source.textureType<<32);
     for(unsigned i=0;i<HDR_SHADOW_MAX;i++)if(g_hdr_shadow[i].texture==hdr){
         if(!g_hdr_shadow[i].reads)g_hdr_shadow[i].reads=[NSMutableDictionary dictionary];
@@ -69,8 +69,8 @@ static int hdr_shadow_rgb_factor(int factor) {
 /* A render copy converts formats, unlike a blit. The original is mirrored at
  * pass end for guest copies/readbacks; subsequent rendering samples FP16. */
 static void hdr_shadow_copy(id<MTLTexture> src,id<MTLTexture> dst) {
-    static id<MTLRenderPipelineState> to16,to11;
-    id<MTLRenderPipelineState> pso=dst.pixelFormat==MTLPixelFormatRGBA16Float?to16:to11;
+    static id<MTLRenderPipelineState> to16,to11; HDR_TO10
+    id<MTLRenderPipelineState> pso=dst.pixelFormat==MTLPixelFormatRGBA16Float?to16:HDR_TO11(dst);
     if(!pso) {
         NSString *msl=totk_hdr_copy_source();
         NSError *e=nil;id<MTLLibrary> l=[g_dev newLibraryWithSource:msl options:nil error:&e];
@@ -79,7 +79,7 @@ static void hdr_shadow_copy(id<MTLTexture> src,id<MTLTexture> dst) {
         p.colorAttachments[0].pixelFormat=dst.pixelFormat;
         pso=[g_dev newRenderPipelineStateWithDescriptor:p error:&e];
         if(!pso)MDIE("HDR format conversion compile: %s",e.localizedDescription.UTF8String);
-        if(dst.pixelFormat==MTLPixelFormatRGBA16Float)to16=pso;else to11=pso;
+        if(dst.pixelFormat==MTLPixelFormatRGBA16Float)to16=pso;else HDR_TO10_SET(dst) to11=pso;
     }
     blit_close();rs_sync();
     MTL4RenderPassDescriptor *p=[MTL4RenderPassDescriptor new];
@@ -94,7 +94,7 @@ static id<MTLTexture> hdr_shadow_make(id<MTLTexture> source) {
     id<MTLTexture> parent=source.parentTexture;
     id<MTLTexture> base=parent && source.width==parent.width && source.height==parent.height?parent:source;
     if(!base || base.textureType!=MTLTextureType2D || base.mipmapLevelCount!=1 || base.sampleCount!=1 ||
-       base.pixelFormat!=MTLPixelFormatRG11B10Float)return nil;
+       HDR_BASE_BAD(base.pixelFormat))return nil;
     id<MTLTexture> found=hdr_shadow_find(base);if(found)return found;
     unsigned slot=HDR_SHADOW_MAX;uint64_t oldest=UINT64_MAX,frame=atomic_load(&g_cur_frame);
     for(unsigned i=0;i<HDR_SHADOW_MAX;i++) {

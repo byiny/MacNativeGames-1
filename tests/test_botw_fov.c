@@ -1,7 +1,8 @@
-/* games/totk/runtime/botw_fov.h without the game: graphics-fov.txt and TOTK_FOV_SCALE parsing, the factor's range, the
+/* games/totk/runtime/botw_fov.h (built here for 1.9.0, or with -DGAME_BOTW160 for 1.6.0's three sites) without the game: graphics-fov.txt and TOTK_FOV_SCALE parsing, the factor's range, the
    stub's words, and the patch on a fake main built here (only the shipped words the patch checks, the ultrawide writer's
-   words after them, and a zeroed text padding and data page, at 1.9.0's offsets; no game code in the repository). The
-   stub is run by a small interpreter of its own eleven instructions, from the load to the setFovy call; a word that
+   words after them, and a zeroed text padding and data page, at the version's offsets; no game code in the repository).
+   Each stub is run by a small interpreter of its own eleven instructions, from its load to the instruction after it
+   (1.9.0: the setFovy call; 1.6.0: the camera's next instruction, for each of the three sites); a word that
    differs, a padding or data slot that is not empty, a missing data page or a bad factor is refused with nothing
    written. At 1x the game's word must come through bit for bit whatever it is (NaN, infinities, more than the cap);
    at other factors it must be fov_result's, the log's computed value. UW_ORIGINAL (from the test runner: game_patches_botw.c's uw_writer_original) checks that the ultrawide
@@ -12,15 +13,28 @@
 static int failures;
 #define CHECK(c, ...) do { if (!(c)) { failures++; printf("FAIL %s:%d: ", __FILE__, __LINE__); printf(__VA_ARGS__); printf("\n"); } } while (0)
 
+#ifdef GAME_BOTW160
+/* The 1.6.0 layout of the app's main (build/botw160/runtime_tables.h): text ends at main+0x2129ba4, the file at
+   48294280 bytes, so the data page follows it at the next 16 KiB. */
+#define TEXT_END 0x2129ba4u
+#define FILE_SIZE 48294280u
+#define STUB 0x2129be0u       /* the text end, 16-byte aligned, + 48 */
+#define UW_AT 0x15c2118u
+#define NO_ROOM_END 0x2129fe0u    /* the stubs do not fit the page after the text */
+#define ONE_ROOM_END 0x2129f90u   /* one stub fits, three do not */
+#else
 /* The 1.9.0 layout of the app's main (e84d): text ends at main+0x15a1c64, the file at main+0x20a7dd4, so the data page
    is main+0x20a8000. */
 #define TEXT_END 0x15a1c64u
 #define FILE_SIZE 0x20a7dd4u
-#define DATA 0x20a8000u
-#define IMAGE (DATA + 0x4000u)
-#define BASE 0x300000000ull   /* where the fake main is "mapped", for the adrp */
 #define STUB 0x15a1c90u       /* the text end, 16-byte aligned, + 32 */
 #define UW_AT 0x10edae0u
+#define NO_ROOM_END 0x15a1fe0u
+#endif
+#define DATA ((FILE_SIZE + 0x3fffu) & ~0x3fffu)
+#define IMAGE (DATA + 0x4000u)
+#define BASE 0x300000000ull   /* where the fake main is "mapped", for the adrp */
+#define STRIDE (4 * FOV_STUB_WORDS)
 static const uint32_t uw_original[] = {UW_ORIGINAL};
 #define UW_N (sizeof uw_original / sizeof *uw_original)
 
@@ -56,12 +70,15 @@ static float arm_fmin(float a, float b) {
 typedef struct { uint64_t x[32], sp, nzcv; float s[32]; } Regs;
 /* An address: BASE + a main offset (the data page), or a host pointer (the camera object). */
 static uint8_t *at(uint8_t *m, uint64_t a) { return a >= BASE && a < BASE + IMAGE ? m + (a - BASE) : (uint8_t *)(uintptr_t)a; }
-/* Runs main from the load (main+0x10edad8) until it reaches the setFovy call (main+0x10edadc). Only the stub's
-   instructions are known; anything else fails. Returns 0 at the call, -1 otherwise. */
-static int run(uint8_t *m, Regs *r) {
-    uint64_t pc = FOV_SITE;
+/* The load of site s, and the register it reads the camera from. */
+static uint32_t site_of(unsigned s) { return fov_guard[fov_load[s]].off; }
+static unsigned camera_reg(unsigned s) { return (fov_guard[fov_load[s]].original >> 5) & 31; }
+/* Runs main from the load of site s until it reaches the instruction after it (1.9.0: the setFovy call, main+0x10edadc).
+   Only the stub's instructions are known; anything else fails. Returns 0 there, -1 otherwise. */
+static int run(uint8_t *m, Regs *r, unsigned s) {
+    uint64_t pc = site_of(s);
     for (int steps = 0; steps < 16; steps++) {
-        if (pc == FOV_BACK) return 0;
+        if (pc == site_of(s) + 4) return 0;
         uint32_t w = word_at(m, (uint32_t)pc);
         unsigned rd = w & 31, rn = (w >> 5) & 31, rm = (w >> 16) & 31;
         if ((w & 0xfc000000u) == 0x14000000u) { int32_t imm = (int32_t)(w << 6) >> 6; pc += (int64_t)imm * 4; continue; }   /* b */
@@ -93,17 +110,19 @@ static int run(uint8_t *m, Regs *r) {
     }
     return -1;
 }
-/* The camera's FOV through the load as main has it now: s0 at the setFovy call, or NAN. Checks that only x8, s0 and s2
-   changed (the rest as the camera update has them: x0 the projection, x19 the view, x20 the camera, x22 = 1, x30). */
+static unsigned site;   /* the site through() runs: 0 unless a test sets it */
+/* The camera's FOV through the load as main has it now: s0 at the instruction after it, or NAN. Checks that only x8, s0
+   and s2 changed (the rest as the camera update has them: x0 the projection, x19 the view, the camera in its register,
+   x30). */
 static float through(uint8_t *m, float game) {
     static uint8_t camera[0x100];
     memcpy(camera + 0x74, &game, 4);
     Regs r; memset(&r, 0, sizeof r);
     for (unsigned i = 0; i < 31; i++) r.x[i] = 0x1111000000000000ull + i;
     for (unsigned i = 0; i < 32; i++) r.s[i] = 100.0f + (float)i;
-    r.x[20] = (uintptr_t)camera; r.sp = 0x5ee0; r.nzcv = 0x60000000u;
+    r.x[camera_reg(site)] = (uintptr_t)camera; r.sp = 0x5ee0; r.nzcv = 0x60000000u;
     Regs before = r;
-    if (run(m, &r)) return NAN;
+    if (run(m, &r, site)) return NAN;
     for (unsigned i = 0; i < 32; i++) {
         if (i != 8) CHECK(r.x[i] == before.x[i], "x%u kept", i);
         if (i != 0 && i != 2) CHECK(bits_of(r.s[i]) == bits_of(before.s[i]), "s%u kept", i);
@@ -113,23 +132,34 @@ static float through(uint8_t *m, float game) {
 }
 
 static void words(void) {
-    CHECK(fov_guard[2].off == FOV_SITE && fov_guard[3].off == FOV_BACK, "the load, then the call");
-    CHECK(fov_branch(FOV_BACK, 0xeb4898u) == (fov_guard[3].original & ~0x80000000u), "the call goes to setFovy");
+    CHECK(site_of(0) == FOV_SITE && FOV_BACK == FOV_SITE + 4, "the first site, for the log");
+    for (unsigned i = 0; i < FOV_SITES; i++) CHECK(fov_guard[fov_load[i]].original == (0xbd407400u | (camera_reg(i) << 5)), "site %u is ldr s0, [x%u, #0x74]", i, camera_reg(i));
     CHECK(fov_stub_at(TEXT_END) == STUB, "the stub's place");
     uint32_t w[FOV_STUB_WORDS];
     CHECK(fov_stub_words(w, BASE, STUB, DATA), "the stub builds");
     /* As the system assembler gives them (clang -c, otool -tv). */
-    CHECK(w[0] == 0xbd407680u && w[2] == 0xbd004d00u && w[3] == 0xb9404908u && w[4] == 0x1e270102u, "load, keep, factor");
+    CHECK(w[0] == fov_guard[fov_load[0]].original && w[2] == 0xbd004d00u && w[3] == 0xb9404908u && w[4] == 0x1e270102u, "load, keep, factor");
     CHECK(w[5] == 0x52091908u && w[6] == 0x34000088u, "eor w8, w8, #0x3f800000 and cbz w8 to the way back");
     CHECK(w[7] == 0x1e220800u && w[8] == 0x1e20f002u && w[9] == 0x1e225800u, "fmul, fmov s2, #2.875 and fmin");
     CHECK(FOV_CAP == float_of(0x40380000u), "the cap is the fmov's 2.875");
+    for (unsigned i = 1; i < FOV_SITES; i++) {
+        uint32_t v[FOV_STUB_WORDS];
+        CHECK(fov_site_stub_words(i, v, BASE, STUB + STRIDE * i, DATA) && v[0] == fov_guard[fov_load[i]].original &&
+              !memcmp(v + 2, w + 2, 8 * 4) && v[1] == fov_adrp(8, BASE + STUB + STRIDE * i + 4, BASE + DATA), "site %u's stub", i);
+        CHECK(v[10] == fov_branch(STUB + STRIDE * i + 40, site_of(i) + 4), "site %u returns to its site + 4", i);
+    }
+#ifndef GAME_BOTW160
+    CHECK(fov_guard[2].off == FOV_SITE && fov_guard[3].off == FOV_BACK, "the load, then the call");
+    CHECK(fov_branch(FOV_BACK, 0xeb4898u) == (fov_guard[3].original & ~0x80000000u), "the call goes to setFovy");
     /* The real layout's words: the adrp from stub + 4, the way back and the site's branch. */
     CHECK(w[1] == 0xf0005828u && w[10] == 0x17ed2f89u && fov_branch(FOV_SITE, STUB) == 0x1412d06eu,
           "golden words %08x %08x %08x", w[1], w[10], fov_branch(FOV_SITE, STUB));
+#endif
+    CHECK(w[1] == fov_adrp(8, BASE + STUB + 4, BASE + DATA) && w[10] == fov_branch(STUB + 40, FOV_BACK), "the adrp and the way back");
     /* The adrp is the stub's second word: its page is that word's (a stub ending a page shows it; fov_stub_at never
        puts one there, 16-byte aligned). */
-    CHECK(fov_stub_words(w, BASE, 0x15a1ffcu, DATA) && w[1] == fov_adrp(8, BASE + 0x15a2000u, BASE + DATA) &&
-          w[1] != fov_adrp(8, BASE + 0x15a1ffcu, BASE + DATA), "the adrp's own page");
+    CHECK(fov_stub_words(w, BASE, (STUB & ~0xfffu) + 0xffcu, DATA) && w[1] == fov_adrp(8, BASE + (STUB & ~0xfffu) + 0x1000u, BASE + DATA) &&
+          w[1] != fov_adrp(8, BASE + (STUB & ~0xfffu) + 0xffcu, BASE + DATA), "the adrp's own page");
     CHECK(fov_branch(0, 1u << 27) == 0 && fov_branch(0, 2) == 0 && fov_adrp(8, 0, 1ull << 33) == 0, "out of range: 0");
     CHECK(((FILE_SIZE + 0x3fffu) & ~0x3fffu) == DATA, "the data page follows the file");
 }
@@ -154,10 +184,20 @@ static void patching(void) {
     uint32_t found = 1;
     CHECK(fov_apply(m, BASE, TEXT_END, DATA, IMAGE, 1.0, &found) == 0 && found == 1, "done");
     uint32_t w[FOV_STUB_WORDS]; fov_stub_words(w, BASE, STUB, DATA);
-    CHECK(word_at(m, FOV_SITE) == 0x1412d06eu && !memcmp(m + STUB, w, sizeof w), "the branch and the stub");
+    for (unsigned i = 0; i < FOV_SITES; i++) {
+        uint32_t v[FOV_STUB_WORDS]; fov_site_stub_words(i, v, BASE, STUB + STRIDE * i, DATA);
+        CHECK(word_at(m, site_of(i)) == fov_branch(site_of(i), STUB + STRIDE * i) && !memcmp(m + STUB + STRIDE * i, v, sizeof v), "site %u: the branch and the stub", i);
+    }
+#ifndef GAME_BOTW160
+    CHECK(word_at(m, FOV_SITE) == 0x1412d06eu, "golden branch");
+#endif
     CHECK(word_at(m, DATA + FOV_FACTOR_SLOT) == bits_of(1.0f), "the factor");
-    CHECK(bytes_changed(m, shipped) <= 4 + sizeof w + 4, "nothing else written (%u bytes)", bytes_changed(m, shipped));
-    CHECK(!memcmp(m, shipped, FOV_SITE) && !memcmp(m + FOV_SITE + 4, shipped + FOV_SITE + 4, STUB - FOV_SITE - 4), "only there");
+    CHECK(bytes_changed(m, shipped) <= FOV_SITES * (4 + sizeof w) + 4, "nothing else written (%u bytes)", bytes_changed(m, shipped));
+    for (uint32_t i = 0; i < IMAGE; i++) {   /* a changed byte is in a site's word, the stubs or the factor */
+        int ok = i >= STUB && i < STUB + STRIDE * FOV_SITES, factor = i >= DATA + FOV_FACTOR_SLOT && i < DATA + FOV_FACTOR_SLOT + 4;
+        for (unsigned s = 0; s < FOV_SITES; s++) ok |= i >= site_of(s) && i < site_of(s) + 4;
+        CHECK(m[i] == shipped[i] || ok || factor, "main+%#x written outside the patch", i);
+    }
     /* 1x: the game's own word, bit for bit, whatever it holds, and kept for the log. */
     const uint32_t game[] = {bits_of(0.87f), bits_of(0.0001f), bits_of(1.5f), bits_of(2.875f), 0x80000000u,
                              bits_of(2.9f), bits_of(3.0f), bits_of(100.0f), 0x7f7fffffu, 0x7f800000u, 0xff800000u,
@@ -185,14 +225,27 @@ static void patching(void) {
     }
     set_factor(m, 0x3f800001u);
     CHECK(through(m, 3.0f) == 2.875f, "only exactly 1.0 skips the cap");
+    /* Every site (1.6.0 has three) is the same stub: the game's word at 1x, fov_result at the others, one factor slot. */
+    for (site = 0; site < FOV_SITES; site++) {
+        for (unsigned j = 0; j < sizeof factors / sizeof *factors + 1; j++) {
+            uint32_t k = j < sizeof factors / sizeof *factors ? factors[j] : bits_of(1.0f);
+            set_factor(m, k);
+            for (unsigned i = 0; i < games; i++) {
+                float got = through(m, float_of(game[i])), want = fov_result(float_of(game[i]), float_of(k));
+                CHECK(isnan(want) ? isnan(got) : bits_of(got) == bits_of(want), "site %u, factor %08x, game %08x: %08x, wanted %08x", site, k, game[i], bits_of(got), bits_of(want));
+                CHECK(word_at(m, DATA + FOV_GAME_SLOT) == game[i], "site %u keeps %08x", site, game[i]);
+            }
+        }
+    }
+    site = 0;
     set_factor(m, bits_of(0.8f));
     CHECK(through(m, 0.87f) == 0.87f * 0.8f, "0.8x");
     found = 0;
-    CHECK(fov_apply(m, BASE, TEXT_END, DATA, IMAGE, 1.0, &found) == 3 && found == 0x1412d06eu, "a second pass refuses");
+    CHECK(fov_apply(m, BASE, TEXT_END, DATA, IMAGE, 1.0, &found) == (int)fov_load[0] + 1 && found == fov_branch(site_of(0), STUB), "a second pass refuses");
     set_factor(m, bits_of(1.0f));
     CHECK(bits_of(through(m, 3.0f)) == bits_of(3.0f), "back to 1x: the game's word again");
     uint8_t *again = copy_of(m);
-    CHECK(fov_apply(m, BASE, TEXT_END, DATA, IMAGE, 1.0, NULL) == 3 && !memcmp(m, again, IMAGE), "and writes nothing");
+    CHECK(fov_apply(m, BASE, TEXT_END, DATA, IMAGE, 1.0, NULL) == (int)fov_load[0] + 1 && !memcmp(m, again, IMAGE), "and writes nothing");
     free(again);
     for (unsigned bad = 0; bad < FOV_GUARDS; bad++) {
         uint8_t *t = fake_main();
@@ -204,7 +257,7 @@ static void patching(void) {
         CHECK(!memcmp(t, before, IMAGE), "guard %u differs: nothing written", bad);
         free(before); free(t);
     }
-    const uint32_t taken[] = {STUB, STUB + 4 * FOV_STUB_WORDS - 1, DATA + FOV_FACTOR_SLOT, DATA + FOV_GAME_SLOT + 3};
+    const uint32_t taken[] = {STUB, STUB + STRIDE * FOV_SITES - 1, STUB + STRIDE * (FOV_SITES - 1), DATA + FOV_FACTOR_SLOT, DATA + FOV_GAME_SLOT + 3};
     for (unsigned i = 0; i < sizeof taken / sizeof *taken; i++) {
         uint8_t *t = fake_main(); t[taken[i]] = 1;
         uint8_t *before = copy_of(t);
@@ -214,17 +267,25 @@ static void patching(void) {
     uint8_t *t = fake_main(), *before = copy_of(t);
     CHECK(fov_apply(t, BASE, TEXT_END, DATA, DATA, 1.5, NULL) == -1 && !memcmp(t, before, IMAGE), "no data page");
     CHECK(fov_apply(t, BASE, TEXT_END, DATA + 8, IMAGE, 1.5, NULL) == -1 && !memcmp(t, before, IMAGE), "page not aligned");
-    CHECK(fov_apply(t, BASE, 0x15a1fe0u, DATA, IMAGE, 1.5, NULL) == -1 && !memcmp(t, before, IMAGE), "no room");
+    CHECK(fov_apply(t, BASE, NO_ROOM_END, DATA, IMAGE, 1.5, NULL) == -1 && !memcmp(t, before, IMAGE), "no room");
+#ifdef ONE_ROOM_END
+    CHECK(fov_apply(t, BASE, ONE_ROOM_END, DATA, IMAGE, 1.5, NULL) == -1 && !memcmp(t, before, IMAGE), "room for one stub, not all");
+#endif
     const double off[] = {0, -1, NAN, 3};
     for (unsigned i = 0; i < 4; i++) CHECK(fov_apply(t, BASE, TEXT_END, DATA, IMAGE, off[i], NULL) == -2 && !memcmp(t, before, IMAGE), "factor %g", off[i]);
     free(before); free(t); free(m); free(shipped);
 }
 
-/* The ultrawide writer (game_patches_botw.c botw_aspect_writer) checks its 13 words at main+0x10edae0 and rewrites them;
-   this patch checks the 4 before them and setFovy. Either order gives the same main. */
+/* The ultrawide writer (game_patches_botw.c botw_aspect_writer) checks its words (1.9.0: 13 at main+0x10edae0; 1.6.0: 14
+   at main+0x15c2118) and rewrites them; this patch checks the words around the loads (1.9.0: and setFovy). Either order
+   gives the same main. */
 static void with_ultrawide(void) {
     uint32_t marker[UW_N]; for (unsigned i = 0; i < UW_N; i++) marker[i] = 0xd503201fu;   /* stands for the rewrite */
+#ifdef GAME_BOTW160
+    CHECK(UW_N == 14 && uw_original[0] == 0x39010277u, "the ultrawide writer's words");
+#else
     CHECK(UW_N == 13 && uw_original[0] == 0xbd406e80u, "the ultrawide writer's words");
+#endif
     uint8_t *a = fake_main(), *b = fake_main();
     CHECK(fov_apply(a, BASE, TEXT_END, DATA, IMAGE, 1.2, NULL) == 0, "the field of view first");
     CHECK(!memcmp(a + UW_AT, uw_original, sizeof uw_original), "the ultrawide's own check still holds");

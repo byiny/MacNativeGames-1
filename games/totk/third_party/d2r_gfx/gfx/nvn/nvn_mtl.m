@@ -3811,7 +3811,7 @@ void dm_gfx_set_flag(const char *name, int v) {
     if (!strcmp(name, "tex_slots_check")) { (void)tex_slots_on(); atomic_store(&g_tex_slots_check, v != 0); MLOG("[flag] tex_slots_check = %d verified=%llu hits=%llu", v != 0, (unsigned long long)atomic_load(&g_tex_slots_verified), (unsigned long long)atomic_load(&g_tex_slots_hits)); return; }
     if (!strcmp(name, "render_stream")) { atomic_store(&g_rs_on, v != 0); MLOG("[flag] render_stream = %d (next render pass)", v != 0); return; }
     if (!strcmp(name, "cube_merge")) { atomic_store(&g_cg_on, v != 0); MLOG("[flag] cube_merge = %d", v != 0); return; }
-    if (!strcmp(name, "skip_invisible")) { skv_set(v); return; }
+    if (!strcmp(name, "skip_invisible")) { skv_set(v); return; } HDR_FLAG(name, v)
     if (!strcmp(name, "skipvc")) { atomic_store(&g_skipvc_any, v); MLOG("[flag] skipvc = %d", v); return; }
     if (!strcmp(name, "skipvc_color")) { atomic_store(&g_skipvc_color, v); MLOG("[flag] skipvc_color = %d", v); return; }
     if (!strcmp(name, "skipvc_depth")) { atomic_store(&g_skipvc_depth, v); MLOG("[flag] skipvc_depth = %d", v); return; }
@@ -7797,7 +7797,7 @@ static NvShader *shader_load_mode(NSString *pc, int stage, int archive_compute) 
         int kind = [pc hasPrefix:@TOTK_HDR_COMPOSE_KEY] ? 1 : [pc hasPrefix:@TOTK_HDR_POST_KEY] ? 2 : 0;
         if (kind) {
             NSString *modified = kind == 1 ? totk_hdr_compose_source(full) : totk_hdr_post_source(full);
-            NSError *err = nil; id<MTLLibrary> hl = modified ? totk_msl_library(modified, &err) : nil;
+            NSError *err = nil; id<MTLLibrary> hl = modified ? HDR_TWIN_LIBRARY(modified, &err) : nil;
             id<MTLFunction> hf = hl ? [hl newFunctionWithName:j[@"entry"]] : nil;
             if (hf) { o->hdr_fn = hf; fn_note_src(hf, modified); o->hdr_compose = kind;
                 MLOG("[hdr] %s: HDR twin ready (%s)", o->key, kind == 1 ? "RenoDX-style scene + bloom tone map" : "HDR EASU ceiling removed"); }
@@ -10748,7 +10748,7 @@ static void *pso_get_p(NvProg *pr, MTLRenderPassDescriptor *unused) {
     /* Preserve the guest RGB-only destination alpha while rendering into its
      * host FP16 companion. Normalized factors also form the persistent PSO key,
      * so a cached RGBA blend pipeline cannot reintroduce the old UI tint. */
-    if(g_hdr_draw_native && !g_pso_lmap && k.cfmt[0]==MTLPixelFormatRGBA16Float && (k.blend_en&1)){
+    if(g_hdr_draw_native HDR_RGB_ONLY_DRAW && !g_pso_lmap && k.cfmt[0]==MTLPixelFormatRGBA16Float && (k.blend_en&1)){
         k.blend[0].src_rgb=hdr_shadow_rgb_factor(k.blend[0].src_rgb);
         k.blend[0].dst_rgb=hdr_shadow_rgb_factor(k.blend[0].dst_rgb);
     }
@@ -17273,9 +17273,9 @@ static void scene_size_note(__unsafe_unretained NvShader *fs) {   // the compose
     if (ow != w || oh != h) MLOG("内部分辨率（合成采样的场景）：%ux%u", w, h);
 }
 #include "totk_finish.h"   // FXAA off and sharpening (the settings panel's effects page)
-#if defined(GAME_BOTW190) && !TARGET_OS_IPHONE   // Mac only: the iOS settings have no FXAA / sharpening rows (after PR #1637)
+#if defined(GAME_BOTW) && !TARGET_OS_IPHONE   // Mac only: the iOS settings have no FXAA / sharpening rows (after PR #1637)
 #define BOTW_FINISH 1
-#include "botw_finish.h"   // the same rows on Breath of the Wild 1.9.0, around its FXAA / upscale draw
+#include "botw_finish.h"   // the same rows on Breath of the Wild 1.9.0 and 1.6.0, around its FXAA / upscale draw (bd7ffdd4 in both)
 #endif
 #include "totk_hdr_render.h"
 static int mfxup_draw(NvProg *pr) {

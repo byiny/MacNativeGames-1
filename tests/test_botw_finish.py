@@ -28,7 +28,7 @@ class Hooks(unittest.TestCase):
         self.assertIn('#include "totk_finish.h"', MTL[:MTL.index('#include "botw_finish.h"')])
         guard = MTL[:MTL.index('#include "botw_finish.h"')].rstrip().splitlines()
         self.assertEqual(guard[-1], '#define BOTW_FINISH 1')   # Mac only: iOS has no FXAA / sharpening rows
-        self.assertTrue(guard[-2].startswith('#if defined(GAME_BOTW190) && !TARGET_OS_IPHONE'))
+        self.assertTrue(guard[-2].startswith('#if defined(GAME_BOTW) && !TARGET_OS_IPHONE'))   # 1.9.0 and 1.6.0
 
     def test_every_call_is_on_190_only(self):
         for call in ('botw_fin_before(fs);', 'return botw_fin_upscale(fs, 0);', 'botw_fin_upscale(fs, 1);',
