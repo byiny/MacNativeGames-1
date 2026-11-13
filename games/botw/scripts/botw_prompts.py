@@ -40,7 +40,7 @@ External_00.bffnt or an unexpected glyph sheet, is skipped with a note and stays
 table that is missing or lacks an entry for an archive that grows (or an archive that cannot grow) makes the whole run draw at
 --scale 1. A RomFS without Pack/Bootup.pack, Layout/Common.sblarc or its BNTX stops the run (exit 2) before anything is written.
 
-Needs Python 3.14 and fontTools (python3.14 -m pip install fonttools). An existing Pack/Bootup.pack (with --scale above 1 also the
+Needs Python 3.14 and fontTools (uv run --no-project --python 3.14 --with fonttools python botw_prompts.py ...). An existing Pack/Bootup.pack (with --scale above 1 also the
 resource size table) in the mod folder (another mod's, or an earlier run) is only overwritten with --replace.
 usage: botw_prompts.py <mod folder> (--app <Breath of the Wild.app> | --romfs <folder>) [--version botw190]
                        [--style xbox|playstation|switch] [--face-buttons position|label] [--controls controls.txt] [--replace] [--keep-switch-pictures] [--scale 1..4] [--mods <folder>] [--preview picture.png]
@@ -172,6 +172,7 @@ def grown_contour(points, d, miter=2.0):
     return out
 
 
+@functools.lru_cache(maxsize=None)     # the same drawers for every font archive, so render() below finds its pictures again
 def drawers_of(style, letters):
     """pad control (and d-pad glyph code point, see DPAD_GLYPHS) -> (advance, draw) of the style's buttons: the drawings of
     make_button_icons.py, with their letters from `letters.font` (the Switch system font)."""
@@ -353,6 +354,7 @@ def stick_body(rows, bright=128):
     return cx - r, cy - r, cx + r, cy + r
 
 
+@functools.lru_cache(maxsize=None)     # the callers only read the rows
 def render(drawer, size, box, height=None):
     """The button drawn by `drawer` ((advance, draw) of make_button_icons.py) as a size x size picture (size x height when given:
     the 1.6.0 font cells are not square) (rows of bytes): the
@@ -440,7 +442,7 @@ def plan_pictures(bntx, textures, controls, letters, style='xbox', scale=1):
         except ValueError as error:
             notes.append(f'{error}; the Switch picture stays')
             continue
-        new[name] = draw(controls, letters, text, style=style, **({'scale': scale} if scale != 1 else {}))
+        new[name] = draw(controls, letters, text, style=style, scale=scale)
     return new, notes
 
 
@@ -490,14 +492,12 @@ def _popup(blob, slot):
     its txl1 section ({name: offset}), and the group of the pressed disc (the parent of Nt_KeyTex<slot>_00)."""
     panes = {name: (offset, parent) for offset, name, parent in bf.bflyt_panes(blob)}
     textures = {}
-    count, position = struct.unpack_from('<H', blob, 0x10)[0], struct.unpack_from('<H', blob, 6)[0]
-    for _ in range(count):
-        if blob[position:position + 4] == b'txl1':
+    for magic, position, _ in bf.sections(blob):
+        if magic == b'txl1':
             n = struct.unpack_from('<H', blob, position + 8)[0]
             for at in struct.unpack_from(f'<{n}I', blob, position + 12):
                 start = position + 12 + at
                 textures[bytes(blob[start:blob.index(b'\0', start)]).decode()] = start
-        position += struct.unpack_from('<I', blob, position + 4)[0]
     group = panes[f'Nt_KeyTex{slot.upper()}_00'][1]
     return panes, textures, group
 
@@ -542,25 +542,25 @@ def popup_edits(layout, inner, controls, style, spots=SPOT):
             edits.append((lo + mine + 44, theirs[other + 44:other + 76]))
             if blob[mine:mine + 4] == b'txt1':
                 edits.append((lo + mine + POPUP_PANE + 8, theirs[other + POPUP_PANE + 8:other + POPUP_PANE + 10]))
+        def copy_children(parent, their_parent):      # each pane inside `parent` takes the pane of its role inside `their_parent`
+            roles = {_pane_role(n, spot): n for n, (_, p) in their_panes.items() if p == their_parent}
+            for name, (_, p) in panes.items():
+                if p == parent and _pane_role(name, slot) in roles:
+                    copy(name, roles[_pane_role(name, slot)])
         if spot != slot:
             copy(group, their_group)
-            roles = {_pane_role(n, spot): n for n, (_, parent) in their_panes.items() if parent == their_group}
-            for name, (_, parent) in panes.items():
-                if parent == group and _pane_role(name, slot) in roles:
-                    copy(name, roles[_pane_role(name, slot)])
+            copy_children(group, their_group)
             capture, their_capture = f'N_Capture{slot.upper()}_00', f'N_Capture{spot.upper()}_00'
-            if capture in panes and their_capture in their_panes:
+            both = capture in panes and their_capture in their_panes
+            if both:
                 copy(capture, their_capture)
-                roles = {_pane_role(n, spot): n for n, (_, parent) in their_panes.items() if parent == their_capture}
-                for name, (_, parent) in panes.items():
-                    if parent == capture and _pane_role(name, slot) in roles:
-                        copy(name, roles[_pane_role(name, slot)])
-                if 'N_Attention_00' in panes:        # the flash on the label box moves with the box
-                    shift = [b - a for a, b in zip(at(capture), at(their_capture, theirs, their_panes))]
-                    if panes['N_Attention_00'][1] == group:      # (inside the disc's group, which has moved already)
-                        shift = [s - (b - a) for s, a, b in zip(shift, at(group), at(their_group, theirs, their_panes))]
-                    x, y = at('N_Attention_00')
-                    edits.append((lo + panes['N_Attention_00'][0] + 44, struct.pack('<2f', x + shift[0], y + shift[1])))
+                copy_children(capture, their_capture)
+            if both and 'N_Attention_00' in panes:        # the flash on the label box moves with the box
+                shift = [b - a for a, b in zip(at(capture), at(their_capture, theirs, their_panes))]
+                if panes['N_Attention_00'][1] == group:      # (inside the disc's group, which has moved already)
+                    shift = [s - (b - a) for s, a, b in zip(shift, at(group), at(their_group, theirs, their_panes))]
+                x, y = at('N_Attention_00')
+                edits.append((lo + panes['N_Attention_00'][0] + 44, struct.pack('<2f', x + shift[0], y + shift[1])))
             copy(next(n for n in panes if n.startswith('P_Base')), next(n for n in their_panes if n.startswith('P_Base')))
             mine, other = (next(n for n in t if n.startswith(SUB_BASE)) for t in (textures, their_textures))
             if len(mine) == len(other):
@@ -632,7 +632,8 @@ FONT_FACE = {'a': 0xE040, 'b': 0xE041, 'x': 0xE042, 'y': 0xE043}              # 
 FONT_SHAPE = {'l': 0xE044, 'r': 0xE045, 'zl': 0xE046, 'zr': 0xE047, 'lstick': 0xE056, 'rstick': 0xE057}
 FONT_MENU = {'plus': 0xE04B, 'minus': 0xE04C}
 BFFNT = 'External_00.bffnt'
-SWITCH_GLYPHS = {**FONT_FACE, 'l1': 0xE044, 'r1': 0xE045, 'l2': 0xE046, 'r2': 0xE047, 'l3': 0xE056, 'r3': 0xE057, 'menu': 0xE04B, 'view': 0xE04C}
+SWITCH_GLYPHS = {**FONT_FACE, 'l1': FONT_SHAPE['l'], 'r1': FONT_SHAPE['r'], 'l2': FONT_SHAPE['zl'], 'r2': FONT_SHAPE['zr'],
+                 'l3': FONT_SHAPE['lstick'], 'r3': FONT_SHAPE['rstick'], 'menu': FONT_MENU['plus'], 'view': FONT_MENU['minus']}
 SWITCH_TRACED = (0xE040, 0xE068)        # the button glyphs of the font: above scale 1 all are traced (or drawn)
 
 
@@ -763,6 +764,17 @@ def mod_table(mods):
     return None
 
 
+def read_entry(romfs, index, name):
+    """The bytes of the RomFS file `name` (romfs.bin at the offset and size runtime-index.bin gives it)."""
+    offset, size = index[name]
+    with (romfs / 'romfs.bin').open('rb') as image:
+        image.seek(offset)
+        return image.read(size)
+
+
+rstb_decoded = functools.cache(bf.yaz0_decode)     # one decode of each resource size table, whichever step asks
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     parser.add_argument('mod', type=Path, help='the mod folder to write into (other files in it are kept and listed too)')
@@ -805,11 +817,10 @@ def main():
         try:
             if bf.RSTB not in index:
                 raise ValueError('not found in the RomFS')
-            with (romfs / 'romfs.bin').open('rb') as image:
-                offset, size = index[bf.RSTB]; image.seek(offset); rstb = image.read(size)
+            rstb = read_entry(romfs, index, bf.RSTB)
             mods_rstb = mod_table(args.mods) if args.mods else None
             for table in (rstb, *(mods_rstb[:1] if mods_rstb else ())):
-                bf.rstb_edits(bf.yaz0_decode(table), dict.fromkeys((resource_name(LAYOUT), *map(resource_name, fonts)), 0))
+                bf.rstb_edits(rstb_decoded(table), dict.fromkeys((resource_name(LAYOUT), *map(resource_name, fonts)), 0))
         except (OSError, *BAD_DATA) as error:
             print(f'note: {bf.RSTB}: {error}; drawing at --scale 1 instead (nothing grows, so the table is not needed)')
             rstb, mods_rstb, scale = None, None, 1
@@ -827,8 +838,7 @@ def main():
 
     from fontTools.ttLib import TTFont
     letters = Letters(TTFont(io.BytesIO(bfttf_decode((app_fonts / FONT).read_bytes()))))
-    with (romfs / 'romfs.bin').open('rb') as image:
-        offset, size = index[PACK]; image.seek(offset); pack = image.read(size)
+    pack = read_entry(romfs, index, PACK)
     while True:
         try:
             new_pack, new, drawn, notes, layout_sizes = make_pack(pack, controls, letters, args.style, not args.keep_switch_pictures, scale)
@@ -866,9 +876,7 @@ def main():
         png(rows, target, 2)
         print(f'{target}: {", ".join(sorted(drawn))}')
     for name in fonts:
-        offset, size = index[name]
-        with (romfs / 'romfs.bin').open('rb') as image:
-            image.seek(offset); stream = image.read(size)
+        stream = read_entry(romfs, index, name)
         try:
             data, cells, font_notes, grown = make_font(stream, controls, letters, args.style, scale)
         except BAD_DATA as error:
@@ -878,15 +886,15 @@ def main():
             growth[resource_name(name)] = grown
         (args.mod / name).parent.mkdir(parents=True, exist_ok=True)
         (args.mod / name).write_bytes(data)
-        print(f'{args.mod / name}: {len(cells)} glyphs changed; {size} -> {len(data)} bytes' + (f' (decompressed +{grown})' if grown else ''))
+        print(f'{args.mod / name}: {len(cells)} glyphs changed; {len(stream)} -> {len(data)} bytes' + (f' (decompressed +{grown})' if grown else ''))
     for note in dict.fromkeys(font_notes) if fonts else ():
         print('note (font glyphs):', note)
     if growth:      # the game sets memory aside for each resource by this table: it must hold what the archives grew
         if mods_rstb:   # the mods' table: each entry to the larger of the mod's size and the game's size plus the growth
-            game, mine = bf.rstb_sizes(bf.yaz0_decode(rstb), growth), bf.rstb_sizes(bf.yaz0_decode(mods_rstb[0]), growth)
+            game, mine = bf.rstb_sizes(rstb_decoded(rstb), growth), bf.rstb_sizes(rstb_decoded(mods_rstb[0]), growth)
             growth = {name: max(0, game[name] + grow - mine[name]) for name, grow in growth.items()}
             rstb = mods_rstb[0]
-        table = bf.yaz0_decode(rstb)
+        table = rstb_decoded(rstb)
         data = bf.yaz0_splice(rstb, table, bf.rstb_edits(table, growth))
         (args.mod / bf.RSTB).parent.mkdir(parents=True, exist_ok=True)
         (args.mod / bf.RSTB).write_bytes(data)

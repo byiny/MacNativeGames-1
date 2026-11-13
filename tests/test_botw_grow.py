@@ -1,7 +1,6 @@
 """Growing textures, font sheets and archives for the sharp prompt icons (games/botw/scripts/botw_formats.py): a BNTX with its
 texture data block and relocation table, a BFFNT inside a SARC, a Yaz0 stream that changes length, the resource size table.
 Made-up data only."""
-import random
 import struct
 import sys
 import unittest
@@ -12,58 +11,17 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'tests'))
 sys.path.insert(0, str(ROOT / 'games/botw/scripts'))
 sys.path.insert(0, str(ROOT / 'games/totk/scripts'))
-try:
-    import botw_formats as bf
-except (SystemExit, ImportError):     # make_romfs_patches needs Python 3.14 (compression.zstd)
-    bf = None
-from test_botw_prompts import yaz0_encode, sample, sarc      # noqa: E402
+import botw_formats as bf       # noqa: E402  (make_romfs_patches needs Python 3.14: compression.zstd)
+from botw_fixtures import yaz0_encode, sample, sarc, full_bntx, font, noise, rg8_read      # noqa: E402
 
 
-def full_bntx(textures):
-    """A BNTX laid out as the game's: header (relocation table offset and file size at 0x18), an NX block pointing at the BRTD,
-    one BRTI per texture with its data pointer, the BRTD holding the images (0x200 aligned), and an _RLT with two sections
-    (the headers, then the BRTD) at the end, 0x1000 aligned. `textures`: name -> (format, width, height, image bytes, block
-    height)."""
-    out = bytearray(b'BNTX' + bytes(0x1c)) + b'NX  ' + bytes(0x1c)
-    names, brtis = {}, []
-    for name in textures:
-        names[name] = len(out); raw = name.encode()
-        out += struct.pack('<H', len(raw)) + raw + bytes(-(2 + len(raw)) % 8)
-    for name, (fmt, w, h, image, bh) in textures.items():
-        brti = len(out); entry = bytearray(0xa0); entry[:4] = b'BRTI'
-        struct.pack_into('<HHHIIIIIIII', entry, 0x12, 0, 0, 1, 1, fmt, 0, w, h, 1, 1, bh.bit_length() - 1 | 0x10000)
-        struct.pack_into('<I', entry, 0x50, len(image)); struct.pack_into('<Q', entry, 0x60, names[name])
-        out += entry; brtis.append(brti)
-    pointers = len(out); out += bytes(8 * len(textures))
-    out += bytes(-(len(out) + 16) % 0x200)
-    brtd = len(out); out += b'BRTD' + bytes(12)
-    for i, (name, (_, _, _, image, _)) in enumerate(textures.items()):
-        out += bytes(-len(out) % 0x200)
-        struct.pack_into('<Q', out, pointers + 8 * i, len(out)); struct.pack_into('<Q', out, brtis[i] + 0x70, pointers + 8 * i)
-        out += image
-    out += bytes(-len(out) % 0x1000)
-    rlt = len(out)
-    struct.pack_into('<Q', out, brtd + 8, rlt - brtd); struct.pack_into('<Q', out, 0x30, brtd)
-    out += b'_RLT' + struct.pack('<II', rlt, 2) + bytes(4)
-    out += struct.pack('<QIIII', 0, 0, brtd, 0, 1) + struct.pack('<QIIII', 0, brtd, rlt - brtd, 1, 1)
-    out += struct.pack('<IHBB', 0x30, 1, 1, 0) + struct.pack('<IHBB', pointers, len(textures), 1, 0)
-    struct.pack_into('<II', out, 0x18, rlt, len(out))
-    return bytes(out)
-
-
-def r8_rows(w, h, seed):
-    rng = random.Random(seed)
-    return [bytes(rng.randrange(256) for _ in range(w)) for _ in range(h)]
-
-
-@unittest.skipIf(bf is None, 'needs Python 3.14')
 class BntxResize(unittest.TestCase):
     def setUp(self):
-        self.small = {n: r8_rows(48, 48, i) for i, n in enumerate(('a', 'b', 'c'))}
+        self.small = {n: noise(48, 48, i) for i, n in enumerate(('a', 'b', 'c'))}
         self.bntx = full_bntx({n: (bf.R8_UNORM, 48, 48, *bf.r8_pack(rows)) for n, rows in self.small.items()})
 
     def grow(self, name='b', size=96, seed=9):
-        rows = r8_rows(size, size, seed)
+        rows = noise(size, size, seed)
         image, bh = bf.r8_pack(rows)
         return rows, bf.apply_edits(self.bntx, bf.bntx_resize(self.bntx, {name: (size, size, image, bh)}))
 
@@ -99,17 +57,17 @@ class BntxResize(unittest.TestCase):
         self.assertEqual(texture.image_size, bf.surface_size(96, 96, 1, 16))
 
     def test_two_textures_grow_together(self):
-        a, b = r8_rows(96, 96, 1), r8_rows(128, 64, 2)
+        a, b = noise(96, 96, 1), noise(128, 64, 2)
         out = bf.apply_edits(self.bntx, bf.bntx_resize(self.bntx, {'a': (96, 96, *bf.r8_pack(a)), 'c': (128, 64, *bf.r8_pack(b))}))
         textures = bf.bntx_textures(out)
         self.assertEqual(bf.r8_read(out, textures['a']), a); self.assertEqual(bf.r8_read(out, textures['c']), b)
         self.assertEqual(bf.r8_read(out, textures['b']), self.small['b'])
 
     def test_rg8_and_bc4_pack_read_back(self):
-        grey, alpha = r8_rows(100, 60, 3), r8_rows(100, 60, 4)
+        grey, alpha = noise(100, 60, 3), noise(100, 60, 4)
         image, bh = bf.rg8_pack(grey, alpha)
         bntx = full_bntx({'p': (bf.R8G8_UNORM, 100, 60, image, bh)})
-        self.assertEqual(bf.rg8_read(bntx, bf.bntx_textures(bntx)['p']), (grey, alpha))
+        self.assertEqual(rg8_read(bntx, bf.bntx_textures(bntx)['p']), (grey, alpha))
         flat = [bytearray([y // 4 * 16]) * 64 for y in range(64)]       # flat 4x4 blocks: BC4 holds them exactly
         image, bh = bf.bc4_pack(flat)
         bntx = full_bntx({'s': (bf.BC4_UNORM, 64, 64, image, bh)})
@@ -120,28 +78,9 @@ class BntxResize(unittest.TestCase):
         brtd = struct.unpack_from('<Q', broken, 0x30)[0]
         struct.pack_into('<Q', broken, brtd + 8, 16)
         with self.assertRaises(ValueError):
-            bf.bntx_resize(bytes(broken), {'b': (96, 96, *bf.r8_pack(r8_rows(96, 96, 1)))})
+            bf.bntx_resize(bytes(broken), {'b': (96, 96, *bf.r8_pack(noise(96, 96, 1)))})
 
 
-def font(sheet_rows, codes=(0xE040, 0xE041), cell=(50, 50), grid=(5, 4)):
-    """A BFFNT: FINF (pointers to the TGLP, CWDH and CMAP data), TGLP with a full BNTX sheet at 0x1000, then CWDH and CMAP. Cells
-    of cell (width, height) pixels in a grid of (columns, rows)."""
-    image, bh = bf.bc4_pack(sheet_rows)
-    sheet = full_bntx({'sheet': (bf.BC4_UNORM, len(sheet_rows[0]), len(sheet_rows), image, bh)})
-    out = bytearray(b'FFNT\xff\xfe' + struct.pack('<HIIHH', 0x14, 0x04010000, 0, 4, 0))
-    finf = len(out); out += b'FINF' + struct.pack('<I', 0x20) + bytes(0x18)
-    tglp = len(out); out += b'TGLP' + bytes(4) + struct.pack('<BBBBIHHHHHHI', *cell, 1, 48, len(sheet), 36, 12, *grid, len(sheet_rows[0]), len(sheet_rows), 0x1000)
-    out += bytes(0x1000 - len(out)) + sheet
-    cwdh = len(out); widths = bytes(3 * len(codes)) + bytes(-(16 + 3 * len(codes)) % 4)
-    out += b'CWDH' + struct.pack('<IHHI', 16 + len(widths), 0, len(codes) - 1, 0) + widths
-    cmap = len(out); table = struct.pack(f'<{len(codes)}H', *range(len(codes)))
-    out += b'CMAP' + struct.pack('<IIIHHI', 24 + len(table), codes[0], codes[-1], 1, 0, 0) + table
-    struct.pack_into('<I', out, tglp + 4, cwdh - tglp); struct.pack_into('<III', out, finf + 20, tglp + 8, cwdh + 8, cmap + 8)
-    struct.pack_into('<I', out, 0x0c, len(out))
-    return bytes(out)
-
-
-@unittest.skipIf(bf is None, 'needs Python 3.14')
 class FontSheet(unittest.TestCase):
     def test_the_sheet_grows_and_the_sections_behind_it_follow(self):
         rows = [bytearray(((x // 4) * 9 + (y // 4) * 5) % 256 for x in range(256)) for y in range(208)]
@@ -181,7 +120,6 @@ class FontSheet(unittest.TestCase):
         self.assertEqual(bf.yaz0_decode(bf.yaz0_splice(stream, archive, edits)), out)
 
 
-@unittest.skipIf(bf is None, 'needs Python 3.14')
 class GrowingStreams(unittest.TestCase):
     def test_yaz0_splice_with_an_insertion_a_removal_and_a_same_size_edit(self):
         data = sample(60000, 7)

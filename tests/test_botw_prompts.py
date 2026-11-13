@@ -13,108 +13,13 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT/'tests'))
 sys.path.insert(0, str(ROOT/'games/botw/scripts'))
 sys.path.insert(0, str(ROOT/'games/totk/scripts'))
-try:
-    import botw_formats as bf
-    import botw_prompts as bp
-except (SystemExit, ImportError):     # make_romfs_patches needs Python 3.14 (compression.zstd)
-    bf = bp = None
-try:
-    import make_button_icons as mbi         # the PlayStation drawings; it needs fontTools and exits without it
-except (SystemExit, ImportError):
-    mbi = None
+import botw_formats as bf        # noqa: E402  (make_romfs_patches needs Python 3.14: compression.zstd)
+import botw_prompts as bp       # noqa: E402
 import prompt_layout as pl      # noqa: E402
+from botw_fixtures import yaz0_encode, sample, sarc, bntx, bffnt, full_bntx, font, rg8_read, coverage, enclosed_marks      # noqa: E402
 
 NAMES = ['Nt_KeyTexA_00^d', 'Nt_KeyTexB_00^d', 'Nt_KeyTexX_00^d', 'Nt_KeyTexY_00^d', 'Nt_KeyTexL_00^d', 'Nt_KeyTexZL_00^d',
          'Nt_KeyTexLSt_00^d', 'Nt_KeyTexLSt_01^d']
-
-
-def yaz0_encode(data):
-    """A plain greedy Yaz0 encoder (back references up to 4096 bytes), enough to test the splice against references."""
-    out, i, n, seen = bytearray(b'Yaz0' + struct.pack('>I', len(data)) + bytes(8)), 0, len(data), {}
-    while i < n:
-        code, body = 0, bytearray()
-        for bit in range(8):
-            if i >= n:
-                break
-            best, dist = 0, 0
-            for j in reversed(seen.get(data[i:i + 3], [])[-16:]):
-                if i - j > 4096:
-                    break
-                length = 3
-                while i + length < n and length < 0x111 and data[j + length] == data[i + length]:
-                    length += 1
-                if length > best:
-                    best, dist = length, i - j
-            step = 1
-            if best >= 3:
-                d = dist - 1
-                if best < 18:
-                    body += bytes([(best - 2) << 4 | d >> 8, d & 255])
-                else:
-                    body += bytes([d >> 8, d & 255, best - 18])
-                step = best
-            else:
-                code |= 0x80 >> bit; body.append(data[i])
-            for k in range(i, i + step):
-                seen.setdefault(data[k:k + 3], []).append(k)
-            i += step
-        out.append(code); out += body
-    return bytes(out)
-
-
-def sample(size, seed=1):
-    rng = random.Random(seed)
-    words = [bytes(rng.randrange(256) for _ in range(rng.randrange(3, 40))) for _ in range(30)]
-    out = bytearray()
-    while len(out) < size:
-        out += rng.choice(words) if rng.random() < 0.8 else bytes([rng.randrange(256)])
-    return bytes(out[:size])
-
-
-def sarc(members):
-    """A little-endian SARC (the layout make_romfs_patches.sarc_members reads), members 8-byte aligned."""
-    names, table, data = bytearray(), bytearray(), bytearray()
-    for name, blob in members.items():
-        while len(data) % 8:
-            data += b'\0'
-        table += struct.pack('<4I', 0, 0x01000000 | len(names) // 4, len(data), len(data) + len(blob))
-        names += name.encode() + b'\0'
-        while len(names) % 4:
-            names += b'\0'
-        data += blob
-    head = b'SFAT' + struct.pack('<HHI', 12, len(members), 0x65) + bytes(table) + b'SFNT' + struct.pack('<HH', 8, 0) + bytes(names)
-    start = 0x14 + len(head); start += -start % 8
-    out = bytearray(b'SARC' + struct.pack('<H', 0x14) + b'\xff\xfe' + struct.pack('<IIHH', 0, start, 0x100, 0) + head)
-    out += b'\0' * (start - len(out)) + data
-    struct.pack_into('<I', out, 8, len(out))
-    return bytes(out)
-
-
-def bntx(textures, fmt=bf.R8_UNORM if bf else 0x201, size=48):
-    """A BNTX holding one BRTI per name, each a size x size R8 block-linear texture (block height 8, 4096 bytes), as in the game."""
-    head = bytearray(b'BNTX' + bytes(0x1fc)); names = bytearray(); brti = bytearray(); pointers = bytearray(); data = bytearray()
-    base = len(head)
-    for i, (name, rows) in enumerate(textures.items()):
-        raw = name.encode()
-        name_at = base + len(names); names += struct.pack('<H', len(raw)) + raw + b'\0' * (-(2 + len(raw)) % 8)
-        entry = bytearray(0xa0)
-        entry[:4] = b'BRTI'
-        struct.pack_into('<HHHIIIIIIII', entry, 0x12, 0, 0, 1, 1, fmt, 0, size, size, 1, 1, 3)
-        struct.pack_into('<I', entry, 0x50, 4096)
-        struct.pack_into('<Q', entry, 0x60, name_at)
-        brti += entry; pointers += struct.pack('<Q', 0)
-        image = bytearray(4096)
-        for y, row in enumerate(rows):
-            for x, v in enumerate(row):
-                image[bf.r8_address(x, y, size, 8)] = v
-        data += image
-    brti_at = base + len(names); pointers_at = brti_at + len(brti); data_at = pointers_at + len(pointers)
-    out = bytearray(head + names + brti + pointers + data)
-    for i in range(len(textures)):
-        o = brti_at + i * 0xa0
-        struct.pack_into('<Q', out, o + 0x70, pointers_at + i * 8)
-        struct.pack_into('<Q', out, pointers_at + i * 8, data_at + i * 4096)
-    return bytes(out)
 
 
 def picture(seed):
@@ -194,7 +99,6 @@ class StubLetters:
         return [[(cx - h, cy - h), (cx + h, cy - h), (cx + h, cy + h), (cx - h, cy + h)]]
 
 
-@unittest.skipIf(bf is None, 'needs Python 3.14')
 class Yaz0Splice(unittest.TestCase):
     def setUp(self):
         self.data = sample(60000)
@@ -243,7 +147,6 @@ class Yaz0Splice(unittest.TestCase):
         self.assertEqual(bf.yaz0_splice(self.stream, self.data, []), self.stream)
 
 
-@unittest.skipIf(bf is None, 'needs Python 3.14')
 class Textures(unittest.TestCase):
     def test_swizzle_is_a_permutation_of_the_image(self):
         addresses = {bf.r8_address(x, y, 48, 8) for x in range(48) for y in range(48)}
@@ -275,16 +178,16 @@ class Textures(unittest.TestCase):
             bf.bntx_textures(b'NOPE' + bytes(100))
 
     def test_a_letter_is_found_and_an_outline_is_not(self):
-        marks = bf.enclosed_marks(key_picture())
+        marks = enclosed_marks(key_picture())
         self.assertEqual(len(marks), 1)
         self.assertEqual(min(p[0] for p in marks[0]), 20)
 
     def test_coverage_fills_a_shape_and_a_reversed_contour_cuts_a_hole(self):
         square = [(10, 10), (30, 10), (30, 30), (10, 30)]
         hole = [(15, 15), (15, 25), (25, 25), (25, 15)]          # wound the other way
-        full = bf.coverage([square], 48)
+        full = coverage([square], 48)
         self.assertEqual((full[20][20], full[5][5], full[20][9]), (255, 0, 0))
-        cut = bf.coverage([square, hole], 48)
+        cut = coverage([square, hole], 48)
         self.assertEqual((cut[20][20], cut[12][12]), (0, 255))
 
     def test_curves_are_flattened(self):
@@ -294,44 +197,6 @@ class Textures(unittest.TestCase):
         self.assertEqual(contour[12], (20.0, 0.0))
 
 
-def bc4_bntx(width, height, block_height, rows):
-    """A BNTX with one BC4 block-linear texture holding `rows` (a list of bytearray rows), as inside a BFFNT's glyph sheet."""
-    blocks_w, blocks_h = width // 4, height // 4
-    gobs = -(-blocks_h // (8 * block_height)) * block_height * (width * 2 // 64)
-    image = bytearray(gobs * 512)
-    for by in range(blocks_h):
-        for bx in range(blocks_w):
-            at = bf.gob_address(bx, by, blocks_w, 8, block_height)
-            image[at:at + 8] = bf.bc4_encode([rows[by * 4 + i // 4][bx * 4 + i % 4] for i in range(16)])
-    head = bytearray(b'BNTX' + bytes(0x1fc)); name = struct.pack('<H', 1) + b'x' + bytes(5)
-    entry = bytearray(0xa0); entry[:4] = b'BRTI'
-    struct.pack_into('<HHHIIIIIIII', entry, 0x12, 0, 0, 1, 1, bf.BC4_UNORM, 0, width, height, 1, 1, block_height.bit_length() - 1)
-    struct.pack_into('<I', entry, 0x50, len(image))
-    name_at, brti_at = len(head), len(head) + len(name)
-    pointers_at = brti_at + len(entry); data_at = pointers_at + 8
-    struct.pack_into('<Q', entry, 0x60, name_at); struct.pack_into('<Q', entry, 0x70, pointers_at)
-    return bytes(head + name + entry + struct.pack('<Q', data_at) + image)
-
-
-def bffnt(rows, columns=5, grid_rows=4, cell=50, block_height=1, codes=(0xE040, 0xE041, 0xE042, 0xE043), cell_height=None):
-    """A BFFNT: header, TGLP with the sheet (a BNTX) and a CMAP table starting at 0xE040 (glyph i = code 0xE040 + i). Cells are
-    cell x cell_height pixels (default square)."""
-    cell_height = cell_height or cell
-    sheet = bc4_bntx(256, grid_rows * (cell_height + 1) + 4, block_height, rows)
-    tglp_at = 0x14
-    sheet_at = 0x1000
-    tglp = b'TGLP' + struct.pack('<I', sheet_at + len(sheet) - tglp_at) + struct.pack('<BBBBIHHHHHHI', cell, cell_height, 1, cell, len(sheet), 36, 12, columns, grid_rows, 256, grid_rows * (cell_height + 1) + 4, sheet_at)
-    table = struct.pack('<%dH' % len(codes), *range(len(codes)))
-    cmap = b'CMAP' + struct.pack('<I', 24 + len(table)) + struct.pack('<IIHHI', codes[0], codes[-1], 1, 0, 0) + table
-    out = bytearray(b'FFNT' + b'\xff\xfe' + struct.pack('<H', 0x14) + bytes(4) + bytes(4) + struct.pack('<H', 2) + bytes(2))
-    body = bytearray(out) + bytearray(tglp.ljust(sheet_at - len(out), b'\0')) + bytearray(sheet)
-    cmap_at = len(body); body += cmap
-    # the sections are found by walking sizes: TGLP's size reaches the CMAP
-    struct.pack_into('<I', body, tglp_at + 4, cmap_at - tglp_at)
-    return bytes(body)
-
-
-@unittest.skipIf(bf is None, 'needs Python 3.14')
 class FontGlyphs(unittest.TestCase):
     def sheet(self):
         rng = random.Random(3)
@@ -400,7 +265,6 @@ class FontGlyphs(unittest.TestCase):
         with self.assertRaises(ValueError):
             bf.Bffnt(b'NOPE' + bytes(100))
 
-    @unittest.skipIf(mbi is None, 'needs fontTools (the button drawings come from make_button_icons.py)')
     def test_make_font_redraws_the_face_glyphs_and_keeps_the_rest_of_the_archive(self):
         rows = self.sheet()
         data = bffnt(rows)
@@ -426,7 +290,6 @@ class FontGlyphs(unittest.TestCase):
             self.assertLess(max(abs(x - y) for rw, rg in zip(cells[code], got) for x, y in zip(rw, rg)), 130)    # up to BC4's own rounding
             self.assertNotEqual(font.get(old_rows, code), got)
 
-    @unittest.skipIf(mbi is None, 'needs fontTools (the Menu and View drawers come from make_button_icons.py)')
     def test_menu_and_view_discs_sit_where_the_games_disc_sits(self):
         # The game's + and - glyphs fill only the left part of their cell and the game draws only that part (a disc at the middle of
         # the cell was cut off): the new disc keeps the old one's place.
@@ -470,10 +333,8 @@ class FontGlyphs(unittest.TestCase):
                 bp.make_font(yaz0_encode(sarc({'External_00.bffnt': data})), controls, letters)
         with self.assertRaises(bp.MissingData):
             bp.make_font(yaz0_encode(sarc({'Ancient_00.bffnt': good})), controls, letters)
-        if mbi:        # negative control: the unchanged font is drawn
-            self.assertTrue(bp.make_font(yaz0_encode(sarc({'External_00.bffnt': good})), controls, letters)[1])
+        self.assertTrue(bp.make_font(yaz0_encode(sarc({'External_00.bffnt': good})), controls, letters)[1])     # negative control: the unchanged font is drawn
 
-    @unittest.skipIf(mbi is None, 'needs fontTools')
     def test_playstation_font_redraws_the_face_glyphs_on_discs_like_the_originals(self):
         rows = [bytearray(256) for _ in range(4 * 51 + 4)]
         font = bf.Bffnt(bffnt(rows))
@@ -523,19 +384,15 @@ class StubFont:
         return self.cells[code]
 
 
-@unittest.skipIf(bf is None, 'needs Python 3.14')
 class StickGlyphs(unittest.TestCase):
     def test_the_stick_body_is_found_and_the_game_s_stick_is_traced_on_it(self):
         old = stick_glyph()
         self.assertEqual(bp.stick_body(old), (1, 5.5, 33, 37.5))              # the body's disc: 32 wide, on the rows that are wide enough
-        if mbi is None:
-            return
         controls = {**pl.prompt_controls('', 'position'), 'rstick': 'l3'}     # both presses on the left stick
         new, _ = bp.font_cells(StubFont({0xE056: old, 0xE057: [bytes(50)] * 50}), None, controls, StubLetters(), 'xbox', 2)
         self.assertEqual(new[0xE056], bp.traced(old, (1, 5.5, 33, 37.5), 100, (2, 11, 66, 75)))     # the game's stick, not an LS disc
         self.assertNotIn(0xE057, new)                                         # no stick in the right press glyph: it stays
 
-    @unittest.skipIf(mbi is None, 'needs fontTools (the d-pad drawers come from make_button_icons.py)')
     def test_the_d_pad_cross_fills_the_box_of_the_dots_and_cuts_the_lit_arrows(self):
         dots = [bytes(255 if any((x + 0.5 - cx) ** 2 + (y + 0.5 - cy) ** 2 <= 36 for cx, cy in ((32, 14), (14, 32), (50, 32), (32, 50))) else 0
                       for x in range(64)) for y in range(64)]
@@ -548,7 +405,6 @@ class StickGlyphs(unittest.TestCase):
         with self.assertRaises(ValueError):
             bp.disc_box([bytes(64)] * 64)                        # negative control: no shape to cover
 
-    @unittest.skipIf(mbi is None, 'needs fontTools')
     def test_a_moving_stick_stays_the_game_s_and_is_traced_above_1x_in_every_style(self):
         cells = {0xE050: stick_glyph(), 0xE0A0: stick_glyph()}
         for style in ('xbox', 'playstation'):
@@ -562,7 +418,6 @@ class StickGlyphs(unittest.TestCase):
         with self.assertRaises(ValueError):
             bp.stick_body([bytes(50)] * 50)
 
-    @unittest.skipIf(mbi is None, 'needs fontTools (the Menu and View drawers come from make_button_icons.py)')
     def test_font_cells_redraw_both_stick_glyphs_for_both_styles(self):
         disc = disc_picture(25, 22, 13, 50)
         cells = {code: disc for code in (*bp.FONT_FACE.values(), *bp.FONT_SHAPE.values(), *bp.FONT_MENU.values())}
@@ -574,7 +429,6 @@ class StickGlyphs(unittest.TestCase):
             for code in (0xE056, 0xE057):                                     # the game's own stick, traced, in both styles
                 self.assertEqual(new[code], bp.traced(cells[code], bp.stick_body(cells[code]), 50, bp.stick_body(cells[code])), (style, code))
 
-    @unittest.skipIf(mbi is None, 'needs fontTools')
     def test_switch_glyphs_are_the_games_own_traced_and_at_2x_every_button_glyph_is(self):
         cells = {code: disc_picture(25 + i % 3, 22, 13, 50) for i, code in enumerate((*bp.FONT_FACE.values(), *bp.FONT_MENU.values()))}
         cells.update({code: key_picture() + [bytes(48)] * 2 for code in (0xE044, 0xE045, 0xE046, 0xE047)})
@@ -590,7 +444,6 @@ class StickGlyphs(unittest.TestCase):
         self.assertEqual(new[0xE050], bp.traced(cells[0xE050], (0, 0, 50, 50), 100, (0, 0, 100, 100)))
         self.assertNotIn(0xE0A0, new)                                   # not a button glyph: enlarged as the sheet is
 
-    @unittest.skipIf(mbi is None, 'needs fontTools (the Menu and View drawers come from make_button_icons.py)')
     def test_the_d_pad_glyphs_become_a_cross_in_the_place_of_the_four_dots(self):
         dots = [bytearray(50) for _ in range(50)]
         for cx, cy in ((16, 12), (8, 20), (24, 20), (16, 28)):       # four dots round (16, 20), in the left part of the cell
@@ -611,7 +464,6 @@ class StickGlyphs(unittest.TestCase):
         self.assertLess(max(xs), 30)                                 # it stays in the place of the dots
 
 
-@unittest.skipIf(bf is None, 'needs Python 3.14')
 class SystemFont(unittest.TestCase):
     def test_bfttf_decodes_to_the_font_inside(self):
         font = b'\x00\x01\x00\x00' + bytes(range(30))       # a TrueType header and some bytes (30 + 4 is not a multiple of 4)
@@ -635,7 +487,6 @@ def expected_stick(old, scale=1):
     return bp.traced(old, box, len(old) * scale, bp.enlarged(box, scale))
 
 
-@unittest.skipIf(bf is None or mbi is None, 'needs Python 3.14 and fontTools')
 class MakePack(unittest.TestCase):
     def setUp(self):
         self.pics = {n: picture(i) for i, n in enumerate(NAMES)}
@@ -705,7 +556,6 @@ class MakePack(unittest.TestCase):
         self.assertEqual(sorted(changed), sorted(NAMES))
 
     def test_missing_wrong_sized_and_multi_mip_textures_are_skipped_the_others_are_drawn(self):
-        from test_botw_grow import full_bntx
         names = NAMES + [bp.DPAD_TEXTURE]
         pics = {n: self.pics[n] for n in NAMES}
         pics[bp.DPAD_TEXTURE] = disc_picture(32, 32, 24, 64)
@@ -738,7 +588,6 @@ class MakePack(unittest.TestCase):
                         self.assertEqual(textures[good].width, len(changed[good]))
 
     def test_controller_pictures_in_another_format_or_size_are_skipped_with_a_note(self):
-        from test_botw_grow import full_bntx
         name = 'Nt_Picture_00^f'
         specs = {n: (bf.R8_UNORM, 48, 48, *bf.r8_pack(self.pics[n])) for n in NAMES}
         draws = []
@@ -777,7 +626,6 @@ class MakePack(unittest.TestCase):
             bp.make_pack(sarc({'Layout/Common.sblarc': yaz0_encode(sarc({'timg/other.bntx': bntx(self.pics)}))}), controls, StubLetters())
 
 
-@unittest.skipIf(bf is None or mbi is None, 'needs Python 3.14 and fontTools')
 class MakePackPlayStation(unittest.TestCase):
     def setUp(self):
         self.pics = {n: disc_picture(24 + i * 0.5, 23 + i * 0.5, 17 + i * 0.5) for i, n in enumerate(NAMES[:4])}
@@ -791,7 +639,6 @@ class MakePackPlayStation(unittest.TestCase):
         inner = bf.sarc_members(layout); blob = layout[slice(*inner['timg/__Combined.bntx'])]
         return {n: bf.r8_read(blob, t) for n, t in bf.bntx_textures(blob).items()}
 
-    @unittest.skipIf(mbi is None, 'needs fontTools')
     def test_face_textures_are_drawn_on_discs_like_the_originals_and_the_rest_is_the_original(self):
         controls = pl.prompt_controls('', 'position')
         xbox_pack = bp.make_pack(self.pack, controls, StubLetters())[0]
@@ -820,7 +667,6 @@ class MakePackPlayStation(unittest.TestCase):
             if name != 'timg/__Combined.bntx':
                 self.assertEqual(old[slice(*a[name])], new[slice(*b[name])], name)
 
-    @unittest.skipIf(mbi is None, 'needs fontTools')
     def test_a_face_button_without_a_playstation_picture_keeps_its_texture(self):
         controls = {**pl.prompt_controls('', 'position'), 'a': 'l1'}      # L1 has no face picture
         new_pack, changed, _, notes, _ = bp.make_pack(self.pack, controls, StubLetters(), 'playstation')
@@ -833,7 +679,6 @@ class MakePackPlayStation(unittest.TestCase):
             bp.make_pack(self.pack, pl.prompt_controls('', 'position'), StubLetters(), 'nintendo')
 
 
-@unittest.skipIf(bf is None or mbi is None, 'needs Python 3.14 and fontTools')
 class MakePackSwitch(unittest.TestCase):
     """--style switch: the game's own pictures, traced (sharp at a larger scale), of the button pressed (controls.txt)."""
     setUp, pictures = MakePack.setUp, MakePack.pictures
@@ -874,7 +719,6 @@ class MakePackSwitch(unittest.TestCase):
         self.assertEqual(bp.style_parts('switch'), (bp.SWITCH_TEXT, 'Switch'))
 
 
-@unittest.skipIf(bf is None, 'needs Python 3.14')
 class Traced(unittest.TestCase):
     """bp.traced: the game's picture drawn again larger, with sharp edges where its anti-aliasing puts them."""
     def ring(self, size=48):
@@ -923,13 +767,11 @@ def downsampled(rows, k):
             for y in range(len(rows) // k)]
 
 
-@unittest.skipIf(bf is None or mbi is None, 'needs Python 3.14 and fontTools')
 class Scale(unittest.TestCase):
     """--scale above 1: new larger textures (full BNTX of the game's layout) and a larger glyph sheet, one drawing for both."""
     SIZE = 48       # the face textures are as large as the font's cells here, so one button has one picture in both
 
     def setUp(self):
-        from test_botw_grow import full_bntx, font
         self.letters, self.controls = StubLetters(), pl.prompt_controls('', 'position')
         self.pics = {n: disc_picture(24 + i * 0.5, 23 + i * 0.5, 17 + i * 0.5, self.SIZE) for i, n in enumerate(NAMES[:4])}
         self.pics.update({n: key_picture() for n in NAMES[4:]})
@@ -1007,7 +849,6 @@ class Scale(unittest.TestCase):
         self.assertEqual(len([n for n in notes if 'format' in n]), len(NAMES))
 
     def test_pictures_come_from_the_art_at_the_same_scale(self):
-        from test_botw_grow import full_bntx
         calls = []
 
         def draw(controls, letters, text, style='xbox', scale=1):
@@ -1025,7 +866,7 @@ class Scale(unittest.TestCase):
         self.assertEqual(calls, [2])
         _, _, blob, textures = self.textures(new_pack)
         self.assertEqual((textures[name].width, textures[name].height), (128, 64))
-        self.assertEqual(bf.rg8_read(blob, textures[name]), drawn[name])
+        self.assertEqual(rg8_read(blob, textures[name]), drawn[name])
 
     def test_a_button_has_one_drawing_in_its_texture_and_in_its_font_glyph(self):
         _, textures, _, _, _ = bp.make_pack(self.pack, self.controls, self.letters, 'xbox', False, 2)
@@ -1036,7 +877,6 @@ class Scale(unittest.TestCase):
 
     def test_a_font_whose_cells_are_not_square_is_redrawn_at_1x_and_2x(self):
         # 1.6.0's External_00.bffnt: 44 x 39 cells in a 2 x 25 grid on a 128 x 1024 sheet (1.9.0: 50 x 50, 5 x 20 on 256 x 1024)
-        from test_botw_grow import font
         sheet = [bytearray(((x // 4) * 9 + (y // 4) * 5) % 256 for x in range(128)) for y in range(1024)]
         codes = (0xE040, 0xE041, 0xE042, 0xE043)
         data = font(sheet, codes, (44, 39), (2, 25))
@@ -1105,14 +945,9 @@ class Scale(unittest.TestCase):
         return romfs, entries
 
     def main_with(self, mod, romfs, *args):
-        import contextlib
-        argv = sys.argv
-        sys.argv = ['botw_prompts.py', str(mod), '--romfs', str(romfs), *args]
-        try:
-            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-                bp.main()
-        finally:
-            sys.argv = argv
+        code, _ = self.run_tool(mod, romfs, *args)
+        if code:
+            raise SystemExit(code)      # as bp.main() ends a run that stops
 
     def run_tool(self, mod, romfs, *args):
         """(exit code, everything printed) of a run of the tool."""
@@ -1303,7 +1138,6 @@ def runtime_index(files):
     return struct.pack('<8sQQ', b'TOTKRFS1', len(files), 24 + len(files) * 24) + entries + names
 
 
-@unittest.skipIf(bf is None, 'needs Python 3.14')
 class GrownLetters(unittest.TestCase):
     """grown_contour() on a letter A (an outer shape with an acute triangular counter) cut out of a disc, as the button drawings
     do (the letter is drawn the other way round), at 48 x 48 pixels. The counter of this A has an inscribed circle of 3 pixels."""
@@ -1315,8 +1149,8 @@ class GrownLetters(unittest.TestCase):
         place = lambda contour: [(24 + (x - 385) * 0.03, 24 + (403 - y) * 0.03) for x, y in contour][::-1]
         disc = [(24 + 22 * math.cos(t * math.pi / 32), 24 + 22 * math.sin(t * math.pi / 32)) for t in range(64)]
         grown = [bp.grown_contour(place(c), stroke) for c in (self.OUTER, self.COUNTER)]
-        rows = bf.coverage([disc] + [c[::-1] for c in grown if c], 48)
-        return [len(m) for m in bf.enclosed_marks([bytes(255 - v for v in row) for row in rows], window=(6, 6, 42, 42), largest=80)]
+        rows = coverage([disc] + [c[::-1] for c in grown if c], 48)
+        return [len(m) for m in enclosed_marks([bytes(255 - v for v in row) for row in rows], window=(6, 6, 42, 42), largest=80)]
 
     def test_a_counter_the_stroke_closes_is_solid(self):
         for stroke in (3.2, 4.0):
@@ -1402,7 +1236,6 @@ def popup_bflyt(slot):
     return b'FLYT' + b'\xff\xfe' + struct.pack('<HIIHH', 0x14, 0, 0x14 + len(body), len(sections), 0) + body
 
 
-@unittest.skipIf(bf is None, 'needs Python 3.14')
 class ActionPopups(unittest.TestCase):
     """The action popup by a chest ("A: Open"): the style's letters at the pad's own spots and the pressed disc where it is."""
     OWNER = 'north = a\nsouth = x\nwest = y\neast = b\n'
@@ -1502,7 +1335,6 @@ class ActionPopups(unittest.TestCase):
         self.assertEqual(edits, [])
         self.assertTrue(any('action popup' in n for n in notes), notes)
 
-    @unittest.skipIf(mbi is None, 'needs fontTools')
     def test_make_pack_edits_the_popups_the_same_at_every_scale(self):
         Scale.setUp(self)
         layout = sarc({**{n: self.layout[slice(*r)] for n, r in bf.sarc_members(self.layout).items()},

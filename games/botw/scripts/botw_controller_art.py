@@ -171,10 +171,6 @@ class Canvas:
         return grey, alpha
 
 
-def label_shape(letters, label, cx, cy, cap, max_width):
-    return letters.text(label, cap, cx, cy, max_width)
-
-
 SYMBOLS = ('Cross', 'Circle', 'Square', 'Triangle')     # the PlayStation face buttons' names (botw_prompts.PLAYSTATION_TEXT)
 
 
@@ -207,7 +203,7 @@ def dark_button(canvas, cx, cy, r, letters=None, label=None, cap=None):
     if label in SYMBOLS:
         symbol(canvas, label, cx, cy, r * 0.55)
     elif label and letters:
-        canvas.paint(label_shape(letters, label, cx, cy, cap or r * 0.8, 2 * r - 6), LIGHT)
+        canvas.paint(letters.text(label, cap or r * 0.8, cx, cy, 2 * r - 6), LIGHT)
 
 
 def menu_glyph(canvas, cx, cy, size):
@@ -249,7 +245,7 @@ def center_button(canvas, cx, cy, kind, letters, text, k=1.0, style='xbox'):
     elif kind == 'view':
         view_glyph(canvas, cx, cy, 13 * k)
     elif text.get(kind):
-        canvas.paint(label_shape(letters, text[kind], cx, cy, 6.0 * k, 13 * k), LIGHT)
+        canvas.paint(letters.text(text[kind], 6.0 * k, cx, cy, 13 * k), LIGHT)
 
 
 def stick(canvas, cx, cy, k=1.0):
@@ -307,6 +303,7 @@ FRONT_BODY_PS = both_halves(outline((288, 30), (150, 30), ((114, 30), (102, 24),
 # The DualSense's touchpad (narrower at the bottom), Options and Create at its top corners in the places of + and -.
 TOUCHPAD = outline((126, 33), (450, 33), ((459, 33), (464, 39), (463, 47)), (447, 118), ((445, 126), (439, 129), (430, 129)), (146, 129),
                    ((137, 129), (131, 126), (129, 118)), (113, 47), ((112, 39), (117, 33), (126, 33)))
+CONSOLE_LIGHTS = ([(110, 50), (113.5, 50), (131.5, 127), (128, 127)], [(466, 50), (462.5, 50), (444.5, 127), (448, 127)])    # the light bars beside the touchpad
 PANEL = [(124, 126), (452, 126), (436, 290), (140, 290)]       # the DualSense's dark middle under the touchpad (cut by the body)
 
 
@@ -357,8 +354,8 @@ def draw_front(canvas, controls, letters, text, style):
         canvas.paint([inset(PANEL, 1.5)], 118, clip=[face])
         canvas.paint([TOUCHPAD], RIM)
         canvas.paint([inset(TOUCHPAD, 2)], 214)
-        for side in ([(110, 50), (113.5, 50), (131.5, 127), (128, 127)], [(466, 50), (462.5, 50), (444.5, 127), (448, 127)]):
-            canvas.paint([side], 236)                                     # the light bars beside the touchpad
+        for side in CONSOLE_LIGHTS:
+            canvas.paint([side], 236)
         canvas.paint([circle(288, 152, 10.5)], LIGHT)                     # the PS button
         canvas.paint([circle(288, 152, 9.3)], EDGE)
         canvas.paint([circle(288, 152, 7.8)], DARK)
@@ -429,7 +426,7 @@ def top_view(controls, letters, text, style='xbox', scale=1):
         canvas.paint([inset(shape, 1.7)], DARK)
         label = text.get(controls.get(slot))
         if label:
-            canvas.paint(label_shape(letters, label, (x0 + x1) / 2, (y0 + y1) / 2 + (2 if trigger else 0), 9.0 if trigger else 8.0, x1 - x0 - 14), LIGHT)
+            canvas.paint(letters.text(label, 9.0 if trigger else 8.0, (x0 + x1) / 2, (y0 + y1) / 2 + (2 if trigger else 0), x1 - x0 - 14), LIGHT)
     return canvas.rows()
 
 
@@ -472,7 +469,7 @@ def shoulders(left, controls, letters, text, style='xbox', scale=1):
         canvas.paint([inset(shape, 2.2)], DARK)
         label = text.get(controls.get(slot if left else {'zl': 'zr', 'l': 'r'}[slot]))
         if label:
-            canvas.paint(label_shape(letters, label, (x0 + x1) / 2, (y0 + y1) / 2 + (3 if trigger else 0), 11.0 if trigger else 10.0, x1 - x0 - 20), LIGHT)
+            canvas.paint(letters.text(label, 11.0 if trigger else 10.0, (x0 + x1) / 2, (y0 + y1) / 2 + (3 if trigger else 0), x1 - x0 - 20), LIGHT)
     return canvas.rows()
 
 

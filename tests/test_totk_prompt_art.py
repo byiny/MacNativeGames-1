@@ -8,17 +8,13 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'games/totk/scripts'))
-try:
-    import totk_prompt_art as tpa
-except (SystemExit, ImportError):     # needs Python 3.14 (compression.zstd) and fontTools
-    tpa = None
+import totk_prompt_art as tpa       # noqa: E402  (needs Python 3.14: compression.zstd, and fontTools)
 import prompt_layout as pl      # noqa: E402
 
 OWNER = 'north = a\nsouth = x\nwest = y\neast = b\n'      # owner-map/controls.txt, without its comments
 FACES = (0xE040, 0xE041, 0xE042, 0xE043)
 
 
-@unittest.skipUnless(tpa, 'needs Python 3.14 and fontTools')
 class FitMaths(unittest.TestCase):
     def test_fit_centres_the_ink_on_the_box_with_its_shape_kept(self):
         self.assertEqual(tpa.fit((0, 0, 100, 50), (0, 0, 200, 200)), (2, 0, 0, 2, 0, 50))      # the width limits: 2x, centred up
@@ -29,7 +25,6 @@ class FitMaths(unittest.TestCase):
         self.assertEqual(tpa.disc((0, 0, 100, 60)), (10, -10, 90, 70))
 
 
-@unittest.skipUnless(tpa, 'needs Python 3.14 and fontTools')
 class Plans(unittest.TestCase):
     def glyphs(self, text='', face='position', style='xbox'):
         return tpa.glyph_plan(pl.prompt_controls(text, face), style)
@@ -84,7 +79,6 @@ class Launcher(unittest.TestCase):
         for needle in ('--our-art', 'TOTK_PROMPT_ICONS', 'GAMEPAD_TYPE_XBOX;'):
             self.assertIn(needle, text)
 
-    @unittest.skipUnless(tpa, 'needs Python 3.14 and fontTools')
     def test_our_art_is_refused_for_the_keyboard_styles(self):
         for style in ('keyboard', 'azerty'):
             with tempfile.TemporaryDirectory() as tmp:

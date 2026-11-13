@@ -1,7 +1,6 @@
 """The controller pictures of Breath of the Wild's controller tips page (games/botw/scripts/botw_controller_art.py, the R8G8 texture
 code of botw_formats.py, and botw_prompts.make_pack with pictures) on made-up textures: no game data."""
 import hashlib
-import random
 import struct
 import sys
 import unittest
@@ -11,13 +10,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT/'games/botw/scripts'))
 sys.path.insert(0, str(ROOT/'games/totk/scripts'))
 sys.path.insert(0, str(ROOT/'tests'))
-try:
-    import botw_formats as bf
-    import botw_prompts as bp
-    import botw_controller_art as art
-    from test_botw_prompts import StubLetters, yaz0_encode, sarc, sample, NAMES, picture, key_picture, mbi
-except (SystemExit, ImportError):     # make_romfs_patches needs Python 3.14 (compression.zstd)
-    bf = bp = art = mbi = None
+import botw_formats as bf       # noqa: E402  (make_romfs_patches needs Python 3.14: compression.zstd)
+import botw_prompts as bp       # noqa: E402
+import botw_controller_art as art       # noqa: E402
+from test_botw_prompts import StubLetters, NAMES, picture, key_picture      # noqa: E402
+from botw_fixtures import yaz0_encode, sarc, sample, rg8_bntx, noise, rg8_read      # noqa: E402,F401
 import prompt_layout as pl      # noqa: E402
 
 FRONT, TOP = 'Nt_NNillust_00^f', 'Nt_NNillust_01^f'
@@ -40,48 +37,6 @@ class Recorder:
         return [label for label, cx, cy in self.calls if abs(cx - x) <= tolerance and abs(cy - y) <= tolerance]
 
 
-def rg8_bntx(specs):
-    """A BNTX with one R8G8 or R8 block-linear texture for each (name, format, width, height, log2 of the block height, grey rows,
-    alpha rows or None for an R8 texture), laid out as the game's are."""
-    head = bytearray(b'BNTX' + bytes(0x1fc)); names = bytearray(); brti = bytearray(); pointers = bytearray(); images = []
-    base = len(head)
-    for name, fmt, width, height, log2, grey, alpha in specs:
-        element = 2 if alpha is not None else 1
-        raw = name.encode()
-        name_at = base + len(names); names += struct.pack('<H', len(raw)) + raw + b'\0' * (-(2 + len(raw)) % 8)
-        block = 1 << log2
-        gobs_wide = -(-width * element // 64)
-        size = -(-(-(-height // 8)) // block) * block * gobs_wide * 512
-        entry = bytearray(0xa0)
-        entry[:4] = b'BRTI'
-        struct.pack_into('<HHHIIIIIIII', entry, 0x12, 0, 0, 1, 1, fmt, 0, width, height, 1, 1, log2)
-        struct.pack_into('<I', entry, 0x50, size)
-        struct.pack_into('<Q', entry, 0x60, name_at)
-        brti += entry; pointers += struct.pack('<Q', 0)
-        image = bytearray(size)
-        for y in range(height):
-            for x in range(width):
-                at = bf.gob_address(x, y, width, element, block)
-                image[at] = grey[y][x]
-                if alpha is not None:
-                    image[at + 1] = alpha[y][x]
-        images.append(image)
-    brti_at = base + len(names); pointers_at = brti_at + len(brti)
-    out = bytearray(head + names + brti + pointers)
-    for i, image in enumerate(images):
-        o = brti_at + i * 0xa0
-        struct.pack_into('<Q', out, o + 0x70, pointers_at + i * 8)
-        struct.pack_into('<Q', out, pointers_at + i * 8, len(out))
-        out += image
-    return bytes(out)
-
-
-def noise(width, height, seed):
-    rng = random.Random(seed)
-    return [bytes(rng.randrange(256) for _ in range(width)) for _ in range(height)]
-
-
-@unittest.skipIf(bf is None, 'needs Python 3.14')
 class Rg8Textures(unittest.TestCase):
     def setUp(self):
         self.grey, self.alpha = noise(64, 32, 1), noise(64, 32, 2)
@@ -89,7 +44,7 @@ class Rg8Textures(unittest.TestCase):
         self.texture = bf.bntx_textures(self.blob)['t^f']
 
     def test_the_two_channels_read_back_and_the_swizzle_keeps_them_apart(self):
-        self.assertEqual(bf.rg8_read(self.blob, self.texture), (self.grey, self.alpha))
+        self.assertEqual(rg8_read(self.blob, self.texture), (self.grey, self.alpha))
         addresses = {bf.gob_address(x, y, 64, 2, 2) + c for x in range(64) for y in range(32) for c in (0, 1)}
         self.assertEqual(len(addresses), 64 * 32 * 2)
 
@@ -98,7 +53,7 @@ class Rg8Textures(unittest.TestCase):
         image = bf.rg8_image(self.blob, self.texture, grey, alpha)
         self.assertEqual(len(image), self.texture.image_size)
         patched = bytearray(self.blob); patched[self.texture.offset:self.texture.offset + len(image)] = image
-        self.assertEqual(bf.rg8_read(bytes(patched), self.texture), (grey, alpha))
+        self.assertEqual(rg8_read(bytes(patched), self.texture), (grey, alpha))
         used = {bf.gob_address(x, y, 64, 2, 2) + c for x in range(64) for y in range(32) for c in (0, 1)}
         original = self.blob[self.texture.offset:self.texture.offset + len(image)]
         for i in range(len(image)):
@@ -108,7 +63,7 @@ class Rg8Textures(unittest.TestCase):
     def test_other_formats_and_sizes_are_refused(self):     # negative controls
         r8 = rg8_bntx([('t^f', bf.R8_UNORM, 64, 32, 1, self.grey, None)])
         with self.assertRaises(ValueError):
-            bf.rg8_read(r8, bf.bntx_textures(r8)['t^f'])
+            rg8_read(r8, bf.bntx_textures(r8)['t^f'])
         with self.assertRaises(ValueError):
             bf.r8_read(self.blob, self.texture)
         with self.assertRaises(ValueError):
@@ -120,11 +75,8 @@ class Rg8Textures(unittest.TestCase):
         wide = bf.coverage_rect([[(10, 4), (50, 4), (50, 12), (10, 12)]], 60, 16)
         self.assertEqual((len(wide), len(wide[0])), (16, 60))
         self.assertEqual((wide[8][30], wide[8][5], wide[2][30], wide[14][30]), (255, 0, 0, 0))
-        square = [(3.3, 4.1), (40.7, 9.2), (22.5, 41.9)]
-        self.assertEqual(bf.coverage([square], 48), bf.coverage_rect([square], 48, 48))
 
 
-@unittest.skipIf(bf is None, 'needs Python 3.14')
 class Drawing(unittest.TestCase):
     def draw(self, name, controls=None, letters=None):
         controls = controls or pl.prompt_controls('', 'position')
@@ -261,7 +213,6 @@ SCALE_1_HASHES = {
 }
 
 
-@unittest.skipIf(bf is None, 'needs Python 3.14')
 class Scale(unittest.TestCase):
     TEXT = {'xbox': 'XBOX_TEXT', 'playstation': 'PLAYSTATION_TEXT'}
     MAX_MEAN_DIFFERENCE = 1.0      # grey levels of 255, mean over a picture and both channels; the measured values are 0.07 to 0.22
@@ -308,7 +259,6 @@ class Scale(unittest.TestCase):
                 self.draw(FRONT, 'xbox', scale=scale)
 
 
-@unittest.skipIf(bf is None, 'needs Python 3.14')
 class MakePackPictures(unittest.TestCase):
     def setUp(self):
         self.keys = {n: picture(i) for i, n in enumerate(NAMES)}
@@ -337,8 +287,8 @@ class MakePackPictures(unittest.TestCase):
         self.assertEqual(sorted(drawn), sorted([FRONT, TOP, SNN[1]]))
         blob, textures = self.textures(new_pack)
         for name in (FRONT, TOP, SNN[1]):
-            self.assertEqual(bf.rg8_read(blob, textures[name]), art.PICTURES[name][1](controls, StubLetters(), bp.XBOX_TEXT))
-        self.assertEqual(bf.rg8_read(blob, textures[SNN[0]]), (self.small_grey, self.small_alpha))
+            self.assertEqual(rg8_read(blob, textures[name]), art.PICTURES[name][1](controls, StubLetters(), bp.XBOX_TEXT))
+        self.assertEqual(rg8_read(blob, textures[SNN[0]]), (self.small_grey, self.small_alpha))
         self.assertTrue(any(n.startswith(SNN[0]) and 'stays' in n for n in notes))
         self.assertEqual(sorted(changed), sorted(NAMES + [bp.DPAD_TEXTURE]))
         self.assertEqual(sizes[2], len(self.layout))
@@ -367,11 +317,10 @@ class MakePackPictures(unittest.TestCase):
         new_pack, changed, drawn, notes, _ = bp.make_pack(self.pack, pl.prompt_controls('', 'position'), StubLetters(), 'xbox', pictures=False)
         self.assertEqual(drawn, {})
         blob, textures = self.textures(new_pack)
-        self.assertEqual(bf.rg8_read(blob, textures[FRONT]), (self.front_grey, self.front_alpha))
+        self.assertEqual(rg8_read(blob, textures[FRONT]), (self.front_grey, self.front_alpha))
         self.assertEqual(bf.r8_read(blob, textures[bp.DPAD_TEXTURE]), bp.render(bp.drawers_of('xbox', StubLetters())[0xE049], 64, bp.disc_box(DOTS)))     # the screen's d-pad is a cross
         self.assertEqual(sorted(changed), sorted(NAMES + [bp.DPAD_TEXTURE]))
 
-    @unittest.skipIf(mbi is None, 'needs fontTools (the PlayStation drawers come from make_button_icons.py)')
     def test_playstation_draws_its_own_pictures(self):
         controls = pl.prompt_controls('', 'position')
         new_pack, _, drawn, notes, _ = bp.make_pack(self.pack, controls, StubLetters(), 'playstation')
@@ -379,7 +328,7 @@ class MakePackPictures(unittest.TestCase):
         self.assertFalse([n for n in notes if 'stay the Switch' in n])
         blob, textures = self.textures(new_pack)
         for name in drawn:
-            self.assertEqual(bf.rg8_read(blob, textures[name]), art.PICTURES[name][1](controls, StubLetters(), bp.PLAYSTATION_TEXT, style='playstation'))
+            self.assertEqual(rg8_read(blob, textures[name]), art.PICTURES[name][1](controls, StubLetters(), bp.PLAYSTATION_TEXT, style='playstation'))
             if name != SNN[1]:
                 self.assertTrue(drawn[name] != art.PICTURES[name][1](controls, StubLetters(), bp.XBOX_TEXT), name)
 
@@ -408,7 +357,6 @@ def hint_bflyt():
     return b'FLYT' + b'\xff\xfe' + struct.pack('<HIIHH', 0x14, 0, 0x14 + len(body), len(sections), 0) + body
 
 
-@unittest.skipIf(bf is None, 'needs Python 3.14')
 class HintRings(unittest.TestCase):
     """The rings of the hint boxes follow the button the player presses (the hint piece Nt_GamePadIllustSnn_02 is drawn by us)."""
     OWNER = 'north = a\nsouth = x\nwest = y\neast = b\n'
@@ -449,7 +397,7 @@ class HintRings(unittest.TestCase):
         self.assertFalse([n for n in notes if 'ring' in n])
 
     def test_a_remap_moves_the_ring_and_the_dot_to_the_button_pressed(self):
-        for style in ('xbox', 'playstation') if mbi else ('xbox',):
+        for style in ('xbox', 'playstation'):
             new_pack, *_ = bp.make_pack(self.pack, pl.prompt_controls(self.OWNER, 'label'), StubLetters(), style)
             got = self.rings(new_pack)
             # label mode: Switch A <- pad X (diamond left, the Y spot), B <- A (diamond bottom, the B spot), X <- B (right: A spot), Y <- Y (top: X spot)
