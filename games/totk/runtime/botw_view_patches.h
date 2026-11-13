@@ -83,6 +83,14 @@
 #define VIEW_MAX_WORDS 9
 
 typedef struct { uint32_t off, original; } view_guard;
+/* The first of n words in main that is not as shipped: its 1-based index and the word found; 0 = all as shipped. */
+static inline int verify_words(const uint8_t *main, const view_guard *g, unsigned n, uint32_t *found) {
+    for (unsigned i = 0; i < n; i++) {
+        uint32_t have; memcpy(&have, main + g[i].off, 4);
+        if (have != g[i].original) { if (found) *found = have; return (int)i + 1; }
+    }
+    return 0;
+}
 typedef struct {
     const view_guard *guard; unsigned guards;   /* the words checked before anything is written */
     uint32_t site;                              /* the word that becomes a branch to the stub */
@@ -269,10 +277,7 @@ static inline uint64_t view_stub_at(const view_patch *p, uint64_t text_end) { re
    1..n = that guard is not as shipped (its word in *found); -1 = no room. Nothing is written unless 0 is returned. */
 static inline int view_apply(const view_patch *p, uint8_t *main, uint64_t base, uint64_t text_end, uint64_t data, uint64_t size,
                              uint32_t slot_word, uint32_t *found) {
-    for (unsigned i = 0; i < p->guards; i++) {
-        uint32_t have; memcpy(&have, main + p->guard[i].off, 4);
-        if (have != p->guard[i].original) { if (found) *found = have; return (int)i + 1; }
-    }
+    { int bad = verify_words(main, p->guard, p->guards, found); if (bad) return bad; }
     const uint64_t stub = view_stub_at(p, text_end);
     if (stub < text_end || stub + 4 * p->words > ((text_end + 0xfff) & ~0xfffULL) || data & 0xfff || data + p->slot + 4 > size) return -1;
     for (unsigned i = 0; i < 4 * p->words; i++) if (main[stub + i]) return -1;
@@ -304,10 +309,7 @@ static inline int view_lod_apply(uint8_t *main, uint64_t base, uint64_t text_end
 static inline int view_lod160_apply(uint8_t *main, uint64_t base, uint64_t text_end, uint64_t data, uint64_t size, double k, uint32_t *found) {
     const view_patch *p = &view_lod160; uint32_t bits;
     if (!view_lod_bits(k, &bits)) return -2;
-    for (unsigned i = 0; i < p->guards; i++) {
-        uint32_t have; memcpy(&have, main + p->guard[i].off, 4);
-        if (have != p->guard[i].original) { if (found) *found = have; return (int)i + 1; }
-    }
+    { int bad = verify_words(main, p->guard, p->guards, found); if (bad) return bad; }
     const uint64_t stub = view_stub_at(p, text_end), bytes = 4ull * p->words;
     if (stub + bytes * p->sites > ((text_end + 0xfff) & ~0xfffULL) || data & 0xfff || data + p->slot + 4 > size) return -1;
     for (uint64_t i = 0; i < bytes * p->sites; i++) if (main[stub + i]) return -1;
@@ -331,10 +333,7 @@ static inline int view_lod160_apply(uint8_t *main, uint64_t base, uint64_t text_
 }
 static inline int view_disp_apply(uint8_t *main, uint64_t base, uint64_t text_end, uint64_t data, uint64_t size, double k, uint32_t *found) {
     uint32_t bits; if (!view_disp_bits(k, &bits)) return -2;
-    for (unsigned i = 0; i < view_disp.guards; i++) {   /* the guards first, as view_apply: a second pass refuses at the site */
-        uint32_t have; memcpy(&have, main + view_disp.guard[i].off, 4);
-        if (have != view_disp.guard[i].original) { if (found) *found = have; return (int)i + 1; }
-    }
+    { int bad = verify_words(main, view_disp.guard, view_disp.guards, found); if (bad) return bad; }   /* the guards first, as view_apply: a second pass refuses at the site */
     if (data + VIEW_DISP_KEEP_SLOT + 8 > size) return -1;
     for (unsigned i = 0; i < 8; i++) if (main[data + VIEW_DISP_KEEP_SLOT + i]) return -1;
     const uint64_t keep = base + VIEW_DISP_KEEP_RET;
@@ -349,10 +348,7 @@ static inline int view_disp_apply(uint8_t *main, uint64_t base, uint64_t text_en
 static inline int view_far160_apply(uint8_t *main, uint64_t base, uint64_t text_end, uint64_t data, uint64_t size, double k, uint32_t *found) {
     const view_patch *p = &view_far160; uint32_t bits;
     if (!view_disp_bits(k, &bits)) return -2;
-    for (unsigned i = 0; i < p->guards; i++) {
-        uint32_t have; memcpy(&have, main + p->guard[i].off, 4);
-        if (have != p->guard[i].original) { if (found) *found = have; return (int)i + 1; }
-    }
+    { int bad = verify_words(main, p->guard, p->guards, found); if (bad) return bad; }
     const uint64_t stub = view_stub_at(p, text_end);
     if (stub + 4 * p->words > ((text_end + 0xfff) & ~0xfffULL) || data & 0xfff || data + p->slot + 4 > size) return -1;
     for (unsigned i = 0; i < 4 * p->words; i++) if (main[stub + i]) return -1;
