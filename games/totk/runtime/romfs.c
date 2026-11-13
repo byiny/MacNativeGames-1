@@ -226,18 +226,15 @@ static void overlay_load(const char *dir,int required,int mods) {
  if(noverlay-first>16)fprintf(stderr,"[totk] RomFS overlay: %zu files from %s (%zu more not listed)\n",noverlay-first+replaced,dir,noverlay-first-16);
  if(noverlay>first||replaced)fprintf(stderr,"[totk] RomFS overlay: %s checked, %zu files, %.1f MB hashed in %.2f s\n",dir,noverlay-first+replaced,hashed/1048576.0,(runtime_now_ns()-t0)/1e9);
 }
-/* The first file in dir's manifest that an overlay from slot `from` on already replaces, or NULL. */
+/* The first file in dir's manifest that an overlay from slot `from` on already replaces, or NULL. A line whose original is
+   that overlay's file takes its place (overlay_load), so it is not taken: the icons' resource size table grown from the
+   mods' own (Breath of the Wild, botw_prompts.py --mods) or from the texture pack's (Tears of the Kingdom,
+   make_button_icons.py --texture-pack), and the UI archive merged with the build's own patch. */
 static const char *overlay_taken(const char *dir,size_t from) {
  static char name[4096];char path[4200];snprintf(path,sizeof(path),"%s/manifest.tsv",dir);FILE *m=fopen(path,"r");if(!m)return NULL;
  char line[8192];const char *found=NULL;
-#ifdef GAME_BOTW   /* a line whose original is that overlay's file takes its place (overlay_load): the icons' resource size table made
-                      from the mods' own (botw_prompts.py --mods) */
  while(!found&&fgets(line,sizeof(line),m)){char orig[65]="";if(line[0]=='#'||line[0]=='\n'||sscanf(line,"%4095[^\t]\t%*u\t%*64[0-9a-f]\t%64[0-9a-f-]",name,orig)<1)continue;
   for(size_t k=from;k<noverlay;k++)if(!strcmp(overlays[k].name,name)&&strcmp(overlays[k].sha,orig)){found=name;break;}}
-#else
- while(!found&&fgets(line,sizeof(line),m)){if(line[0]=='#'||line[0]=='\n'||sscanf(line,"%4095[^\t]",name)!=1)continue;
-  for(size_t k=from;k<noverlay;k++)if(!strcmp(overlays[k].name,name)){found=name;break;}}
-#endif
  fclose(m);return found;
 }
 static int overlay_order(const void *a,const void *b) {uint64_t x=((const Overlay *)a)->index,y=((const Overlay *)b)->index;return (x>y)-(x<y);}
@@ -355,10 +352,16 @@ static void overlay_init(void) {
  else if(texture){char d[4200];snprintf(d,sizeof d,"%s/heap-default",texture_pack_dir);overlay_load(d,1,0);}
  const char *mods=getenv("TOTK_ROMFS_MODS");size_t mods_first=noverlay;if(mods&&*mods&&strcmp(mods,"0"))overlay_load(mods,0,1);
  /* The button icons app/launcher.m picked for this start (TOTK_ROMFS_BUTTON_ICONS, docs/mods.md), loaded like a mod. When
-    the player's mods replace one of its files (a mod with its own icons), the whole folder is left out and the mod wins. */
+    the player's mods (or, in Tears of the Kingdom, the texture pack) replace one of its files in a way the set was not made
+    on (a mod with its own icons, a set made before the pack), the whole folder is left out and the other overlay wins. */
  const char *icons=getenv("TOTK_ROMFS_BUTTON_ICONS");
- if(icons&&*icons){const char *taken=overlay_taken(icons,mods_first);
-  if(taken){fprintf(stderr,"[totk] RomFS overlay: button icons %s left out: the player's mods replace %s\n",icons,taken);setenv("TOTK_BUTTON_ICONS","mod",1);}
+#ifdef GAME_BOTW
+ size_t icons_from=mods_first;
+#else
+ size_t icons_from=0;(void)mods_first;   /* the texture pack replaces the resource size table too */
+#endif
+ if(icons&&*icons){const char *taken=overlay_taken(icons,icons_from);
+  if(taken){fprintf(stderr,"[totk] RomFS overlay: button icons %s left out: another overlay replaces %s\n",icons,taken);setenv("TOTK_BUTTON_ICONS","mod",1);}
   else overlay_load(icons,0,1);}
 #ifdef GAME_BOTW190
  botw_rstb_margin();   /* after every overlay that can replace the table */

@@ -41,6 +41,7 @@ static void show_error(NSString *detail) {
     [alert runModal];
 }
 
+#ifdef GAME_BOTW
 /* Whether a game controller is connected: a HID joystick / gamepad (DualSense, Pro Controller, Xbox over Bluetooth),
    or one the GameController framework adopts (Xbox over USB), which it reports a moment after the first run loop turns. */
 static BOOL controller_connected(void) {
@@ -60,6 +61,7 @@ static BOOL controller_connected(void) {
     }
     return found;
 }
+#endif
 
 static NSDictionary<NSString *, NSString *> *kv_read(NSString *path) {
     NSMutableDictionary *out = [NSMutableDictionary dictionary];
@@ -223,6 +225,9 @@ static NSString *button_icons(NSString *root, NSString *controls, NSString **fol
             if (detected < 0) [NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.1]];
         }
         if (detected < 0) detected = gamepad_type_parse(word(@"controller-detected.txt").UTF8String);
+#ifndef GAME_BOTW
+        if (detected < 0) detected = GAMEPAD_TYPE_XBOX;     /* no pad seen yet: Xbox prompts */
+#endif
     }
     NSScreen *screen = NSScreen.mainScreen;     /* sharper icons for a bigger display: the game's size times this */
     CGFloat backing = screen ? screen.backingScaleFactor : 1;
@@ -242,6 +247,19 @@ static NSString *button_icons(NSString *root, NSString *controls, NSString **fol
     NSString *modsFolder = scale > 1 && mods && *mods && strcmp(mods, "0") ? @(mods) : nil;   /* at 1x the set has no table */
     for (NSString *line in [[NSString stringWithContentsOfFile:[modsFolder stringByAppendingPathComponent:@"manifest.tsv"] encoding:NSUTF8StringEncoding error:nil] componentsSeparatedByString:@"\n"])
         if ([line hasPrefix:@"System/Resource/ResourceSizeTable.product.srsizetable\t"]) [keyed appendData:[line dataUsingEncoding:NSUTF8StringEncoding]];
+#else
+    /* The HD texture pack (runtime/romfs.c, TOTK_TEXTURE_PACK=1) replaces the resource size table too: the tool grows the
+       pack's table (--texture-pack), and its manifest line keys the set, so pack on, off or changed each get their own set
+       (a set made on the pack's table cannot load without the pack). */
+    NSString *pack = nil;
+    const char *packOn = getenv("TOTK_TEXTURE_PACK"), *packDir = getenv("TOTK_TEXTURE_PACK_DIR");
+    if (packOn && !strcmp(packOn, "1")) {
+        pack = packDir ? @(packDir) : [word(@"texture-pack-path.txt") stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        BOOL table = NO;
+        for (NSString *line in [[NSString stringWithContentsOfFile:[pack stringByAppendingPathComponent:@"manifest.tsv"] encoding:NSUTF8StringEncoding error:nil] componentsSeparatedByString:@"\n"])
+            if ([line hasPrefix:@"System/Resource/ResourceSizeTable."]) { [keyed appendData:[line dataUsingEncoding:NSUTF8StringEncoding]]; table = YES; }
+        if (!table) pack = nil;
+    }
 #endif
     uint8_t digest[CC_SHA256_DIGEST_LENGTH]; CC_SHA256(keyed.bytes, (CC_LONG)keyed.length, digest);
     NSMutableString *key = [NSMutableString string];
@@ -257,8 +275,11 @@ static NSString *button_icons(NSString *root, NSString *controls, NSString **fol
                                        @"--version", @TOTK_GAME_DIR, @"--style", @(gamepad_type_name(style)), @"--face-buttons", by_position ? @"position" : @"label"] mutableCopy];
         if ([info[@"tool"] hasSuffix:@"botw_prompts.py"])      /* only the Breath of the Wild tool draws at a scale */
             [arguments addObjectsFromArray:@[@"--scale", @(scale).stringValue]];
+        if ([info[@"tool"] hasSuffix:@"make_button_icons.py"]) [arguments addObject:@"--our-art"];   /* the Breath of the Wild art on the game's own picture boxes */
 #ifdef GAME_BOTW
         if (modsFolder && [info[@"tool"] hasSuffix:@"botw_prompts.py"]) [arguments addObjectsFromArray:@[@"--mods", modsFolder]];
+#else
+        if (pack) [arguments addObjectsFromArray:@[@"--texture-pack", pack]];
 #endif
         if (layout) [arguments addObjectsFromArray:@[@"--controls", controls]];
         fprintf(stderr, "[launcher] button icons: making %s (%s, %dx) in %s\n", name.UTF8String, layout ? "controls.txt" : "default layout", scale, target.fileSystemRepresentation);
@@ -485,10 +506,12 @@ int runtime_app_launch(int argc, char **argv, char ***boot) {
            start, <data>/mods/<version>-keyboard takes its place when it holds a manifest (keyboard key icons in the prompts:
            scripts/make_button_icons.py --style keyboard or azerty). The fonts are read once, so it holds for the session. */
         NSString *mods = [data stringByAppendingPathComponent:@"mods/" TOTK_GAME_DIR];
+#ifdef GAME_BOTW
         NSString *keyboardMods = [mods stringByAppendingString:@"-keyboard"];
         if (!getenv("TOTK_ROMFS_MODS") && [NSFileManager.defaultManager fileExistsAtPath:[keyboardMods stringByAppendingPathComponent:@"manifest.tsv"]] &&
             !controller_connected())
             mods = keyboardMods;
+#endif
         setenv("TOTK_ROMFS_MODS", mods.fileSystemRepresentation, 0);
         /* The game's language (runtime/services.c): the app's first preferred language, which also follows a per-app
            language (defaults write org.macnativegames.totk AppleLanguages -array pt-BR). TOTK_LANG still overrides it. */
@@ -549,6 +572,9 @@ int runtime_app_launch(int argc, char **argv, char ***boot) {
         }
         NSString *icons = nil, *style = button_icons(root, controls, &icons);
         if (style) setenv("TOTK_BUTTON_ICONS", style.UTF8String, 1);
+#ifndef GAME_BOTW
+        if (style) setenv("TOTK_PROMPT_ICONS", "0", 0);   /* our art is in the font: upstream's live prompt overlay stays off (settings.txt or the environment still win) */
+#endif
         if (icons) setenv("TOTK_ROMFS_BUTTON_ICONS", icons.fileSystemRepresentation, 1);
 #if defined(GAME_BOTW190) || defined(GAME_BOTW160)
         /* A mod that replaces 4 GiB or more, or Pack/TitleBG.pack with 200 MiB or more, is an HD texture pack, which needs

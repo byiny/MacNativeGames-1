@@ -2117,6 +2117,8 @@ def button_icons_kit(tree, res, version, game):
     files = sorted((tree / 'scripts').glob('*.py')) + [tree / 'runtime/controller_map.h']   # prompt_layout.py reads the header
     if game == 'botw':
         files += sorted((tree.parent / 'botw/scripts').glob('*.py'))
+    else:   # the Tears of the Kingdom prompts are drawn with the Breath of the Wild art (make_button_icons.py --our-art)
+        files += [tree.parent / 'botw/scripts' / f'{name}.py' for name in ('botw_controller_art', 'botw_formats', 'botw_prompts')]
     digest = hashlib.sha256()
     for path in files:
         rel = Path('games') / path.relative_to(tree.parent)

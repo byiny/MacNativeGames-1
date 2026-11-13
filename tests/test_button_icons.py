@@ -84,6 +84,46 @@ class StylesFollowControls(unittest.TestCase):
         self.assertIsNone(letter(mbi.STYLES['xbox'], pl.prompt_controls('l3 = none\n', 'position'), 0xE056))   # nothing drives it: unchanged
 
 
+
+@unittest.skipIf(mbi is None, 'needs Python 3.14 and fontTools')
+class TexturePackTable(unittest.TestCase):
+    """With the HD texture pack on, the icons grow the pack's resource size table (--texture-pack), so one table holds the
+    pack's raised textures and the fonts' growth; its manifest line names the pack's file as the original (runtime/romfs.c
+    then loads it in place of the pack's), and a pack without a table changes nothing."""
+    TABLE = 'System/Resource/ResourceSizeTable.Product.143.Nin_NX_NVN.rsizetable.zs'
+    FONT, TEXTURE = 'Font/Font.Nin_NX_NVN.bfarc.zs', 'Model/Big.Nin_NX_NVN.bntx.zs'
+
+    def table(self, font, texture):
+        import struct, zlib
+        entries = sorted((zlib.crc32(p.removesuffix('.zs').encode()), s) for p, s in ((self.FONT, font), (self.TEXTURE, texture)))
+        return b'RESTBL' + struct.pack('<IIII', 1, 160, 2, 0) + b''.join(struct.pack('<II', c, s) for c, s in entries)
+
+    def test_the_pack_table_is_grown_and_named_as_the_original(self):
+        import hashlib, struct, zlib
+        with tempfile.TemporaryDirectory() as tmp:
+            pack = Path(tmp)
+            data = mbi.zstd.compress(self.table(1000, 9_000_000))
+            (pack/self.TABLE).parent.mkdir(parents=True)
+            (pack/self.TABLE).write_bytes(data)
+            sha = hashlib.sha256(data).hexdigest()
+            (pack/'manifest.tsv').write_text(f'# path\tsize\tsha256\toriginal_sha256\n{self.TABLE}\t{len(data)}\t{sha}\t{"0" * 64}\n')
+            raw, named = mbi.pack_restbl(pack, self.TABLE)
+            self.assertEqual((raw, named), (data, sha))
+            grown = mbi.grow_restbl(mbi.zstd.decompress(raw), self.table(1000, 4000), {self.FONT: 352})
+            sizes = {struct.unpack_from('<I', grown, 22 + i * 8)[0]: struct.unpack_from('<I', grown, 26 + i * 8)[0] for i in range(2)}
+            self.assertEqual(sizes[zlib.crc32(self.FONT.removesuffix('.zs').encode())], 1352)
+            self.assertEqual(sizes[zlib.crc32(self.TEXTURE.removesuffix('.zs').encode())], 9_000_000)   # the pack's raise stays
+
+    def test_a_pack_without_a_table_changes_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp)/'manifest.tsv').write_text(f'# path\tsize\tsha256\toriginal_sha256\n{self.TEXTURE}\t1\t{"a" * 64}\t{"b" * 64}\n')
+            self.assertIsNone(mbi.pack_restbl(Path(tmp), self.TABLE))
+
+    def test_the_launcher_keys_the_set_on_the_pack_and_passes_it(self):
+        launcher = (ROOT/'games/totk/app/launcher.m').read_text()
+        self.assertIn('[arguments addObjectsFromArray:@[@"--texture-pack", pack]]', launcher)
+        self.assertIn('if ([line hasPrefix:@"System/Resource/ResourceSizeTable."]) { [keyed appendData:', launcher)
+
 class Command(unittest.TestCase):
     def run_tool(self, *args):
         return subprocess.run([sys.executable, str(SCRIPTS/'make_button_icons.py'), 'mod', '--romfs', 'nowhere', *args],

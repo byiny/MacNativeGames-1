@@ -518,6 +518,24 @@ After a move to another display, the icons of its size also show from the next s
   draws the whole set at 1x.
 - `build_app.py --no-button-icons` builds the app without them. `--button-icons` adds them to a Tears of the Kingdom app.
   Its launcher picks and makes them the same way, always at 1x, with `make_button_icons.py` (not tested in game yet).
+- Refresh W1e (Tears of the Kingdom 1.4.3 prompts with our art): the launcher now runs `make_button_icons.py --our-art`. It draws
+  the Breath of the Wild buttons (Xbox or PlayStation letters from the Switch system font) on the box of each of the game's own
+  glyphs and button guide masks (`games/totk/scripts/totk_prompt_art.py`), keeps each glyph's advance, and follows `controls.txt`
+  (the A prompt shows Xbox Y while north does A). The stick press glyphs stay the game's own, swapped when `controls.txt`
+  swaps the sticks. With the icon kit present, upstream's live prompt overlay is off by default (`TOTK_PROMPT_ICONS=0`;
+  `settings.txt` or the environment still turn it on). With no controller ever seen, the prompts are Xbox. There is no keyboard
+  prompt set any more. Check a set with `games/totk/scripts/dev/prompt_sheet.py`.
+- Controller pictures (W1f, Tears of the Kingdom 1.4.3): the same tool also redraws the three controller pictures of the
+  pause menu page "Basic controls" and of the ability guides, `Controller_{Console,Grip,Pro}^w`, and their shadows, in the
+  common layout archive (`games/totk/scripts/totk_controller_art.py`; BC5 in place, so no file grows). The pad is the Xbox
+  controller or the DualSense of the Breath of the Wild art, with its buttons on the places of the game's lines and rings. The
+  Mac (docked) shows the Pro picture, `TOTK_OPERATION_MODE=handheld` the Console picture; the Grip picture is not reached.
+  The face buttons are named like the prompts: the button at each Switch button's place shows the controller button that
+  drives it (with a `controls.txt` the picture follows it). The tilted pictures of the ability guides, their shadows and their
+  R and ZR masks are ours too (W1g; bands where the game highlights R and ZR). The letters of the action popup ("Talk", "Pick
+  up", "Open") follow `controls.txt`; on the PlayStation look they are the symbols × ○ □ △ of the game's own fonts. The d-pad
+  shortcut icon is our d-pad. What stays the Switch's: the moved-stick glyphs, Home, Capture and the handheld-console glyph.
+  Check a set with `games/totk/scripts/dev/picture_sheet.py`.
 
 The tools below make the same icons by hand, into the mods folder.
 

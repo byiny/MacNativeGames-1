@@ -56,7 +56,11 @@ class ButtonIconKit(unittest.TestCase):
             tree = work_tree(tmp)
             build_app.button_icons_kit(tree, tmp / 'res', 'botw190', 'totk')
             self.assertEqual(kit_info(tmp / 'res')['tool'], 'games/totk/scripts/make_button_icons.py')
-            self.assertFalse((tmp / 'res/button-icons/games/botw').exists())
+            botw = tmp / 'res/button-icons/games/botw/scripts'      # the art of make_button_icons.py --our-art, nothing else of the game
+            for name in ('botw_controller_art', 'botw_formats', 'botw_prompts'):
+                self.assertTrue((botw / f'{name}.py').is_file(), name)
+            self.assertFalse((botw / 'extract_exefs.py').exists())
+            self.assertTrue((tmp / 'res/button-icons/games/totk/scripts/totk_controller_art.py').is_file())     # the controller pictures
 
     def test_tools_start_from_the_kit(self):
         with tempfile.TemporaryDirectory() as tmp:

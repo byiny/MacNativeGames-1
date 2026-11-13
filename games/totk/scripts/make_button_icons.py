@@ -45,9 +45,16 @@ mod with each archive's entry at least the original entry plus what the archive 
 Needs fontTools (python3.14 -m pip install fonttools) and Python 3.14 (compression.zstd). An existing font archive in the mod
 folder (another mod's, or an earlier run) is only overwritten with --replace. The xbox style matches the default face-button
 mapping by position (for TOTK_FACE_BUTTONS=label or face buttons changed in controls.txt, pass --face-buttons and --controls).
-usage: make_button_icons.py <mod folder> (--app <Tears of the Kingdom.app> | --romfs <folder>) [--version v121] [--style xbox] [--face-buttons position|label] [--controls controls.txt] [--replace]
+--our-art (xbox and playstation): draw the buttons with the Breath of the Wild art (botw_prompts.py) fitted on the box of each
+Switch glyph and button guide mask of this game (totk_prompt_art.py), with the advances of the game's glyphs; it needs the
+Switch system font of the app's firmware folder (extracted/firmware/shared-fonts/0-standard.bfttf). --our-art also redraws
+Controller_{Console,Grip,Pro}^w and their shadows in the same layout archive (totk_controller_art.py, BC5 in place), the tilted
+pictures Controller_*1^w of the ability guides with their shadows and R/ZR masks, the d-pad shortcut icon, and the 15 letters of the
+action popup (DoCommand_00).
+usage: make_button_icons.py <mod folder> (--app <Tears of the Kingdom.app> | --romfs <folder>) [--version v121] [--style xbox] [--face-buttons position|label] [--controls controls.txt] [--our-art] [--replace]
 """
 import argparse
+import fnmatch
 import io
 import struct
 import sys
@@ -77,6 +84,8 @@ except ImportError:
 
 ARCHIVE = 'Font/Font.Nin_NX_NVN.bfarc.zs'  # the default archive; the text fonts for the key letters are read from it
 FONT = 'scft/External.bfotf'
+MESSAGES_LEVEL = 9   # level 19 takes 2.5 s an archive (37 s for the 15); level 9 gives files 20% larger in 0.3 s
+MESSAGES = 'Mals/*.Product.*.sarc.zs'   # the message archives, one a language; --our-art patches the popup letters in them
 TEXT_FONTS = ('scft/ninP_RodinNTLG-B_DH_003_subset.bfotf', 'scft/nintendo_NTLG-DB_DH_002.bfotf')
 MAGIC = 0x18029a7f
 
@@ -514,11 +523,17 @@ def redraw_hud(bntx, icons):
     return bytes(out)
 
 
-def redraw(otf, text_fonts, style, controls=None):
+def redraw(otf, text_fonts, style, controls=None, art=None):
     font = TTFont(io.BytesIO(otf))
     cff = font['CFF '].cff; top = cff.topDictIndex[0]; charstrings = top.CharStrings; private = top.Private
     nominal = getattr(private, 'nominalWidthX', 0); cmap = font.getBestCmap()
-    icons = STYLES[style](Glyphs(text_fonts), controls)
+    if art:
+        tpa, letters, art_controls = art
+        icons, notes = tpa.font_icons(font, art_controls, style, letters)
+        for note in notes:
+            print(f'note: {note}')
+    else:
+        icons = STYLES[style](Glyphs(text_fonts), controls)
     for cp, (advance, draw) in icons.items():
         pen = T2CharStringPen(advance - nominal, None); draw(pen)
         charstrings[cmap[cp]] = pen.getCharString(private=private, globalSubrs=cff.GlobalSubrs)
@@ -531,12 +546,24 @@ def redraw(otf, text_fonts, style, controls=None):
     return out.getvalue(), len(icons)
 
 
-def write_mod_manifest(mod, romfs, index):
+def pack_restbl(pack, restbl):
+    """The installed texture pack's resource size table `restbl` (install_texture_pack.py): (its compressed bytes, the SHA-256
+    the pack's manifest gives it), or None when the pack does not replace the table."""
+    for line in (pack / 'manifest.tsv').read_text().splitlines():
+        fields = line.split('\t')
+        if fields[0] == restbl and len(fields) >= 3:
+            return (pack / restbl).read_bytes(), fields[2]
+    return None
+
+
+def write_mod_manifest(mod, romfs, index, based=None):
     """Merge the mod's Common archive with the build's own patch of it (make_romfs_patches.py patches the same archive),
     then write the manifest: (merged paths, Manifest). The merged file's line names the build's file as the original, so
-    the game loads it in place of the build's overlay; without the merge both replace one file and the game stops at start."""
+    the game loads it in place of the build's overlay; without the merge both replace one file and the game stops at start.
+    `based` maps a path written from another overlay's file (the texture pack's size table) to that file's SHA-256, which
+    its line names as the original in the same way."""
     merged = merge_build_patches(mod, romfs, index)
-    return merged, write_manifest(mod, romfs, merged=merged)
+    return merged, write_manifest(mod, romfs, merged={**merged, **(based or {})})
 
 
 def main():
@@ -556,10 +583,18 @@ def main():
     parser.add_argument('--face-buttons', choices=FACE_MODES,
                         help='how the controller\'s face buttons map (the runtime\'s TOTK_FACE_BUTTONS, or key 6: Xbox and '
                              'PlayStation by position, Switch by label); default position, label for playstation-label')
+    parser.add_argument('--texture-pack', type=Path,
+                        help='the installed HD texture pack (texture-pack-path.txt): when it replaces the resource size '
+                             'table, the icons grow its table and the game loads theirs in place of the pack\'s')
     parser.add_argument('--controls', type=Path,
                         help='your controls.txt: the prompts then show the controller button you press for each Switch '
                              'button (needs --face-buttons; xbox and playstation styles)')
+    parser.add_argument('--our-art', action='store_true',
+                        help='xbox/playstation drawn with the Breath of the Wild art, fitted on each Switch picture\'s box; '
+                             'needs extracted/firmware/shared-fonts/0-standard.bfttf')
     args = parser.parse_args()
+    if args.our_art and args.style in ('keyboard', 'azerty'):
+        parser.error('--our-art applies to the xbox and playstation styles')
     if args.bindings or args.mouse is not None:
         if args.style not in ('keyboard', 'azerty'):
             parser.error('--bindings and --mouse need --style keyboard or azerty')
@@ -575,7 +610,7 @@ def main():
             mouse_file = args.bindings.with_name('mouse.txt')
             mouse = mouse_file.is_file() and mouse_file.read_text().strip() == 'on'
         layout = str.maketrans('QWAZ', 'AZQW') if args.style == 'azerty' else None
-        STYLES[args.style] = lambda g: keyboard_style(g, layout, parsed.bindings, mouse)
+        STYLES[args.style] = lambda g, _controls=None: keyboard_style(g, layout, parsed.bindings, mouse)
     version = args.version or (args.mod.name if args.mod.name in VERSIONS else None)
     romfs = args.romfs
     if args.app:
@@ -607,6 +642,13 @@ def main():
     for need in (image_dir / 'romfs.bin', romfs / 'runtime-index.bin'):
         if not need.is_file():
             parser.error(f'{need} not found')
+    art = None
+    if args.our_art:
+        import totk_prompt_art as tpa
+        firmware = args.app / 'Contents/Resources/totk/extracted/firmware' if args.app else romfs.parent.parent / 'firmware'
+        if not (firmware / tpa.SYSTEM_FONT).is_file():
+            parser.error(f'--our-art needs {firmware / tpa.SYSTEM_FONT} (the Switch system font)')
+        art = (tpa, tpa.letters(firmware), controls or default_controls('label' if args.style == 'playstation-label' else 'position'))
 
     index = read_index(romfs / 'runtime-index.bin')
     archives = [ARCHIVE] + sorted(p for p in index if p.startswith('Font/') and p.endswith('.bfarc.zs') and p != ARCHIVE)
@@ -616,7 +658,9 @@ def main():
     restbl = next((p for p in index if p.startswith('System/Resource/ResourceSizeTable.') and p.endswith('.rsizetable.zs')), None)
     if not restbl:
         parser.error(f'{romfs} holds no System/Resource/ResourceSizeTable.*.rsizetable.zs: is this Tears of the Kingdom\'s RomFS?')
-    existing = [str(args.mod / p) for p in archives + [layout_path] if (args.mod / p).exists()]
+    pack_table = pack_restbl(args.texture_pack, restbl) if args.texture_pack else None
+    messages = sorted(p for p in index if fnmatch.fnmatchcase(p, MESSAGES)) if art else []   # the popup letters' texts, one archive a language
+    existing = [str(args.mod / p) for p in archives + [layout_path] + messages if (args.mod / p).exists()]
     if existing and not args.replace:
         parser.error(f'{", ".join(existing)} already exist(s) (another mod\'s font archive, or an earlier run): '
                      'pass --replace to overwrite')
@@ -631,6 +675,7 @@ def main():
         restbl_raw = read(restbl)
         layout = layout_path
         layout_raw = read(layout)
+        message_raws = {path: read(path) for path in messages}
 
     text_fonts, redrawn, growth = None, {}, {}
     for path in archives:
@@ -644,7 +689,7 @@ def main():
         otf, key = bfotf_decode(archive[slice(*members[FONT])])
         assert otf[:4] == b'OTTO', f'External.bfotf in {path} did not decode to an OpenType font'
         if otf not in redrawn:
-            redrawn[otf] = redraw(otf, text_fonts, args.style, controls)
+            redrawn[otf] = redraw(otf, text_fonts, args.style, controls, art)
         new_otf, count = redrawn[otf]
         new_blob = bfotf_encode(new_otf, key); assert bfotf_decode(new_blob)[0] == new_otf
         new_archive = repack(archive, FONT, new_blob)
@@ -658,22 +703,62 @@ def main():
 
     info = zstd.get_frame_info(layout_raw); dictionary = dictionaries[info.dictionary_id]
     archive = zstd.decompress(layout_raw, zstd_dict=dictionary); members = sarc_members(archive)
-    new_archive = repack(archive, BNTX, redraw_hud(archive[slice(*members[BNTX])], STYLES[args.style](Glyphs(text_fonts), controls)))
+    if art:
+        hud, notes = art[0].hud_textures(archive[slice(*members[BNTX])], art[2], args.style, art[1])
+        import totk_controller_art as tca
+        hud, pictures, more = tca.redraw_pictures(hud, art[2], args.style, art[1])
+        notes += more
+        hud, tilted, more = tca.redraw_tilted(hud, art[2], args.style, art[1])
+        notes += more
+        hud, more = tca.dpad_masks(hud, args.style, art[1])
+        notes += more
+        popup, more = tca.popup_letters(archive[slice(*members[tca.POPUP])], art[2], args.style)
+        notes += more
+        for note in notes:
+            print(f'note: {note}')
+    else:
+        hud = redraw_hud(archive[slice(*members[BNTX])], STYLES[args.style](Glyphs(text_fonts), controls))
+    new_archive = repack(archive, BNTX, hud)
+    if art:
+        new_archive = repack(new_archive, tca.POPUP, popup)
     assert len(new_archive) == len(archive)
     data = zstd.compress(new_archive, level=19, zstd_dict=dictionary)
     assert zstd.decompress(data, zstd_dict=dictionary) == new_archive
     growth[layout] = 0
     target = args.mod / layout; target.parent.mkdir(parents=True, exist_ok=True); target.write_bytes(data)
-    print(f'{target}: {len(HUD_TEXTURES)} button guide textures redrawn ({args.style}), {len(data)} bytes')
+    print(f'{target}: {len(HUD_TEXTURES)} button guide textures redrawn{f", {len(pictures)} + {len(tilted)} controller pictures, the d-pad shortcut icon and the popup letters" if art else ""} ({args.style}{", our art" if art else ""}), {len(data)} bytes')
+
+    if art:   # the game fills each popup text pane from LayoutMsg/DoCommand_00.msbt; the sizes stay, so the size table needs no entry
+        changed, notes = 0, set()
+        for path, raw in message_raws.items():
+            info = zstd.get_frame_info(raw); dictionary = dictionaries.get(info.dictionary_id)
+            archive = zstd.decompress(raw, zstd_dict=dictionary) if dictionary else zstd.decompress(raw)
+            members = sarc_members(archive)
+            if tca.POPUP_MESSAGES not in members:
+                notes.add(f'action popup messages: {path} holds no {tca.POPUP_MESSAGES}; its Switch letters stay')
+                continue
+            text, more = tca.popup_messages(archive[slice(*members[tca.POPUP_MESSAGES])], art[2], args.style)
+            notes.update(more)
+            new_archive = repack(archive, tca.POPUP_MESSAGES, text)
+            assert len(new_archive) == len(archive)
+            if new_archive == archive:
+                continue
+            data = zstd.compress(new_archive, level=MESSAGES_LEVEL, zstd_dict=dictionary) if dictionary else zstd.compress(new_archive, level=MESSAGES_LEVEL)
+            assert zstd.decompress(data, zstd_dict=dictionary) == new_archive if dictionary else zstd.decompress(data) == new_archive
+            target = args.mod / path; target.parent.mkdir(parents=True, exist_ok=True); target.write_bytes(data)
+            changed += 1
+        for note in sorted(notes):
+            print(f'note: {note}')
+        print(f'{args.mod / "Mals"}: {changed} message archives, popup letters ({args.style})')
 
     target = args.mod / restbl
     original = zstd.decompress(restbl_raw)
-    table = zstd.decompress(target.read_bytes()) if target.exists() else original
+    table = zstd.decompress(target.read_bytes()) if target.exists() else zstd.decompress(pack_table[0]) if pack_table else original
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(zstd.compress(grow_restbl(table, original, growth), level=19))
-    print(f'{target}: ' + ', '.join(f'{p} {g:+d}' for p, g in growth.items()))
+    print(f'{target}: ' + ', '.join(f'{p} {g:+d}' for p, g in growth.items()) + (' (the texture pack\'s table)' if pack_table else ''))
     try:
-        merged, found = write_mod_manifest(args.mod, romfs, index)
+        merged, found = write_mod_manifest(args.mod, romfs, index, {restbl: pack_table[1]} if pack_table else None)
     except ValueError as error:
         sys.exit(f'manifest not written: {error}')
     for name in merged:

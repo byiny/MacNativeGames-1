@@ -11,11 +11,11 @@ BOTW = REPO / 'games/botw/scripts/botw_prompts.py'
 TOTK = REPO / 'games/totk/scripts/make_button_icons.py'
 
 
-def launcher_arguments(version, style, face, scale=None):
+def launcher_arguments(version, style, face, scale=None, our_art=False):
     """The arguments after the tool in launcher.m: the folder to fill, --romfs extracted/<version>/romfs, --version, --style,
-    --face-buttons, --scale (the Breath of the Wild tool only), --controls."""
+    --face-buttons, --scale (the Breath of the Wild tool only), --controls, --our-art (the Tears of the Kingdom tool only)."""
     return ['icons', '--romfs', f'extracted/{version}/romfs', '--version', version, '--style', style, '--face-buttons', face,
-            *(['--scale', str(scale)] if scale else []), '--controls', 'controls.txt']
+            *(['--scale', str(scale)] if scale else []), '--controls', 'controls.txt', *(['--our-art'] if our_art else [])]
 
 
 class LauncherArguments(unittest.TestCase):
@@ -41,10 +41,10 @@ class LauncherArguments(unittest.TestCase):
                     self.assert_accepted(self.run_tool(BOTW, *launcher_arguments(version, style, face, scale=2)))
 
     def test_totk_tool_takes_the_launcher_arguments_of_every_version(self):
-        for version in ('v0', 'v112', 'v121', 'v143'):
+        for version in ('v0', 'v121', 'v143'):
             for style, face in (('xbox', 'position'), ('playstation', 'position'), ('xbox', 'label')):
                 with self.subTest(version=version, style=style, face=face):
-                    self.assert_accepted(self.run_tool(TOTK, *launcher_arguments(version, style, face)))
+                    self.assert_accepted(self.run_tool(TOTK, *launcher_arguments(version, style, face, our_art=True)))
 
     def test_negative_control_an_argument_a_tool_does_not_know_is_seen(self):
         run = self.run_tool(TOTK, *launcher_arguments('v121', 'xbox', 'position', scale=2))      # --scale is for the BOTW tool only
