@@ -13,6 +13,7 @@ enum {
     PAD_V143_CLOTH = 176,        PAD_V143_CLOTH_LEN = 19 * 4,      /* cloth / hair clock (patch_secondary_animation) */
     PAD_V143_BOUNCE = 256,       PAD_V143_BOUNCE_LEN = 20,         /* trampoline bounce (patch_slowmo_bounce) */
     PAD_V143_PROMPT = 288,       PAD_V143_PROMPT_LEN = 16,         /* button prompt cache (prompt_cache_install) */
+    PAD_V143_FOG = 304,          PAD_V143_FOG_LEN = 16,            /* fog-of-war map hooks (fog_map_install, local mod) */
     PAD_V143_VERT = 320,         PAD_V143_VERT_LEN = 2 * 304,      /* Vert+: 2 cameras x ASPECT_VSTUB (VR head look) */
     PAD_V143_FADE = 928,         PAD_V143_FADE_LEN = 80,           /* LOD fade increment (patch_fade_increment) */
     PAD_V143_SUIT = 1008,        PAD_V143_SUIT_LEN = 16,           /* suit auto-equip (suit_equip_install, local mod) */
@@ -30,3 +31,5 @@ _Static_assert(PAD_V143_FADE + PAD_V143_FADE_LEN <= PAD_V143_SUIT, "1.4.3 paddin
 _Static_assert(PAD_V143_SUIT + PAD_V143_SUIT_LEN <= PAD_V143_SIZE, "1.4.3 padding: suit veneer runs past the padding");
 _Static_assert(PAD_V143_SUIT % 8 == 0, "1.4.3 padding: the suit veneer's address literal must be 8-byte aligned");
 _Static_assert(PAD_V143_PROMPT % 8 == 0, "1.4.3 padding: the prompt veneer's address literal must be 8-byte aligned");
+_Static_assert(PAD_V143_PROMPT + PAD_V143_PROMPT_LEN <= PAD_V143_FOG && PAD_V143_FOG + PAD_V143_FOG_LEN <= PAD_V143_VERT, "1.4.3 padding: fog veneer overlaps");
+_Static_assert(PAD_V143_FOG % 8 == 0, "1.4.3 padding: the fog veneer's address literal must be 8-byte aligned");

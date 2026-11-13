@@ -157,6 +157,8 @@ GFX_HEADERS := $(wildcard runtime/input_prompts.h runtime/prompt_bindings.h runt
 build/gfx/%.o: % $(GFX_HEADERS) Makefile
 	@mkdir -p "$(dir $@)"
 	xcrun clang $(NATIVE_OPT) -g -Wall -Wextra $(GFX_FLAGS) -c "$<" -o "$@"
+# nvn_mtl.m includes the TOTK 1.4.3 fog-of-war map (local mod), which shares its plain C part with the runtime
+build/gfx/third_party/d2r_gfx/gfx/nvn/nvn_mtl.m.o: runtime/totk_fog_core.h
 
 .PHONY: verify-shaders probe-thread probe-system-event
 verify-shaders:

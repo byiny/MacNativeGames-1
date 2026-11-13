@@ -18,6 +18,7 @@ C_TEST_CFLAGS = -std=c11 -Wall -Wextra -Werror -fsanitize=undefined -fno-sanitiz
 # C_TEST_SRC_<stem> overrides the source; C_TEST_EXTRA_<stem> appends compile args.
 C_TESTS = \
 	romfs_paths \
+	totk_fog \
 	feedback_settings \
 	controller_map \
 	keyboard_map \

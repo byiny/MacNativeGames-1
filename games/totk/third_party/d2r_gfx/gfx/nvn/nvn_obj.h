@@ -426,6 +426,17 @@ void *botw_fog_pick(void *rp, void *base);
 #define FOG_TP_UPLOADED(pk, t) if (g_fog) botw_fog_uploaded((__bridge void *)(pk), (t));
 #define FOG_TP_BASE(rp, b) if (g_fog > 0) (b) = (__bridge id<MTLTexture>)botw_fog_pick((rp), (__bridge void *)(b));
 #define FOG_TP_VIEW(rp, r, b) if (g_fog > 0) { void *tp_ = botw_fog_pick((rp), (__bridge void *)(b)); if (tp_ != (__bridge void *)(b)) { (b) = (__bridge id<MTLTexture>)tp_; (r).v.set_format = 0; } }
+#elif !defined(GAME_BOTW) && !defined(GAME_NS2) && !(defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE)
+/* TOTK 1.4.3 fog-of-war map (local mod, totk_fog_gfx.h at the end of nvn_mtl.m): the map tile textures it darkens are
+   the sampling base of the texture-pool slots that view them whole. g_totk_fog stays 0 until the 1.4.3 runtime starts it.
+   Each FOG_TP_* call comes after the UI_PACK_* call at the same site, so the fog wins. */
+extern int g_totk_fog;
+void totk_fog_uploaded(void *pk, const tex_t *t);
+void *totk_fog_pick(void *rp, void *base);
+#define FOG_PKG_FIELDS id fog;
+#define FOG_TP_UPLOADED(pk, t) if (g_totk_fog > 0) totk_fog_uploaded((__bridge void *)(pk), (t));
+#define FOG_TP_BASE(rp, b) if (g_totk_fog > 0) (b) = (__bridge id<MTLTexture>)totk_fog_pick((rp), (__bridge void *)(b));
+#define FOG_TP_VIEW(rp, r, b) if (g_totk_fog > 0) { void *tp_ = totk_fog_pick((rp), (__bridge void *)(b)); if (tp_ != (__bridge void *)(b)) { (b) = (__bridge id<MTLTexture>)tp_; (r).v.set_format = 0; } }
 #else
 #define FOG_PKG_FIELDS
 #define FOG_TP_UPLOADED(pk, t)

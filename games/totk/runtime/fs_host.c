@@ -239,9 +239,14 @@ static unsigned commit(const char *name) {
     return 0;
 }
 
+#include <TargetConditionals.h>
 #ifdef GAME_BOTW190
 void botw_fog_save_opened(const char *path, int write);
-/* botw_fog_map.h: where the fog grids and the game's Hero's Path files are */
+#elif defined(TOTK_GAME_V143) && !TARGET_OS_IPHONE
+void totk_fog_save_opened(const char *path, int write);
+#endif
+#if defined(GAME_BOTW190) || (defined(TOTK_GAME_V143) && !TARGET_OS_IPHONE)
+/* botw_fog_map.h and fog_map_v143.h: where the fog grids and the game's Hero's Path files are */
 const char *runtime_fs_profile_dir(void) { return profile; }
 const char *runtime_fs_save_root(void) { return save_root; }
 #endif
@@ -264,6 +269,8 @@ static unsigned open_file(uint64_t *out, const char *path, int mode) {
     runtime_autoload_save_file_opened(path);   /* TOTK_AUTOLOAD: a slot's caption.sav starts the presses, its progress.sav ends them */
 #ifdef GAME_BOTW190
     botw_fog_save_opened(path, mode & OPEN_WRITE);   /* botw_fog_map.h: a slot's fog grid follows its game_data.sav */
+#elif defined(TOTK_GAME_V143) && !TARGET_OS_IPHONE
+    totk_fog_save_opened(path, mode & OPEN_WRITE);   /* fog_map_v143.h: a slot's fog grid follows its progress.sav */
 #endif
     pthread_mutex_lock(&lock);
     for (int i = 0; i < NFILES; i++) if (files[i].fd <= 0) {

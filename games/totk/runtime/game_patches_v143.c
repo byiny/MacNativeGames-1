@@ -26,6 +26,7 @@ _Static_assert(PAD_V143_ASPECT_LEN == 4 * ASPECT_STUB && PAD_V143_VERT_LEN == 2 
 #include <pthread.h>
 #include <signal.h>
 #include <unistd.h>
+#include "fog_map_v143.h"   /* local mod: fog-of-war map and sensor shrines */
 #endif
 
 typedef struct { uint64_t off; uint32_t original, replacement; } Patch;
@@ -1534,6 +1535,7 @@ void runtime_game_patches(Module *m) {
        Mac address and the iPad stopped at the first camera update ("Invalid Page", 2026-11-03, every 1.4.3 iOS build
        since zeldaVR came in, d1509b4b). */
     if (!getenv("TOTK_EXPORT_IOS")) vr_headlook_install(m);
+    fog_map_install(m);   /* local mod: fog-of-war map and sensor shrines (fog_map_v143.h; not in the iOS export) */
 #endif
     patch_bench_cam(m);
     patch_lod_distance(m);

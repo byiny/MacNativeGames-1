@@ -24721,3 +24721,6 @@ void runtime_shader_seed(const char *path, const char *list) { @autoreleasepool 
 #if MNG_UI_PACK
 #include "ui_pack.h"   // sharp UI art (UI_PACK_* in nvn_obj.h)
 #endif
+#if !defined(GAME_BOTW) && !defined(GAME_NS2) && !TARGET_OS_IPHONE
+#include "totk_fog_gfx.h"   // TOTK 1.4.3 fog-of-war map (local mod; FOG_TP_* in nvn_obj.h)
+#endif
