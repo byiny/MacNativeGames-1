@@ -5658,7 +5658,7 @@ static void *tex_mtl_p(const tex_t *ct) {
                   if (k < 64 && (cnt[k]++ % 100) == 0) MLOG("[reup] f%llu ser=%llu %ux%u fmt=%#x lv%u mem=%p size=%#llx owned=%d hashed=%d (%u times)", (unsigned long long)atomic_load(&g_cur_frame),
                       (unsigned long long)t->serial, t->d.width, t->d.height, t->d.format, t->d.levels, (void *)t->mem, (unsigned long long)t->L.size, pk->owned, pk->hashed, cnt[k]); } }
             uint64_t st; BOTW_PKG_WB_TAKE() reup_key nk; g_mip_nodrop = pk->owned; g_mip_keep = pk->keep_full; id<MTLTexture> nt = pkg_upload(t, &st, &nk, pk); g_mip_nodrop = 0; g_mip_keep = 0;   // 池内容变了（流式素材写进同一存储）：换新贴图，在途绘制仍读旧的 | Pool content changed (streamed assets written into the same storage): switch to a new texture; in-flight draws still read the old one
-            if (nt) { id<MTLTexture> old = pk->tex; pk->tex = nt; reup_retire(old, &pk->key); pk->key = nk; if (pk->hashed) pk->chash = h; ser_bump(t->serial); pk->stamp = st; pk->seen = st; BOTW_PKG_WB_SET(pk) g_pkg_reuploads++; if (dirtycheck()) pk->hash = full_hash(t->mem, t->L.size); BOTW_REUP_TRACKED(pk, t) UI_PACK_UPLOADED(pk, t) }
+            if (nt) { id<MTLTexture> old = pk->tex; pk->tex = nt; reup_retire(old, &pk->key); pk->key = nk; if (pk->hashed) pk->chash = h; ser_bump(t->serial); pk->stamp = st; pk->seen = st; BOTW_PKG_WB_SET(pk) g_pkg_reuploads++; if (dirtycheck()) pk->hash = full_hash(t->mem, t->L.size); BOTW_REUP_TRACKED(pk, t) UI_PACK_UPLOADED(pk, t) FOG_TP_UPLOADED(pk, t) }
             else { free(pk->edge); pk->edge = NULL; }   // TOTK (#90): the bytes kept belong to the upload that failed
             return (__bridge void *)pk->tex;
         }
@@ -5669,7 +5669,7 @@ static void *tex_mtl_p(const tex_t *ct) {
         if (!pk->tex) return NULL;
         /* TOTK (#90): seen = the upload's stamp, not "now": a write that faulted during the copy moved "now" on, and the
            now == seen shortcut above then called the texture clean without looking at its pages. */
-        pk->seen = pk->stamp; g_pkg_uploads++; if (dirtycheck()) pk->hash = full_hash(t->mem, t->L.size); UI_PACK_UPLOADED(pk, t)
+        pk->seen = pk->stamp; g_pkg_uploads++; if (dirtycheck()) pk->hash = full_hash(t->mem, t->L.size); UI_PACK_UPLOADED(pk, t) FOG_TP_UPLOADED(pk, t)
         serial_put(t->serial, pk);
         pk->owned = gpu_owned(t->serial);   // after it is in the table: a later mark finds it there (pkg_owned_locked)
         if ((pk->hashed = pkg_hashed(t))) { if (!pkg_hash_guarded(t, &pk->chash)) pk->chash = 0; pk->csub = g_sub_serial; }
@@ -8512,7 +8512,7 @@ static void *tex_by_id_p(int tid) {   // 调用方持 g_rmu | Caller holds g_rmu
     /* TOTK: the stored view is compared by pointer (cur, view_parent: no retain, no parentTexture message); a strong local
        was a retain + release each time a guest write or serial step sent a bound texture through here. */
     if (rp->view) {   // 序号表或客体内存有过变动：核基贴图是否被重传换新，换了则视图作废 | The serial table or guest memory has changed: check whether the base texture was re-uploaded and replaced; if so the view is invalidated
-        g_dead_by_id = 1; __unsafe_unretained id<MTLTexture> cur = tex_mtl(&rp->t); g_dead_by_id = 0; UI_PACK_BASE(rp, cur)   // held by the serial table / its NvPkg
+        g_dead_by_id = 1; __unsafe_unretained id<MTLTexture> cur = tex_mtl(&rp->t); g_dead_by_id = 0; UI_PACK_BASE(rp, cur) FOG_TP_BASE(rp, cur)   // held by the serial table / its NvPkg
         if (g_tex_prepare_split) return NULL;
         if ((cur || g_upstream_negative==1) && ((__bridge void *)cur == rp->view || (__bridge void *)cur == rp->view_parent)) { rp->view_ser = sg; rp->view_pkg = treg_kind(&rp->t); rp->view_dirty = rp->view_pkg == 2 || (rp->view_pkg == 1 && tex_check_once()) ? g_sub_serial : dg; return rp->view; }
         treg_clear_view_locked(tid);
@@ -8521,7 +8521,7 @@ static void *tex_by_id_p(int tid) {   // 调用方持 g_rmu | Caller holds g_rmu
     treg_t r = *rp;
     if (!r.has_v) memset(&r.v, 0, sizeof r.v);   // only a registered view may change format, levels, layers or target
     uint64_t dead_t0 = dead && dead_stat_on() ? clock_gettime_nsec_np(CLOCK_UPTIME_RAW) : 0, dead_made0 = g_dead_put_total;
-    g_dead_by_id = 1; id<MTLTexture> base = tex_mtl(&rp->t); g_dead_by_id = 0; UI_PACK_VIEW(rp, r, base)
+    g_dead_by_id = 1; id<MTLTexture> base = tex_mtl(&rp->t); g_dead_by_id = 0; UI_PACK_VIEW(rp, r, base) FOG_TP_VIEW(rp, r, base)
     if (dead_t0 && g_dead_put_total != dead_made0) atomic_fetch_add_explicit(&g_dead_ns, clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - dead_t0, memory_order_relaxed);
     if (!base) return NULL;
     v = base;

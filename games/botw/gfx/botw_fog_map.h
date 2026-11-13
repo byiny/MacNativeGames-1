@@ -1,12 +1,12 @@
 /* Breath of the Wild 1.9.0: fog-of-war map (local build only). Places Link has been are clear on the mini map and the
-   big map, every other place is darker. Included at the end of nvn_mtl.m after botw_texpack.h, whose hook it uses.
+   big map, every other place is darker. Included at the end of nvn_mtl.m; its own hooks are the FOG_TP_* macros of nvn_obj.h (next to UI_PACK_*, after each of them).
 
    - Map tiles: UI/MapTex/MainField/MapTex{,1,2,3}_<col>-<row>[_<variant>] (3000², 840², 300², 135² BC1 sRGB, one
      level). When the game opens one (romfs.c), a queue reads it, decodes Yaz0 + BNTX and keys its image by pkg_hash:
      the key of the texture the game uploads from it. A key two cells share (blank edge cells) gets no fog.
-   - A mirrored texture of a tile's shape (botw_tp_uploaded) gets a tile object: the guest bytes deswizzled once into
+   - A mirrored texture of a tile's shape (FOG_TP_UPLOADED) gets a tile object: the guest bytes deswizzled once into
      linear BC1 blocks. A build darkens a copy block by block from the visited grid (botw_fog_core.h) into a new BC1
-     texture; botw_tp_pick samples it in place of the guest's copy for every slot that views the texture whole, so the
+     texture; FOG_TP_BASE / FOG_TP_VIEW sample it in place of the guest's copy for every slot that views the texture whole, so the
      mini map and the big map both show it. The game's own reveal mask still applies on top.
    - Position: [main+0x1e13ed0] is PlayerInfo (its getPlayerPos at main+0xcc7598 returns this+0x88, a float[3]);
      StageInfo::sCurrentMapType at main+0x1dae3a0 (FixedSafeString, char * at +8) reads "MainField" in the field. A
@@ -27,7 +27,7 @@
 #include "mach_vm_compat.h"   /* nvn/include */
 
 enum { FOG_PINFO = 0x1e13ed0, FOG_PINFO_POS = 0x88, FOG_MAPTYPE = 0x1dae3a0, FOG_EDGE = 2 * FOG_CELL, FOG_GAP = 250 };
-static int g_fog = -1;   /* -1 not yet set up, 0 off, 1 on */
+int g_fog = -1;   /* -1 not yet set up (the first upload or file open does it), 0 off, 1 on; nvn_obj.h declares it */
 static float g_fog_dark = 0.3f, g_fog_radius = 60;
 static int g_fog_log;
 static uintptr_t g_fog_main;
@@ -140,7 +140,7 @@ static void fog_retire(BotwFogTile *tl) {
     if (tl->cur) { defer_obj_release(tl->cur); tl->cur = nil; }
     g_fog_n_retired++;
 }
-/* botw_texpack.h botw_tp_uploaded (replay thread): a first upload or a re-upload of a mirrored texture */
+/* FOG_TP_UPLOADED, botw_fog_uploaded below (replay thread): a first upload or a re-upload of a mirrored texture */
 static void fog_uploaded(NvPkg *pk, const tex_t *t) {
     if (pk->fog) { fog_retire(pk->fog); pk->fog = nil; }
     int level = fog_level_of(t->d.width);
@@ -170,13 +170,35 @@ static void fog_uploaded(NvPkg *pk, const tex_t *t) {
     });
 }
 
-/* botw_texpack.h botw_tp_pick (replay thread, g_rmu held): the fog texture of this texture, or nil */
+/* botw_fog_pick below (replay thread, g_rmu held): the fog texture of this texture, or nil */
 static id<MTLTexture> fog_pick(NvPkg *pk) {
     BotwFogTile *tl = pk->fog;
     if (!tl) return nil;
     os_unfair_lock_lock(&g_fog_lk); id<MTLTexture> nt = tl->next; tl->next = nil; os_unfair_lock_unlock(&g_fog_lk);
     if (nt) { if (tl->cur) defer_obj_release(tl->cur); tl->cur = nt; res_add(nt); }
     return tl->cur;
+}
+/* nvn_obj.h FOG_TP_UPLOADED, after UI_PACK_UPLOADED at the same site: the first call sets the fog up */
+void botw_fog_uploaded(void *pk, const tex_t *t) {
+    if (fog_on() > 0) fog_uploaded((__bridge NvPkg *)pk, t);
+}
+static int fog_slot_ok(const treg_t *rp) {   /* the slot views the whole texture in its own format, one 2D level and layer */
+    if (!rp->has_v) return 1;
+    const view_t *v = &rp->v;
+    return !(v->set_format && v->format != rp->t.d.format) && !(v->set_levels && (v->base_level || v->nlevels > 1)) && !(v->set_layers && (v->min_layer || v->nlayers > 1))
+        && !(v->set_target && ttype(v->target, MTLTextureType2D) != MTLTextureType2D);
+}
+/* nvn_obj.h FOG_TP_BASE / FOG_TP_VIEW, after UI_PACK_BASE / UI_PACK_VIEW (g_rmu held). The tile is found through the slot's
+   texture (rp), not through base, which the pack may have replaced: the fog wins, since a BC1 sRGB tile of 840, 300 or 135 px
+   is also a UI pack class candidate. A texture the GPU renders into keeps what the earlier hooks chose. */
+void *botw_fog_pick(void *rp_, void *base_) {
+    if (g_fog <= 0 || !base_) return base_;
+    treg_t *rp = rp_; __unsafe_unretained id o = serial_get(rp->t.serial);
+    if (![o isKindOfClass:[NvPkg class]]) return base_;
+    NvPkg *pk = o;
+    if (!pk->fog || pk->owned) return base_;
+    id<MTLTexture> f = fog_pick(pk);
+    return f && fog_slot_ok(rp) ? (__bridge void *)f : base_;
 }
 
 /* fs_host.c open_file: the game reads (loads) or writes (saves) save:/N/game_data.sav */
