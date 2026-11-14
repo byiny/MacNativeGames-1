@@ -1156,15 +1156,20 @@ static void patch_font_size(Module *m) {
    - the render target of each capture pass, main+0xf5a028: the same width / height (x the pane's global scale when
      +0xda bit 6 and a global flag are set) truncated (fcvtzu at main+0xf5a104 / +0xf5a118) for its viewport, with the
      pane's own size as the projection (main+0xf59b2c draws the pane with an ortho over +0x50 / +0x54), then copied into
-     the kept texture (main+0xec9f3c). A pane with +0xda bit 4 sizes the target from the screen instead (left as shipped).
+     the kept texture (main+0xec9f3c). A pane with +0xda bit 4 sizes the render target from the screen instead
+     (main+0xf5a0c4: pane size x render target / layout, so 2.7x on a 1944-line canvas), but its kept texture still
+     takes the pane's size: the big brush heading of the name card (700x114 kept, 1890x307 drawn) is such a pane.
    Two stubs multiply both sizes by k = canvas height / 720, the font raster's factor: the pane is drawn k times finer
    into a k times larger texture, and the pictures show it at the same place and size. The transient size is rounded as
    the kept one is, so the copy fills it. Panes of a quarter of the 1280x720 layout or more (the 1280x720 blurred
    backgrounds of the pause menu, map and system windows: 26-38 MiB each at k = 2.7) stay as shipped; the text captures
-   are 0.1-5.5 MiB each at k = 2.7. TOTK_CAPTURE_RES=0 keeps all as shipped.
-   Not fixed here: the big heading can show wrong glyphs (runs of 2026-11-14 on the owner's Goron save: before the fix
-   "Ta", after it "鼓隆" in the small font, in every frame of the card). Capturing again every frame did not change it,
-   so it is not a one-frame stale read; the heading's Special-font glyph cells hold other glyphs (open).
+   are 0.1-5.5 MiB each at k = 2.7. Stub A also scales the kept texture of a bit-4 pane (its render target is already
+   screen-sized, stub B's size is replaced there).
+   Wrong glyphs: a capture is drawn once and kept; the game draws it again only when a glyph was not plotted yet
+   (main+0xf59e54: +0xdb = +0xda bit 5). On this port the one capture can read glyph-cache cells that still hold other
+   glyphs (runs of 2026-11-14 on the owner's Goron save: the heading showed "Ta" or "鼓隆" for the whole card), so
+   stub C makes small panes (the same quarter-screen limit) capture again every frame they are shown: a stale cell is
+   replaced one frame later. The port-side cause of the stale cell is not found. TOTK_CAPTURE_RES=0 keeps all as shipped.
    1.6.0 is not done (no test reached it). */
 static const struct { uint32_t off, original; } g_capture_check[] = {
     {0xf59710u, 0x2d4a2269u},   /* ldp s9, s8, [x19, #0x50]: the pane's width and height */
@@ -1180,11 +1185,14 @@ static const struct { uint32_t off, original; } g_capture_check[] = {
     {0xf5a0c4u, 0x36200188u},   /* tbz w8, #4: w8 (+0xda) is live across site B */
     {0xf5a104u, 0x1e390164u},   /* fcvtzu w4, s11: the render target's width */
     {0xf5a118u, 0x1e390145u},   /* fcvtzu w5, s10: its height */
+    {0xf59e4cu, 0x39436a68u},   /* ldrb w8, [x19, #0xda]: after a capture pass, x19 = the pane */
+    {0xf59e50u, 0x32000109u},   /* orr w9, w8, #0x1: w9 is kept by stub C */
+    {0xf59e54u, 0x53051508u},   /* ubfx w8, w8, #5, #1 (site C): capture again only when a glyph was not plotted */
 };
-enum { CAPTURE_SITE_A = 0xf5974c, CAPTURE_SITE_B = 0xf5a0b8, CAPTURE_STUB_B = 12, CAPTURE_K = 25 };
-static const uint32_t g_capture_stub[] = {   /* both stubs and their two literals; 26 words */
+enum { CAPTURE_SITE_A = 0xf5974c, CAPTURE_SITE_B = 0xf5a0b8, CAPTURE_SITE_C = 0xf59e54, CAPTURE_STUB_B = 12, CAPTURE_K = 25, CAPTURE_STUB_C = 26 };
+static const uint32_t g_capture_stub[] = {   /* the three stubs and two literals; 35 words (source re/capstub.s of the task) */
     /* A: x19 = pane, s9 / s8 = the kept texture's width / height; ends with the fcmp it replaces */
-    0x39436a68u, 0x37200128u,   /* ldrb w8, [x19, #0xda] / tbnz w8, #4, A+0x28: a screen-sized capture stays */
+    0x39436a68u, 0xd503201fu,   /* ldrb w8, [x19, #0xda] (as before) / nop: a bit-4 (screen-sized) pane is scaled too */
     0x2d4a0660u, 0x1e210800u,   /* ldp s0, s1, [x19, #0x50] / fmul s0, s0, s1: the pane's area */
     0x1c000281u, 0x1e212000u, 0x5400008au,   /* ldr s1, area / fcmp s0, s1 / b.ge A+0x28 */
     0x1c000240u, 0x1e200929u, 0x1e200908u,   /* ldr s0, k / fmul s9, s9, s0 / fmul s8, s8, s0 */
@@ -1198,8 +1206,13 @@ static const uint32_t g_capture_stub[] = {   /* both stubs and their two literal
     0xd65f03c0u,   /* ret */
     0x48610000u,   /* area: 230400.0f, a quarter of 1280x720 */
     0x3f800000u,   /* k: set below */
+    /* C: x19 = pane, w8 = +0xda, w9 (the new +0xda) is kept; returns w8 = the new +0xdb */
+    0x2d4a0660u, 0x1e210800u,   /* ldp s0, s1, [x19, #0x50] / fmul s0, s0, s1 */
+    0x1cffff81u, 0x1e212000u, 0x5400006au,   /* ldr s1, area / fcmp s0, s1 / b.ge C+0x1c */
+    0x52800028u, 0xd65f03c0u,   /* mov w8, #1 / ret: capture again next frame */
+    0x53051508u, 0xd65f03c0u,   /* ubfx w8, w8, #5, #1 / ret: as shipped */
 };
-_Static_assert(sizeof g_capture_stub / 4 == 26, "the literal offsets in the stub words assume 26 words");
+_Static_assert(sizeof g_capture_stub / 4 == 35, "the literal offsets in the stub words assume 35 words");
 static void patch_capture_res(Module *m) {
     if (ios_code()) return;
     const char *e = getenv("TOTK_CAPTURE_RES");
@@ -1230,8 +1243,9 @@ static void patch_capture_res(Module *m) {
     put_word(m, CAPTURE_SITE_A, 0x80000000u | branch_to(CAPTURE_SITE_A, stub), "UI capture kept texture");   /* bl A */
     put_word(m, CAPTURE_SITE_B, 0x80000000u | branch_to(CAPTURE_SITE_B, stub + 4 * CAPTURE_STUB_B), "UI capture pass");   /* bl B */
     put_word(m, CAPTURE_SITE_B + 4, 0xd503201fu, "UI capture pass");   /* nop: B did the second fmov */
-    fprintf(stderr, "[botw] UI capture textures x%.2f for the %u-pixel canvas (panes under a quarter screen; stubs at main+%#llx; "
-            "TOTK_CAPTURE_RES=0 keeps 720p)\n", k, h, (unsigned long long)stub);
+    put_word(m, CAPTURE_SITE_C, 0x80000000u | branch_to(CAPTURE_SITE_C, stub + 4 * CAPTURE_STUB_C), "UI capture again");   /* bl C */
+    fprintf(stderr, "[botw] UI capture textures x%.2f for the %u-pixel canvas (panes under a quarter screen, drawn again every frame shown; "
+            "stubs at main+%#llx; TOTK_CAPTURE_RES=0 keeps 720p)\n", k, h, (unsigned long long)stub);
 }
 #endif
 #ifdef GAME_BOTW190
