@@ -996,7 +996,7 @@ static NSArray<TOTKSettingRow *> *settings_rows(void) {
  [rows addObject:settings_aniso_row()];
  [rows addObjectsFromArray:settings_effect_rows()];
  for(NSUInteger i=0;i<rows.count;i++)rows[i].page=i<display?SETTINGS_PAGE_DISPLAY:i<input?SETTINGS_PAGE_INPUT:i<users?SETTINGS_PAGE_USERS:SETTINGS_PAGE_EFFECTS;
- /* Tilt mode (LB + LT on a controller without a gyro, gamepad.m), on the key bindings page under the controller (user
+ /* Tilt mode (L3 + R3 on a controller without a gyro, gamepad.m), on the key bindings page under the controller (user
     2026-10-30): its top speed and which stick axis it reverses (one or all three); both in force at the next tick, also
     while it is on, and saved in tilt.txt. */
  NSUInteger tilt=rows.count;
@@ -1090,6 +1090,7 @@ static NSString *settings_pad_button(int physical, int family) {
 /* What the controller column shows for an action: its buttons, or the stick a direction belongs to. */
 /* The controller's way to the settings panel, as the key bindings show it. */
 static NSString *settings_panel_pad_text(int family) {
+ return @"—";   /* local (owner 2026-11-14): no controller button opens the panel */
  int b=runtime_gamepad_settings_button();
  if(b>=0)return settings_pad_button(b,family);
  return [NSString stringWithFormat:@"%@ + %@",settings_pad_button(4,family),settings_pad_button(5,family)];
@@ -1394,7 +1395,7 @@ enum { SETTINGS_W = 740, SETTINGS_NARROW_W = 600, SETTINGS_ROW_H = 34, SETTINGS_
    box.bordered=NO;box.wantsLayer=YES;box.layer.cornerRadius=5;box.refusesFirstResponder=YES;
    box.frame=NSMakeRect(cx[slot],3,cell,SETTINGS_BIND_ROW_H-8);
    box.panel=self;box.gameAction=a->action;box.slot=slot;
-   box.enabled=a->action==SETTINGS_BIND_PANEL?slot==2:slot<2||a->action<KEYMAP_SWITCH_BUTTONS||a->action==KEYMAP_SCREENSHOT;
+   box.enabled=a->action==SETTINGS_BIND_PANEL?0:slot<2||a->action<KEYMAP_SWITCH_BUTTONS||a->action==KEYMAP_SCREENSHOT;
    [band addSubview:box];[self.bindingButtons addObject:box];
   }
   if(a->action<KEYMAP_SWITCH_BUTTONS||a->action==SETTINGS_BIND_PANEL||a->action==KEYMAP_SCREENSHOT)[self.bindingTargets addObject:band];
@@ -1569,7 +1570,7 @@ static void settings_footer_note(NSString *text, BOOL bad) { (void)bad; [setting
  for(int i=0;i<count;i++){
   const SettingsAction *a=&all[i];
   if(pad&&a->action>=KEYMAP_SWITCH_BUTTONS&&a->action!=SETTINGS_BIND_PANEL&&a->action!=KEYMAP_SCREENSHOT)continue;   /* the sticks stay sticks on a controller */
-  if(!pad&&a->action==SETTINGS_BIND_PANEL)continue;   /* key 1, fixed */
+  if(a->action==SETTINGS_BIND_PANEL)continue;   /* key 1, fixed; local (owner 2026-11-14): no controller button */
   if(pad&&input>CONTROLLER_SWITCH_BUTTONS&&(a->action==SETTINGS_BIND_PANEL||a->action==KEYMAP_SCREENSHOT))continue;   /* not a mouse button */
   if(a->action<0){[menu addItem:[NSMenuItem sectionHeaderWithTitle:@(TOTK_UI(a->zh,a->en))]];continue;}
   /* A controller's screenshot is a hold added to what the button drives: its own tick beside the action's. */
@@ -1763,7 +1764,7 @@ static void settings_footer_note(NSString *text, BOOL bad) { (void)bad; [setting
   int physical=target==self.padDiagram?[self padPhysical:(NSUInteger)i]:-1;
   if(physical>=0){   /* left / right (or A) go through the actions it can drive, then none */
    static const int cycle[]={KEYMAP_A,KEYMAP_B,KEYMAP_X,KEYMAP_Y,KEYMAP_ZL,KEYMAP_ZR,KEYMAP_L,KEYMAP_R,KEYMAP_LSTICK,KEYMAP_RSTICK,KEYMAP_PLUS,KEYMAP_MINUS,
-    KEYMAP_DUP,KEYMAP_DDOWN,KEYMAP_DLEFT,KEYMAP_DRIGHT,SETTINGS_BIND_PANEL,-1};
+    KEYMAP_DUP,KEYMAP_DDOWN,KEYMAP_DLEFT,KEYMAP_DRIGHT,-1};   /* local (owner 2026-11-14): not the settings panel */
    const int n=(int)(sizeof cycle/sizeof *cycle);
    uint16_t map[CONTROLLER_BUTTONS];uint8_t modes[CONTROLLER_BUTTONS];runtime_controller_map_get(map,modes);
    int now=runtime_gamepad_settings_button()==physical?SETTINGS_BIND_PANEL:controller_map_target(map[physical]),at=n-1;for(int k=0;k<n;k++)if(cycle[k]==now)at=k;

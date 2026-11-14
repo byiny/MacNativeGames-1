@@ -719,6 +719,7 @@ void runtime_mouse_set_hook(void (*hook)(void)) { mouseHook = hook; }
 /* The settings panel's button (key bindings): -1 the L3 + R3 chord, else the physical button, saved in
    controller-settings.txt by its controls.txt name; -1 removes the file. */
 static void load_settings_button(void) {
+    return;   /* local (owner 2026-11-14): no controller button opens the settings panel; an old controller-settings.txt is ignored */
     char path[4096], word[32] = {0};
     if (!setting_read("controller-settings.txt", word, sizeof word, path, sizeof path)) return;
     word[strcspn(word, " \t\r\n")] = 0;
@@ -765,15 +766,15 @@ void runtime_gamepad_screenshot_button_set(int physical) {
     fprintf(stderr, "[totk-input] screenshot button: %s\n", physical < 0 ? "none" : controller_physical_names[physical]);
 }
 void runtime_gamepad_settings_button_set(int physical) {
-    if (physical > CONTROLLER_SWITCH_BUTTONS) return;
-    if (physical < 0) physical = -1;
+    if (physical >= 0) return;   /* local (owner 2026-11-14): no controller button opens the settings panel */
+    physical = -1;
     atomic_store(&settingsButton, physical);
     pthread_mutex_lock(&gamepadLock);
     settingsShortcutDown = (textPad.buttons & settings_trigger()) == settings_trigger();
     pthread_mutex_unlock(&gamepadLock);
     if (physical < 0) runtime_setting_remove("controller-settings.txt");
     else setting_write("controller-settings.txt", controller_physical_names[physical], "settings panel button");
-    fprintf(stderr, "[totk-input] settings panel button: %s\n", physical < 0 ? "L3 + R3" : controller_physical_names[physical]);
+    fprintf(stderr, "[totk-input] settings panel button: %s\n", physical < 0 ? "none (key 1 on the Mac)" : controller_physical_names[physical]);
     gamepad_gestures_changed();
     refresh_gamepads();
 }
@@ -861,7 +862,7 @@ static void awake_note_input(void) {   /* any thread */
 }
 #endif
 /* ---- Tilt mode (runtime/gyro_tilt.h) ----
-   For the motion-control puzzles on a controller without motion sensors. LB + LT (Switch L + ZL) pressed together turn it on and off,
+   For the motion-control puzzles on a controller without motion sensors. L3 + R3 (both sticks) clicked together turn it on and off,
    when gyro_tilt_allowed says so (TOTK_GYRO_EMU; by default only while no controller feeds real motion). While on, a
    10 ms timer turns a virtual controller lying face up by the sticks (left: tilt, right x: turn, each about the player's
    axes at a speed; let go and it stays, gyro_tilt.h) and feeds the pose to the sensor in the mouse's place
@@ -1088,11 +1089,12 @@ static void refresh_gamepads(void) {
             if (!textCapture) textCapture = 2;
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(850 * NSEC_PER_MSEC)), dispatch_get_main_queue(), ^{ refresh_gamepads(); });
         }
-        if (chord && !chordLong && now - chordAt >= 800000000ULL) { chordLong = 1; settingsShortcutPending = 1; }
+        if (chord && !chordLong && now - chordAt >= 800000000ULL) chordLong = 1;   /* local: no settings panel from the controller */
         if (!chord && settingsShortcutDown && !chordLong) recenter();
-    } else if (chord && !settingsShortcutDown) {
-        settingsShortcutPending = 1;
-        if (!textCapture) textCapture = 2;   /* from here the game no longer gets the controller, until it is released */
+    } else if (tiltPressed && !textCapture) {
+        /* Local (owner 2026-11-14): L3 + R3 is tilt mode, no controller button opens the settings panel (key 1 on the Mac
+           does). The game gets nothing more from the click, until both sticks are let go. */
+        textCapture = 2;
     }
     settingsShortcutDown = chord;
     /* The screenshot button held CONTROLLER_SCREENSHOT_HOLD_MS: one picture per hold. A button held still sends no report,
@@ -1122,10 +1124,10 @@ static void refresh_gamepads(void) {
     (void)changed;
 #endif
     /* After the unlock: the tilt timer takes gamepadLock. The last controller gone: tilt mode ends, so the keyboard drives again. */
-    if (tiltPressed) tilt_toggle("LB + LT");
+    if (tiltPressed) tilt_toggle("L3 + R3");
     else if (!next.connected && atomic_load(&tiltMode)) tilt_toggle("controller disconnected");
     else if (atomic_load(&tiltMode) && !gyro_tilt_allowed(getenv("TOTK_GYRO_EMU"), runtime_gyro_enabled(), runtime_motion_controller_live()))
-        tilt_toggle("a controller with a gyro of its own is in use");   /* LB + LT is off for those too (gyro_tilt_allowed) */
+        tilt_toggle("a controller with a gyro of its own is in use");   /* L3 + R3 is off for those too (gyro_tilt_allowed) */
     else if (tiltCancel && atomic_load(&tiltMode)) { atomic_store(&tiltReset, runtime_now_ns() + TILT_RESET_NS); fprintf(stderr, "[totk-input] tilt mode: B pressed, the controller turns back to flat in %.1f s\n", TILT_RESET_NS / 1e9); }
 }
 

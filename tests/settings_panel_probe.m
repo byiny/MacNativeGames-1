@@ -1060,7 +1060,7 @@ int main(int argc, const char **argv) { @autoreleasepool {
     hud_publish(HUD_FPS, "FPS 60  2560x1440", 0); hud_publish(HUD_SHADER, "New shaders 3 / total 9", 0);
     shows(@"Overlay", @"All (FPS, shaders, load, playtime)");
     pick(@"Overlay", @"FPS + playtime"); assert(fps_overlay_hud_mode() == HUD_MODE_MINIMAL);
-    if (hudBox) { TOTKHudBox *b = (TOTKHudBox *)hudBox; assert(!b.hidden && [b.label.stringValue isEqualToString:@"FPS 60  2560x1440\nSession  0 h 00 m | Total  0 h 00 m\nSettings: key 1 · controller L3 + R3"]); }   /* the last line: how to open this panel (a DualSense connected) */
+    if (hudBox) { TOTKHudBox *b = (TOTKHudBox *)hudBox; assert(!b.hidden && [b.label.stringValue isEqualToString:@"FPS 60  2560x1440\nSession  0 h 00 m | Total  0 h 00 m\nSettings: key 1"]); }   /* the last line: how to open this panel (local 2026-11-14: key 1 only, also with a DualSense connected) */
     pick(@"Overlay", @"Off"); assert(fps_overlay_hud_mode() == HUD_MODE_OFF && (!hudBox || hudBox.hidden));
     pick(@"Overlay", @"All (FPS, shaders, load, playtime)");
     if (hudBox) assert(!hudBox.hidden && [((TOTKHudBox *)hudBox).label.stringValue containsString:@"New shaders"]);
@@ -1572,13 +1572,8 @@ int main(int argc, const char **argv) { @autoreleasepool {
        back leaves the panel on L3 + R3. */
     [settingsPanel refreshBindings];
     assert(titled(box(SETTINGS_BIND_PANEL, 0), @"1") && !box(SETTINGS_BIND_PANEL, 0).enabled && !box(SETTINGS_BIND_PANEL, 1).enabled);
-    assert(titled(box(SETTINGS_BIND_PANEL, 2), @"LS + RS") && box(SETTINGS_BIND_PANEL, 2).enabled);
-    [settingsPanel beginCapture:box(SETTINGS_BIND_PANEL, 2)]; assert(!fakeSettingsShortcut); [settingsPanel bindPad:16];
-    assert(fakeSettingsShortcut && fakeSettingsButton == 16 && !settingsPanel.capturing && titled(box(SETTINGS_BIND_PANEL, 2), @"Touchpad"));
-    [settingsPanel clearBinding:box(SETTINGS_BIND_PANEL, 2)]; assert(fakeSettingsButton == -1 && titled(box(SETTINGS_BIND_PANEL, 2), @"LS + RS"));
-    [settingsPanel beginCapture:box(SETTINGS_BIND_PANEL, 2)]; [settingsPanel bindPad:10]; assert(fakeSettingsButton == 10);
-    [settingsPanel beginCapture:box(KEYMAP_PLUS, 2)]; [settingsPanel bindPad:10]; assert(fakeSettingsButton == -1);
-    [settingsPanel beginCapture:box(SETTINGS_BIND_PANEL, 2)]; [settingsPanel bindPad:16]; [settingsPanel resetController:nil]; assert(fakeSettingsButton == -1);
+    /* Local (owner 2026-11-14): no controller button opens the panel; L3 + R3 is tilt mode. */
+    assert(titled(box(SETTINGS_BIND_PANEL, 2), @"—") && !box(SETTINGS_BIND_PANEL, 2).enabled && fakeSettingsButton == -1);
     /* The screenshot row (user 2026-11-11), the last: P and a free second box on the keyboard, the touchpad held 3 s on a
        controller; each box changes, saves and clears like the others; a controller button taken for it keeps its game
        action (the hold is added); the resets bring back P and the touchpad. */
@@ -1704,8 +1699,8 @@ int main(int argc, const char **argv) { @autoreleasepool {
     TOTKControllerDiagram *pd = settingsPanel.padDiagram; NSRect north = [pd rectOfPhysical:3];
     assert([pd physicalAt:NSMakePoint(NSMidX(north), NSMidY(north)) rect:NULL] == 3 && [pd order].count == 16 && [pd order][0].intValue == 8);
     actions = [settingsPanel menuForInput:3 pad:YES]; int choices = 0; ticked = nil;
-    for (NSMenuItem *i in actions.itemArray) if (i.action) { choices++; assert(i.tag < KEYMAP_SWITCH_BUTTONS || i.tag == SETTINGS_BIND_PANEL || i.tag == KEYMAP_SCREENSHOT); if (i.state == NSControlStateValueOn) ticked = i; }
-    assert(choices == 19 && ticked.tag == KEYMAP_X);   /* 16 buttons, the settings panel, the screenshot hold and none: no stick directions */
+    for (NSMenuItem *i in actions.itemArray) if (i.action) { choices++; assert(i.tag < KEYMAP_SWITCH_BUTTONS || i.tag == KEYMAP_SCREENSHOT); if (i.state == NSControlStateValueOn) ticked = i; }
+    assert(choices == 18 && ticked.tag == KEYMAP_X);   /* 16 buttons, the screenshot hold and none: no stick directions, no settings panel (local 2026-11-14) */
     /* The screenshot hold on the top button: its own tick beside Jump, which the button keeps; None takes both away. */
     for (NSMenuItem *i in actions.itemArray) if (i.tag == KEYMAP_SCREENSHOT) { assert([i.title isEqualToString:@"Screenshot (hold 3 s)"] && i.state == NSControlStateValueOff); [settingsPanel menuPicked:i]; }
     assert(fakeShotButton == 3 && fakeMap[3] == 1u << KEYMAP_X);
@@ -1719,8 +1714,8 @@ int main(int argc, const char **argv) { @autoreleasepool {
     for (NSMenuItem *i in actions.itemArray) if (i.state == NSControlStateValueOn) { on++; assert(i.tag == KEYMAP_SCREENSHOT); }
     assert(on == 1);
     actions = [settingsPanel menuForInput:3 pad:YES];
-    for (NSMenuItem *i in actions.itemArray) if (i.tag == SETTINGS_BIND_PANEL) [settingsPanel menuPicked:i];
-    assert(fakeSettingsButton == 3); [settingsPanel assignPad:3 action:KEYMAP_X]; assert(fakeSettingsButton == -1 && fakeMap[3] == 1u << KEYMAP_X);
+    for (NSMenuItem *i in actions.itemArray) assert(i.tag != SETTINGS_BIND_PANEL);   /* local 2026-11-14 */
+    [settingsPanel assignPad:3 action:KEYMAP_X]; assert(fakeSettingsButton == -1 && fakeMap[3] == 1u << KEYMAP_X);
     [settingsPanel assignPad:3 action:KEYMAP_ZR]; assert(fakeMap[3] == 1u << KEYMAP_ZR && fakeMap[9] == 1u << KEYMAP_ZR && [diagram_missing(1) isEqualToString:@"No button: Jump"]);
     assert(settingsPanel.controllerTargets.count == 22 && pd.selected == -1 && !settingsPanel.tiltStrip.hidden);   /* tilt mode's menus under the controller */
     [settingsPanel controllerPad:(RuntimeGamepadState){.connected = 1} time:200 active:YES];

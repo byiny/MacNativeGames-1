@@ -385,9 +385,7 @@ static NSString *settings_panel_pad_text(int family);  /* settings_panel.h: the 
 /* The box's last line (user 2026-10-30): how to open the settings panel, as it is bound now: key 1, and with a
    controller connected its button or chord (L3 + R3 unless the key bindings set one). */
 static NSString *hud_settings_hint(void) {
- int detected=-1;runtime_gamepad_type(&detected);
- if(detected<=GAMEPAD_TYPE_AUTO)return @(TOTK_UI("设置：键盘 1","Settings: key 1"));
- return [NSString stringWithFormat:@(TOTK_UI("设置：键盘 1 · 手柄 %@","Settings: key 1 · controller %@")),settings_panel_pad_text(settings_pad_family())];
+ return @(TOTK_UI("设置：键盘 1","Settings: key 1"));   /* local (owner 2026-11-14): no controller button opens the panel */
 }
 @implementation TOTKHudBox
 -(instancetype)initWithFrame:(NSRect)frame{if((self=[super initWithFrame:frame])){self.wantsLayer=YES;self.layer.backgroundColor=[NSColor colorWithCalibratedWhite:0.04 alpha:0.72].CGColor;self.layer.cornerRadius=7;self.layer.borderWidth=1;self.layer.borderColor=[NSColor colorWithCalibratedWhite:1 alpha:0.14].CGColor;
