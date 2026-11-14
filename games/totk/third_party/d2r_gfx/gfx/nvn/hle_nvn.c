@@ -1191,8 +1191,9 @@ static uint8_t *flatten_recording_ops(const uint8_t *p);
    so the replay no longer walks and sorts the rest of the stream on every resume (2 of 3 snapshots in Ocarina, tp90a:
    usnap_collect 0.54 + rng_sort 0.75 of 13.9 ms of replay). While gathered, a range is (start, end, offset). */
 typedef struct { uint64_t *ubo, *call; uint32_t *coff; uint32_t nubo, cubo, ncall, ccall; } flat_lists;
+int nvn_ssbo_snap_lists(void);   // nvn_mtl.m: local 0020 on (BOTW, TOTK 1.4.3): storage buffer ranges are copied as uniforms are
 static void flat_note(flat_lists *l, const op_hdr *h, const uint8_t *q, size_t off) {
-    if (h->op == OP_BIND_UBO) {
+    if (h->op == OP_BIND_UBO || (h->op == OP_BIND_SSBO && nvn_ssbo_snap_lists())) {
         p_bind_buf b; memcpy(&b, q + 8, sizeof b);
         if (!b.addr || !b.size || b.size > 65536) return;
         if (l->nubo == l->cubo) { l->cubo = l->cubo ? l->cubo * 2 : 16; l->ubo = realloc(l->ubo, (size_t)l->cubo * 3 * sizeof *l->ubo); if (!l->ubo) die("uniform range list"); }

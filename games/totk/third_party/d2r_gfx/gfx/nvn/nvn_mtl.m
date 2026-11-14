@@ -1422,6 +1422,10 @@ static int totk_ssbo_snap_on(void) { static int v = -1; if (v < 0) { const char 
 #else
 #define totk_ssbo_snap_on() 0
 #endif
+/* BOTW and 1.4.3 (local 0020, 2026-11-14): the recorder's presorted range lists (hle_nvn.c flat_note, used by usnap_take
+   since 2026-11-08) take read-only storage buffers too while 0020 is on; without them only bindings that a merged uniform
+   range happened to cover were copied, and the name card glyphs and the Game Over title read the next frame's refill. */
+int nvn_ssbo_snap_lists(void) { return totk_ssbo_snap_on(); }
 static int usnap_first(uint64_t a) {   // first region whose end is above a
     int lo = 0, hi = g_nusnap;
     while (lo < hi) { int m = (lo + hi) / 2; if (g_usnap[m].hi <= a) lo = m + 1; else hi = m; }
