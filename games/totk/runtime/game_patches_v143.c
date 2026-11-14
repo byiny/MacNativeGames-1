@@ -577,6 +577,84 @@ static void patch_telescope(Module *m){
     fprintf(stderr,"[totk] 1.4.3 telescope vertical aim takes the frame ratio (main+0x23c0afc), stub +%#llx\n",(unsigned long long)stub);
 #endif
 }
+/* Sharp UI captures (local patch 0035; BOTW's 0034 ported). A layout pane with the user data "CaptureOn" (class A: flags
+   halfword +0xd2, kept texture +0x108; the loader main+0x608b5c) is not drawn to the screen: the game draws it into a
+   texture of its own size in 1920x1080 layout units, and pictures of the layout show that texture. The cutscene name card
+   (DemoNickname_00) draws its name and nickname this way (C_CaptureNPC_00..02, C_CaptureNPC_00 is 1050x171), so on a
+   1944-line canvas the picture stretches a 1050x171 texture 1.8x: the blur. Sizes:
+   - the kept texture: pane width / height (+0x50 / +0x54) x the user data "CaptureScale" (when above 0), rounded (+-0.5,
+     fcvtzs), in two paths: deferred main+0x50a9dc (site 0x50aa44) and immediate main+0x60be70 (site 0x60bec0);
+   - the render target of each pass (main+0x1bfae0, called with x2 = the pane's flags: +0xd2 for class A from
+     main+0x105bc7c, +0xe8 for class B "DynamicCaptureOn" from main+0x1be7fc): flags bit 4 sizes it from the screen (class B
+     by default, left as shipped); the plain path (site 0x1c0528) truncates the pane size (fcvtzu).
+   Three stubs multiply all three by k = start canvas height / 1080, the font raster's factor (0026), for class A panes under
+   a quarter of the 1920x1080 layout: the pane is drawn k times finer into a k times larger texture, at the same place and size.
+   Larger class A captures stay as shipped. The target size is rounded as the kept one is, so the copy fills it.
+   Re-capture (stub C): the pass end (main+0x105c36c) sets +0xd4 = flags bit 6, a flag the text draw raises for a glyph it
+   could not plot; the draw prologue main+0x105ba88 captures again only while +0xd4 or flags bit 9 is set. BOTW showed wrong
+   Latin glyphs from a stale glyph-cache cell for the whole card; TOTK_CAPTURE_REDO=1 keeps +0xd4 set for the same small
+   panes (captured again every frame they are shown). Off by default: no TOTK run showed wrong glyphs.
+   TOTK_CAPTURE_RES=0 keeps all as shipped. The stubs sit in the patch-area tail at +1088, after the telescope stub. */
+static const Patch capture_sites[]={
+    {0x50aa08,0xaa0003f3,0},   /* mov x19, x0: the pane (deferred) */
+    {0x50aa10,0x2d4a2668,0},   /* ldp s8, s9, [x19, #0x50]: width, height */
+    {0x50aa44,0x1e202108,0},   /* fcmp s8, #0.0 (site A) */
+    {0x60be8c,0x2d4a2289,0},   /* ldp s9, s8, [x20, #0x50]: width, height (immediate) */
+    {0x60bec0,0x52801900,0},   /* mov w0, #0xc8 (site I) */
+    {0x1bfb08,0x2d4a240a,0},   /* ldp s10, s9, [x0, #0x50]: the pass's pane size */
+    {0x1bfb38,0x36204f68,0},   /* tbz w8, #4, 0x1c0524: the only way to the plain path, x2 unchanged */
+    {0x1c0524,0x37280088,0},   /* tbnz w8, #5 */
+    {0x1c0528,0x1e390153,0},   /* fcvtzu w19, s10 (site B) */
+    {0x1c052c,0x1e390137,0},   /* fcvtzu w23, s9 */
+    {0x1c0530,0x17fffd90,0},   /* b 0x1bfb70 */
+    {0x105bc5c,0x91034a62,0},  /* add x2, x19, #0xd2: class A's call of the pass */
+    {0x105c36c,0x7941a668,0},  /* ldrh w8, [x19, #0xd2] */
+    {0x105c374,0x32000109,0},  /* orr w9, w8, #1: w9 is kept across site C */
+    {0x105c378,0x53061908,0},  /* ubfx w8, w8, #6, #1 (site C) */
+    {0x105c380,0x39035268,0},  /* strb w8, [x19, #0xd4]: the re-capture flag */
+};
+enum{CAPTURE_STUB_I=10,CAPTURE_STUB_B=20,CAPTURE_STUB_C=37,CAPTURE_K=47,CAPTURE_WORDS=48};
+static const uint32_t capture_stub[CAPTURE_WORDS]={   /* dev-data/totk/keep/local-patches/0035-capstub.s, clang-assembled */
+    0x2d4a0660,0x1e210800,0x1c000581,0x1e212000,0x5400008a,   /* A: pane area >= quarter screen -> as shipped */
+    0x1c000540,0x1e200908,0x1e200929,0x1e202108,0xd65f03c0,   /*    s8, s9 x k; fcmp s8, #0.0; ret */
+    0x2d4a0680,0x1e210800,0x1c000441,0x1e212000,0x5400008a,   /* I: the same on x20 */
+    0x1c000400,0x1e200929,0x1e200908,0x52801900,0xd65f03c0,   /*    s9, s8 x k; mov w0, #0xc8; ret */
+    0x1e390153,0x1e390137,0x91034809,0xeb09005f,0x54000181,   /* B: the shipped fcvtzu pair; x2 != x0 + 0xd2 (class B) -> ret */
+    0x2d4a0400,0x1e210800,0x1c000261,0x1e212000,0x540000ea,   /*    area check */
+    0x1c000220,0x1e2c1001,0x1f000542,0x1f000523,0x1e390053,   /*    w19 = (s10 x k + 0.5), w23 = (s9 x k + 0.5) */
+    0x1e390077,0xd65f03c0,
+    0x2d4a0660,0x1e210800,0x1c0000e1,0x1e212000,0x5400006a,   /* C: area check */
+    0x52800028,0xd65f03c0,0x53061908,0xd65f03c0,              /*    mov w8, #1; ret / the shipped ubfx; ret */
+    0x48fd2000,0x3fe66666,                                    /* 518400.0f (a quarter of 1920x1080), k (set at patch time) */
+};
+static int vr_active(void);
+static void patch_capture_res(Module *m){
+#if TARGET_OS_IPHONE
+    (void)m;
+#else
+    const char *e=getenv("TOTK_CAPTURE_RES");
+    if(e&&!strcmp(e,"0")){fprintf(stderr,"[totk] 1.4.3 UI capture textures as shipped, 1080p layout size (TOTK_CAPTURE_RES=0)\n");return;}
+    if(getenv("TOTK_EXPORT_IOS")||vr_active())return;
+    const uint64_t start=runtime_output_size_current();
+    const float k=(float)(unsigned)(start>>32)/1080.0f;
+    if(!(k>1.0f)){fprintf(stderr,"[totk] 1.4.3 UI capture textures as shipped (start canvas %ux%u is not above 1080p)\n",(unsigned)start,(unsigned)(start>>32));return;}
+    for(unsigned i=0;i<sizeof capture_sites/sizeof *capture_sites;i++){uint32_t w;memcpy(&w,m->base+capture_sites[i].off,4);
+        if(w!=capture_sites[i].original){fprintf(stderr,"[totk] 1.4.3 UI capture textures: main+%#llx holds %08x, expected %08x; as shipped\n",
+            (unsigned long long)capture_sites[i].off,w,capture_sites[i].original);return;}}
+    const uint64_t data=(m->file_size+0x3fff)&~0x3fffULL,stub=((m->file_size+15)&~15ULL)+1088;
+    if(stub<m->patch_off||stub+sizeof capture_stub>((data-64)&~15ULL)-32){fprintf(stderr,"[totk] 1.4.3 UI capture textures: no room in the patch area; as shipped\n");return;}
+    for(unsigned i=0;i<sizeof capture_stub;i++)if(m->base[stub+i]){fprintf(stderr,"[totk] 1.4.3 UI capture textures: the patch area at +%#llx is in use; as shipped\n",(unsigned long long)stub);return;}
+    uint32_t words[CAPTURE_WORDS];memcpy(words,capture_stub,sizeof words);memcpy(&words[CAPTURE_K],&k,4);
+    memcpy(m->base+stub,words,sizeof words);
+    const struct{uint64_t site,entry;}bl[]={{0x50aa44,stub},{0x60bec0,stub+4*CAPTURE_STUB_I},{0x1c0528,stub+4*CAPTURE_STUB_B}};
+    for(unsigned i=0;i<3;i++){uint32_t w=0x80000000u|branch(bl[i].site,bl[i].entry);memcpy(m->base+bl[i].site,&w,4);}
+    const uint32_t nop=0xd503201f;memcpy(m->base+0x1c052c,&nop,4);   /* stub B did the second fcvtzu */
+    const char *r=getenv("TOTK_CAPTURE_REDO");const int redo=r&&!strcmp(r,"1");
+    if(redo){uint32_t w=0x80000000u|branch(0x105c378,stub+4*CAPTURE_STUB_C);memcpy(m->base+0x105c378,&w,4);}
+    fprintf(stderr,"[totk] 1.4.3 UI capture textures x%.2f (class A panes under a quarter of the layout; stubs main+%#llx; TOTK_CAPTURE_RES=0 keeps 1080p); "
+            "captured again every frame: %s (TOTK_CAPTURE_REDO)\n",k,(unsigned long long)stub,redo?"on":"off, as shipped");
+#endif
+}
 #if !TARGET_OS_IPHONE
 void runtime_dof_set(int on){dof_off=!on;if(dof_flag)atomic_store(dof_flag,(uint32_t)dof_off);fprintf(stderr,"[totk] depth of field %s\n",on?"on":"off");}
 int runtime_dof_on(void){return !dof_off;}
@@ -1565,6 +1643,7 @@ void runtime_game_patches(Module *m) {
     patch_dof(m);
     patch_telescope(m);
     patch_font_raster(m);   /* local mod 0026: after the VR branches and the DOF stubs have their room */
+    patch_capture_res(m);   /* local patch 0035: sharp name cards (stubs after the telescope stub) */
     const char *enabled = getenv("TOTK_FPS60");
     if (enabled && !strcmp(enabled, "0")) {
         fprintf(stderr, "[totk] 1.4.3 shipping frame controller (TOTK_FPS60=0)\n");
