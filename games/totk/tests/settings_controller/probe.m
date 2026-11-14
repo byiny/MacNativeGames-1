@@ -32,38 +32,21 @@ int main(int argc,char **argv){@autoreleasepool{
  [NSApplication sharedApplication];controller_map_default(controllerMap,controllerModes);
  window=[[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,1000,760) styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable|NSWindowStyleMaskResizable backing:NSBackingStoreBuffered defer:NO];
  window.releasedWhenClosed=NO;window.contentView=[[TOTKInputView alloc] initWithFrame:window.contentView.bounds];
- /* L3 + R3 pressed together opens the panel at once (user 2026-10-29), not one of them alone; from there the game gets
-    nothing until both are released; once per press. A button picked in the key bindings replaces the chord, opens the
-    panel by itself, never reaches the game, and is saved in controller-settings.txt (-1: the chord, the file removed). */
+ /* Local (owner 2026-11-14): no controller button opens the panel (key 1 on the Mac does). L3 + R3 clicked together is
+    tilt mode (gyro_tilt.h); the game gets nothing more from the click until both are let go. A picked button is refused,
+    and an old controller-settings.txt is ignored. */
  hidPad=(HIDPadState){.present=1};runtime_gamepad_settings_enable(1);RuntimeGamepadState out;
- CHECK(SETTINGS_CHORD==((1ull<<4)|(1ull<<5))&&runtime_gamepad_settings_button()==-1);
- hidPad.buttons=1ull<<4;refresh_gamepads();CHECK(!runtime_gamepad_settings_requested());
- hidPad.buttons=0;refresh_gamepads();hidPad.buttons=1ull<<5;refresh_gamepads();CHECK(!runtime_gamepad_settings_requested());
- hidPad.buttons=1ull<<8|1ull<<9|1ull<<4;refresh_gamepads();CHECK(!runtime_gamepad_settings_requested());   /* the old chord does nothing */
- hidPad.buttons=0;refresh_gamepads();runtime_gamepad_read(&out);
- hidPad.buttons=1ull<<4;refresh_gamepads();hidPad.buttons=SETTINGS_CHORD;refresh_gamepads();
- CHECK(runtime_gamepad_settings_requested());CHECK(!runtime_gamepad_settings_requested());
- runtime_gamepad_read(&out);CHECK(!out.buttons&&textCapture==2);
- refresh_gamepads();CHECK(!runtime_gamepad_settings_requested());   /* once per press */
+ CHECK(runtime_gamepad_settings_button()==-1);
+ hidPad.buttons=1ull<<4;refresh_gamepads();hidPad.buttons=(1ull<<4)|(1ull<<5);refresh_gamepads();
+ CHECK(!runtime_gamepad_settings_requested());runtime_gamepad_read(&out);CHECK(!out.buttons&&textCapture==2);
  hidPad.buttons=0;refresh_gamepads();runtime_gamepad_read(&out);CHECK(textCapture==0);
- runtime_gamepad_settings_enable(0);hidPad.buttons=SETTINGS_CHORD;refresh_gamepads();CHECK(!runtime_gamepad_settings_requested());
- hidPad.buttons=0;refresh_gamepads();runtime_gamepad_read(&out);runtime_gamepad_settings_enable(1);
  NSString *saved=[@(argv[1]) stringByAppendingPathComponent:@"controller-settings.txt"];
- runtime_gamepad_settings_button_set(10);   /* the menu button (+ in the game) */
- CHECK(runtime_gamepad_settings_button()==10&&[[NSString stringWithContentsOfFile:saved encoding:NSUTF8StringEncoding error:nil] isEqualToString:@"menu\n"]);
- hidPad.buttons=SETTINGS_CHORD;refresh_gamepads();CHECK(!runtime_gamepad_settings_requested());
- runtime_gamepad_read(&out);CHECK(out.buttons);   /* the chord is the game's again */
- hidPad.buttons=0;refresh_gamepads();runtime_gamepad_read(&out);
- hidPad.buttons=1ull<<10;refresh_gamepads();CHECK(runtime_gamepad_settings_requested());
- runtime_gamepad_read(&out);CHECK(!(out.buttons&(1ull<<10)));
- hidPad.buttons=0;refresh_gamepads();runtime_gamepad_read(&out);runtime_gamepad_read(&out);CHECK(textCapture==0);
- hidPad.buttons=1ull<<10;refresh_gamepads();CHECK(runtime_gamepad_settings_requested());hidPad.buttons=0;refresh_gamepads();
- runtime_gamepad_read(&out);runtime_gamepad_read(&out);
- atomic_store(&settingsButton,-1);load_settings_button();CHECK(runtime_gamepad_settings_button()==10);   /* the next start reads it */
- runtime_gamepad_settings_button_set(-1);
- CHECK(runtime_gamepad_settings_button()==-1&&![NSFileManager.defaultManager fileExistsAtPath:saved]);
+ runtime_gamepad_settings_button_set(10);CHECK(runtime_gamepad_settings_button()==-1&&![NSFileManager.defaultManager fileExistsAtPath:saved]);
+ CHECK([@"menu\n" writeToFile:saved atomically:YES encoding:NSUTF8StringEncoding error:nil]);
+ load_settings_button();CHECK(runtime_gamepad_settings_button()==-1);
  hidPad.buttons=1ull<<10;refresh_gamepads();CHECK(!runtime_gamepad_settings_requested());runtime_gamepad_read(&out);CHECK(out.buttons);
  hidPad.buttons=0;refresh_gamepads();runtime_gamepad_read(&out);
+ [NSFileManager.defaultManager removeItemAtPath:saved error:nil];
  /* The screenshot button (user 2026-11-11): the touchpad by default; held 3 s it takes one picture through the capture
     button's hook, once per hold, and not before; released, the next hold takes another. It keeps driving what it drives
     (the menu button below still reaches the game), and a picked button is saved in controller-screenshot.txt ("none": none;
