@@ -1391,7 +1391,12 @@ static void patch_sensor_shrines(Module *m) {
    panics it guards against came at about 15 GB resident.
    1.6.0 has the same shipped heaps (StarterPackMgr 225 / 20 MiB at main+0x1778ce0, compaction 500 MiB at main+0x182fad0),
    and the pack's own 1.6.0.pchtxt cannot be used as it stands: its memory and root heap lines are on sites
-   patch_output_res owns, so g_pchtxt_reserved refuses it. patch_hd_heaps writes the pack's other 1.6.0 values instead. */
+   patch_output_res owns, so g_pchtxt_reserved refuses it. patch_hd_heaps writes the pack's other 1.6.0 values instead.
+   1.9.0 also gets a 64 MiB shrine pack heap (2026-11-16: the owner could not enter the add-on shrine Dungeon120, the load
+   never ended). DungeonPackMgr (main+0xd0380c) loads Pack/<shrine>.pack into a heap it makes on the compaction heap's
+   temp buffer, 30 MiB as shipped (main+0x1560878). The pack's Dungeon120.pack is 31,954,600 bytes (shipped 22,863,848),
+   so the unit heap failed (main+0x156b6dc), the pack was never read, and the stage waited for the shrine's files as
+   loose files. The shipped pack padded to 28 MiB loaded, to 30 MiB it did not. The pack's largest shrine pack is 32.8 MB. */
 enum { HD_MEMORY_HEAP_MIB = 7680, HD_ROOT_HEAP_MIB = 7168, SHIPPED_MEMORY_HEAP_MIB = 3120, HD_GPU_BUDGET_MB = 7000 };
 int runtime_botw_hd_heaps(void) { const char *e = getenv("TOTK_BOTW_HD_HEAPS"); return e && !strcmp(e, "1") && !ios_code(); }
 #endif
@@ -2487,8 +2492,8 @@ static void patch_hd_heaps(Module *m) {   /* TOTK_BOTW_HD_HEAPS=1: the comment a
         {0x1778ce0u, 0x52a1c208u, 0xd2a37b08u},   /* StarterPackMgr: mov w8, #0xe100000 (225 MiB) -> 445.5 MiB */
         {0x1778ce4u, 0x52a02809u, 0x52a0c009u},   /* the same, other mode: mov w9, #0x1400000 (20 MiB) -> 96 MiB */
         {0x182fad0u, 0x52a3e808u, 0x52afa408u},   /* texture compaction "Main": mov w8, #0x1f400000 (500 MiB) -> 2002 MiB */
-        {0x182f368u, 0x52a2ec00u, 0xd2a8a000u},   /* ForResourceL: 374 -> 1104 MiB */
-        {0x182f3e0u, 0x320607e0u, 0xd2a6e000u},   /* ForResourceS: 192 -> 880 MiB */
+        {0x182f368u, 0x52a2ec00u, 0xd2a8a000u},   /* FixedHeap: 374 -> 1104 MiB (the name string at the site; not ForResourceL) */
+        {0x182f3e0u, 0x320607e0u, 0xd2a6e000u},   /* TexArcWork, a child of FixedHeap: 192 -> 880 MiB (not ForResourceS) */
         {0x182f39cu, 0x320a03e0u, 0x52a01800u},   /* 4 -> 12 MiB */
         {0xdfa578u, 0x52a03600u, 0x52a06c00u},    /* 27 -> 54 MiB */
         {0x1c8f060u, 0x52a05a00u, 0x52a06f00u},   /* 45 -> 55.5 MiB */
@@ -2517,6 +2522,8 @@ static void patch_hd_heaps(Module *m) {   /* TOTK_BOTW_HD_HEAPS=1: the comment a
         {0x127b730u, 0x52a21219u, 0x52a60419u},   /* ForResourceS, mode 1: 265 -> 770 MiB */
         {0x127b738u, 0x52a3b617u, 0x52a6e817u},   /* ForResourceL, mode 2: 475 -> 884 MiB */
         {0x127b73cu, 0x52a17c19u, 0x52a56e19u},   /* ForResourceS, mode 2: 190 -> 695 MiB */
+        {0x156087cu, 0x72a03c00u, 0x72a08000u},   /* shrine pack heap, its allocation: movk w0, #0x1e0, lsl #16 (0x1e01000) -> 0x4001000 */
+        {0x1560894u, 0x52a03c02u, 0x52a08002u},   /* the same, the size DungeonPackMgr reads: mov w2, #0x1e00000 (30 MiB) -> 64 MiB */
     };
     unsigned w, h; int native = runtime_output_res(&w, &h);
     const struct { uint32_t off, original; int kind; uint32_t word; } big[] = {   /* patch_output_res may have written them */
