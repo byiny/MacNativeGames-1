@@ -915,6 +915,7 @@ NSArray<NSString *> *totk_rt_seed_verified(uint64_t *kept, uint64_t *dropped) {
 
 NSString *totk_rt_variant(NSString *shader, int stage, const uint8_t *control, const uint8_t *code, NSDictionary *answers, NSArray *local, int may_defer) {
     uint64_t started = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    (void)totk_rt_dir();   // before the lock, as in totk_rt_known_variants: a first totk_rt_dir under it deadlocks (observed_keys_state; DM_PSO_MANIFEST=off reaches here first)
     pthread_mutex_lock(&g_rt_lock);
     // Called for the game's actual shader bytes, including when a prepared
     // variant already exists. Old cache files alone never become observed keys.
