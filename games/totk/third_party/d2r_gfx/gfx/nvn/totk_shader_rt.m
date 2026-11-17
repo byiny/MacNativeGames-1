@@ -1009,6 +1009,7 @@ static NSUInteger rt_list_put_on_seed(void) {
 }
 NSArray<NSString *> *totk_rt_known_variants(NSString *shader) {
     NSMutableArray<NSString *> *out = [NSMutableArray array];
+    (void)totk_rt_dir();   // its dispatch_once takes g_rt_lock (totk_rt_row_prefer_seed): run it before the lock, or a first call here deadlocks (TOTK_SHADER_PREFETCH=1 lanes, 2026-11-17)
     pthread_mutex_lock(&g_rt_lock);
     for (NSDictionary *v in variants_of(shader))
         if ([v isKindOfClass:NSDictionary.class] && [v[@"variant"] isKindOfClass:NSString.class]) [out addObject:v[@"variant"]];
