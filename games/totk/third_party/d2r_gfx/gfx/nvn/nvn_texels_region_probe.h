@@ -36,7 +36,12 @@ int mtl_probe_texels_region(void) {
             for(size_t j=0;j<hb;j++)for(size_t i=0;i<wb;i++)expected[base+nvn_bl_offset(r.xoffset/bw*bpb+i,r.yoffset/bh+j,is3d?r.zoffset+k:0,rb,rs,th,td)]=src[k*img+j*row+i];
         }
         nvn_dirty_protect(mem,size);uint64_t stamp=nvn_dirty_now();mtl_write_texels(&t,lv,0,&r,src,row,img);
-        if(memcmp(mem,expected,size)||atomic_load(&g_texels_gpu_writes)!=writes+(c!=13)||!nvn_dirty_since(mem,size,stamp))MDIE("texels-region production write case%d data=%d delta=%llu dirty=%d failures=%llu",c,memcmp(mem,expected,size),(unsigned long long)(atomic_load(&g_texels_gpu_writes)-writes),nvn_dirty_since(mem,size,stamp),(unsigned long long)atomic_load(&g_texels_gpu_failures));
+#if !defined(GAME_BOTW)
+        int gpu_write=c!=13&&!atomic_load(&g_wt_region);   /* texels_write_region takes the write first, on the CPU */
+#else
+        int gpu_write=c!=13;
+#endif
+        if(memcmp(mem,expected,size)||atomic_load(&g_texels_gpu_writes)!=writes+gpu_write||!nvn_dirty_since(mem,size,stamp))MDIE("texels-region production write case%d data=%d delta=%llu dirty=%d failures=%llu",c,memcmp(mem,expected,size),(unsigned long long)(atomic_load(&g_texels_gpu_writes)-writes),nvn_dirty_since(mem,size,stamp),(unsigned long long)atomic_load(&g_texels_gpu_failures));
         if(c==0){
             /* First Metal sample must see the completed pool write; an already GPU-owned texture must
                keep BOTH its pool mirror and its Metal texture updated by a later WriteTexels. */

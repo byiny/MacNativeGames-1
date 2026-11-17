@@ -19928,6 +19928,8 @@ static int texels_write_region(const tex_t *t, unsigned level, unsigned layer0, 
                                size_t x0, size_t y0, size_t wb, size_t hb, int nz, int is3d) {
     static int env = -1; if (env < 0) { const char *e = getenv("TOTK_WT_REGION"); env = !(e && !strcmp(e, "0")); if (!env) atomic_store(&g_wt_region, 0); }
     if (!atomic_load_explicit(&g_wt_region, memory_order_relaxed) || nvn_tex_is_linear(&t->d) || x0 > UINT32_MAX || y0 > UINT32_MAX || wb > UINT32_MAX || hb > UINT32_MAX) return 0;
+    { uintptr_t sp = (uintptr_t)src, se = sp + (size_t)(nz - 1) * img + (hb - 1) * row + wb, mp_ = (uintptr_t)t->mem;   // a source inside the texture's own storage keeps the whole-level path (it reads every source byte before it writes)
+      if (sp < mp_ + t->L.size && mp_ < se) return 0; }
     for (int z = 0; z < nz; z++) {   // every slice first: nothing is written unless all of them fit
         uint64_t lo, hi;
         if (nvn_swizzle_region_span(&t->d, level, is3d ? 0 : layer0 + r->zoffset + z, (uint32_t)y0, is3d ? (uint32_t)(r->zoffset + z) : 0, (uint32_t)hb, &lo, &hi) || hi > t->L.size) return 0;
