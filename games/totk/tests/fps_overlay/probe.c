@@ -100,6 +100,12 @@ int main(void) {
     CHECK(w > 0 && w <= FPS_OVERLAY_TEX_W && h <= FPS_OVERLAY_TEX_H, "longest FPS line %dx%d outside the texture", w, h);
 
     { char fl[96];
+      setenv("TOTK_OUTPUT_RES", "screen", 1);
+      fps_overlay_text(&(fps_overlay_info){54, 3456, 1944, 0, 0, 1, 0, 0}, fl, sizeof fl);
+      CHECK(!strcmp(fl, "FPS 54  3456x1944  screen"), "screen size label: %s", fl);
+      unsetenv("TOTK_OUTPUT_RES");
+      fps_overlay_text(&(fps_overlay_info){54, 3456, 1944, 0, 0, 1, 0, 0}, fl, sizeof fl);
+      CHECK(!strcmp(fl, "FPS 54  3456x1944"), "no 2K label at 3456x1944: %s", fl);
       fps_overlay_text(&(fps_overlay_info){60, 3840, 2160, 0, 0, 2, 0, 0}, fl, sizeof fl);
       CHECK(!strcmp(fl, "FPS 60  3840x2160  4K"), "native 4K label: %s", fl);
       fps_overlay_text(&(fps_overlay_info){55, 5120, 2880, 0, 0, 3, 0, 0}, fl, sizeof fl);

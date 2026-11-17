@@ -2279,6 +2279,36 @@ def source_commit():
     return result.stdout.strip() if result.returncode == 0 else ''
 
 
+# The files both icon tools import (make_button_icons.py and botw_prompts.py with their lazy imports, the closure found with
+# modulefinder), under games/; controller_map.h is read by prompt_layout.py. An edit of any other script leaves the kit id alone.
+ICON_KIT_FILES = (
+    'totk/runtime/controller_map.h', 'totk/scripts/make_button_icons.py', 'totk/scripts/make_mod_manifest.py', 'totk/scripts/make_romfs_patches.py',
+    'totk/scripts/prepare_shader_seed.py', 'totk/scripts/prompt_assets.py', 'totk/scripts/prompt_layout.py', 'totk/scripts/sarc_repack.py',
+    'totk/scripts/shader_list.py', 'totk/scripts/totk_controller_art.py', 'totk/scripts/totk_prompt_art.py',
+    'botw/scripts/botw_controller_art.py', 'botw/scripts/botw_formats.py', 'botw/scripts/botw_prompts.py')
+
+
+def button_icons_kit(tree, res, version, game):
+    """The button icon tools inside the app (Contents/Resources/totk/button-icons, app/launcher.m button_icons): at each start
+    the launcher makes, once, the prompts for the controller type, face mode and controls.txt in use (docs/mods.md). The
+    scripts keep the repo layout (games/botw/scripts finds the shared ones at ../../totk/scripts), and kit.txt names the work
+    folder's Python (fontTools: requirements.txt), the tool and an id over the scripts and the RomFS the app plays, so a
+    set made for an earlier build is never loaded."""
+    kit = res / 'button-icons'
+    digest = hashlib.sha256()
+    for path in (tree.parent / name for name in ICON_KIT_FILES):
+        rel = Path('games') / path.relative_to(tree.parent)
+        (kit / rel).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, kit / rel)
+        digest.update(f'{rel}\n'.encode() + path.read_bytes())
+    romfs = tree / f'extracted/{version}'
+    digest.update((romfs / 'romfs/runtime-index.bin').read_bytes())
+    for manifest in sorted(romfs.glob('romfs-patches*/**/manifest.tsv')) or ['none']:   # Breath of the Wild has no RomFS overlays
+        digest.update(manifest.read_bytes() if isinstance(manifest, Path) else b'none')
+    tool = 'games/botw/scripts/botw_prompts.py' if game == 'botw' else 'games/totk/scripts/make_button_icons.py'
+    (kit / 'kit.txt').write_text(f'python={tree.resolve() / ".venv/bin/python"}\ntool={tool}\nid={digest.hexdigest()}\n')
+
+
 def write_main_build_id(nso, target):
     if not nso.is_file():
         return
@@ -2298,7 +2328,7 @@ def app_modules(version):
     return [f'rewritten/{version}/{name}' for name in sorted(VERSIONS[version]['rewritten_sha256'])]
 
 
-def step_app(tree, out, logs, *, version="v0", game='totk', game_data='app', game_data_folder=None, native_4k=False, native_5k=None):
+def step_app(tree, out, logs, *, version="v0", game='totk', button_icons=False, game_data='app', game_data_folder=None, native_4k=False, native_5k=None):
     expected = VERSIONS[version]
     app_name, bundle_id, executable = APPS[game]
     tmp = out.with_name(out.name + '.partial')
@@ -2316,6 +2346,8 @@ def step_app(tree, out, logs, *, version="v0", game='totk', game_data='app', gam
     for rel in (f'extracted/{version}/romfs-patches', f'extracted/{version}/romfs-patches-out', 'extracted/firmware/shared-fonts'):
         if (tree / rel).is_dir():   # Breath of the Wild has no RomFS overlays
             copy_tree(tree / rel, res / rel)
+    if button_icons:
+        button_icons_kit(tree, res, version, game)
     botw_5k = game == 'botw' and native_5k_enabled('macos', version, native_5k, native_4k)
     if game == 'botw' and (native_4k or botw_5k):   # the runtime sizes the code-owned heaps for this capability
         (res / f'extracted/{version}/native-4k').write_text('3840x2160\n')   # game_patches_botw.c native_4k_app
@@ -3140,6 +3172,10 @@ def parse_args(argv):
                          'and its manifest.tsv, so the app plays with the mod. That folder is the player\'s: what it '
                          'held is moved next to it as <version>.backup-<date>-<time>, not deleted. Without this flag '
                          'the build leaves the folder alone and prints the two commands that fill it by hand')
+    ap.add_argument('--button-icons', action=argparse.BooleanOptionalAction,
+                    help='draw the game\'s button prompts for the controller in use: Xbox or PlayStation from key 6\'s type or the '
+                         'connected controller, with controls.txt (made at start, once per setting; docs/mods.md). On by default '
+                         'for Breath of the Wild (1.6.0 and 1.9.0), off for Tears of the Kingdom; needs fontTools in the work folder\'s Python')
     ap.add_argument('--shader-cache', type=Path, help=argparse.SUPPRESS)   # removed: the seed comes from the game data and the shared list
     ap.add_argument('--no-shader-reminder', action='store_true', help='no longer used (2026-11-10: the devices contribute their shaders on their own); kept so older commands still run')
     ap.add_argument('--native-4k', action=argparse.BooleanOptionalAction, default=None,
@@ -3319,7 +3355,8 @@ def main(argv):
             say('Install it with games/totk/ios/tools/install_device.py' + (f' --game-data {tree}/extracted/{version}/romfs/romfs.bin'
                 if args.ios_game_data == 'documents' else '') + '; saves and the shader cache stay in the app\'s Documents.')
             return
-        step_app(tree, out, logs, version=version, game='botw', game_data=args.mac_game_data, game_data_folder=game_data_folder,
+        step_app(tree, out, logs, version=version, game='botw', button_icons=True if args.button_icons is None else args.button_icons,
+                 game_data=args.mac_game_data, game_data_folder=game_data_folder,
                  native_4k=native_4k, native_5k=native_5k if args.native_5k is not None else (False if args.native_4k is False else None))
         run([LSREGISTER, '-f', out], logs / 'register-app.log')
         say('4/4 app: macOS checks the app once (seconds when this app folder was checked before, a few minutes for a new one)')
@@ -3411,7 +3448,7 @@ def main(argv):
              *[x for g in args.device_gpu or [] for x in ('--device-gpu', g)]], logs/'build-ipa.log', cwd=tree, env=env)
         say_device_pipelines(logs)
     else:
-        step_app(tree, out, logs, version=version, game_data=args.mac_game_data, game_data_folder=game_data_folder,
+        step_app(tree, out, logs, version=version, button_icons=bool(args.button_icons), game_data=args.mac_game_data, game_data_folder=game_data_folder,
                  native_5k=False if args.native_4k is False else args.native_5k)
     # Refresh an existing app's version, executable and signing identity before
     # the next Finder launch; the desktop alias keeps pointing to this bundle.

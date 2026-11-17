@@ -295,6 +295,22 @@ static void load_controller_type(void) {
 
 static void save_controller_type(int type) { setting_write("controller-type.txt", gamepad_type_name(type), "controller type"); }
 
+/* The button icons app/launcher.m loaded for this start (TOTK_BUTTON_ICONS: xbox-position, playstation-label, switch-label,
+   none, or mod when the player's mods hold their own; unset: the launcher picks none, as in a Tears of the Kingdom app), at
+   the size TOTK_BUTTON_ICONS_SCALE (switch only at 2 or more: gamepad_icon_style). They change only
+   at the next start (runtime/romfs.c reads them once), so a new type or controller is logged for then. Main thread. */
+static void button_icons_report(const char *why) {
+    const char *loaded = getenv("TOTK_BUTTON_ICONS");
+    if (!loaded || !strcmp(loaded, "mod")) return;
+    int detected = -1, type = runtime_gamepad_type(&detected), by_position = 1;
+    if (type == GAMEPAD_TYPE_AUTO && detected < 0) return;   /* no controller now: the launcher takes the last one seen */
+    const char *scale = getenv("TOTK_BUTTON_ICONS_SCALE");
+    int style = gamepad_icon_style(type, detected, scale ? atoi(scale) : 1, &by_position);
+    char wanted[40];
+    snprintf(wanted, sizeof wanted, "%s%s%s", style < 0 ? "none" : gamepad_type_name(style), style < 0 ? "" : "-", style < 0 ? "" : by_position ? "position" : "label");
+    if (strcmp(wanted, loaded)) fprintf(stderr, "[totk-input] button icons: %s now, %s from the next start (%s)\n", loaded, wanted, why);
+}
+
 static int face_by_position(GCController *controller) {
     return gamepad_type_face_by_position(atomic_load(&controllerType), controller.productCategory.UTF8String, controller.vendorName.UTF8String);
 }
@@ -533,6 +549,10 @@ static int hid_pad_attach(IOHIDDeviceRef device, char *why, size_t n) {
     if (hidOrder == GAMEPAD_HID_SWITCH_PRO) fprintf(stderr, ", sticks scaled to their reach, full at %.0f%%", GAMEPAD_HID_FULL_AT * 100);
     fprintf(stderr, "\n");
     refresh_gamepads();
+    if (getenv("TOTK_BUTTON_ICONS")) {   /* Switch-style (runtime_gamepad_type): Switch icons at the next start in auto */
+        setting_write("controller-detected.txt", gamepad_type_name(GAMEPAD_TYPE_SWITCH), "connected controller");
+        button_icons_report("controller connected");
+    }
     return HID_TAKEN;
 }
 
@@ -700,6 +720,7 @@ void runtime_mouse_set_hook(void (*hook)(void)) { mouseHook = hook; }
 /* The settings panel's button (key bindings): -1 the L3 + R3 chord, else the physical button, saved in
    controller-settings.txt by its controls.txt name; -1 removes the file. */
 static void load_settings_button(void) {
+    return;   /* local (owner 2026-11-14): no controller button opens the settings panel; an old controller-settings.txt is ignored */
     char path[4096], word[32] = {0};
     if (!setting_read("controller-settings.txt", word, sizeof word, path, sizeof path)) return;
     word[strcspn(word, " \t\r\n")] = 0;
@@ -746,15 +767,15 @@ void runtime_gamepad_screenshot_button_set(int physical) {
     fprintf(stderr, "[totk-input] screenshot button: %s\n", physical < 0 ? "none" : controller_physical_names[physical]);
 }
 void runtime_gamepad_settings_button_set(int physical) {
-    if (physical > CONTROLLER_SWITCH_BUTTONS) return;
-    if (physical < 0) physical = -1;
+    if (physical >= 0) return;   /* local (owner 2026-11-14): no controller button opens the settings panel */
+    physical = -1;
     atomic_store(&settingsButton, physical);
     pthread_mutex_lock(&gamepadLock);
     settingsShortcutDown = (textPad.buttons & settings_trigger()) == settings_trigger();
     pthread_mutex_unlock(&gamepadLock);
     if (physical < 0) runtime_setting_remove("controller-settings.txt");
     else setting_write("controller-settings.txt", controller_physical_names[physical], "settings panel button");
-    fprintf(stderr, "[totk-input] settings panel button: %s\n", physical < 0 ? "L3 + R3" : controller_physical_names[physical]);
+    fprintf(stderr, "[totk-input] settings panel button: %s\n", physical < 0 ? "none (key 1 on the Mac)" : controller_physical_names[physical]);
     gamepad_gestures_changed();
     refresh_gamepads();
 }
@@ -842,7 +863,7 @@ static void awake_note_input(void) {   /* any thread */
 }
 #endif
 /* ---- Tilt mode (runtime/gyro_tilt.h) ----
-   For the motion-control puzzles on a controller without motion sensors. LB + LT (Switch L + ZL) pressed together turn it on and off,
+   For the motion-control puzzles on a controller without motion sensors. L3 + R3 (both sticks) clicked together turn it on and off,
    when gyro_tilt_allowed says so (TOTK_GYRO_EMU; by default only while no controller feeds real motion). While on, a
    10 ms timer turns a virtual controller lying face up by the sticks (left: tilt, right x: turn, each about the player's
    axes at a speed; let go and it stays, gyro_tilt.h) and feeds the pose to the sensor in the mouse's place
@@ -1079,11 +1100,12 @@ static void refresh_gamepads(void) {
             if (!textCapture) textCapture = 2;
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(850 * NSEC_PER_MSEC)), dispatch_get_main_queue(), ^{ refresh_gamepads(); });
         }
-        if (chord && !chordLong && now - chordAt >= 800000000ULL) { chordLong = 1; settingsShortcutPending = 1; }
+        if (chord && !chordLong && now - chordAt >= 800000000ULL) chordLong = 1;   /* local: no settings panel from the controller */
         if (!chord && settingsShortcutDown && !chordLong) recenter();
-    } else if (chord && !settingsShortcutDown) {
-        settingsShortcutPending = 1;
-        if (!textCapture) textCapture = 2;   /* from here the game no longer gets the controller, until it is released */
+    } else if (tiltPressed && !textCapture) {
+        /* Local (owner 2026-11-14): L3 + R3 is tilt mode, no controller button opens the settings panel (key 1 on the Mac
+           does). The game gets nothing more from the click, until both sticks are let go. */
+        textCapture = 2;
     }
     settingsShortcutDown = chord;
     /* The screenshot button held CONTROLLER_SCREENSHOT_HOLD_MS: one picture per hold. A button held still sends no report,
@@ -1113,10 +1135,10 @@ static void refresh_gamepads(void) {
     (void)changed;
 #endif
     /* After the unlock: the tilt timer takes gamepadLock. The last controller gone: tilt mode ends, so the keyboard drives again. */
-    if (tiltPressed) tilt_toggle("LB + LT");
+    if (tiltPressed) tilt_toggle("L3 + R3");
     else if (!next.connected && atomic_load(&tiltMode)) tilt_toggle("controller disconnected");
     else if (atomic_load(&tiltMode) && !gyro_tilt_allowed(getenv("TOTK_GYRO_EMU"), runtime_gyro_enabled(), runtime_motion_controller_live()))
-        tilt_toggle("a controller with a gyro of its own is in use");   /* LB + LT is off for those too (gyro_tilt_allowed) */
+        tilt_toggle("a controller with a gyro of its own is in use");   /* L3 + R3 is off for those too (gyro_tilt_allowed) */
     else if (tiltCancel && atomic_load(&tiltMode)) { atomic_store(&tiltReset, runtime_now_ns() + TILT_RESET_NS); fprintf(stderr, "[totk-input] tilt mode: B pressed, the controller turns back to flat in %.1f s\n", TILT_RESET_NS / 1e9); }
 }
 
@@ -1143,6 +1165,10 @@ static void attach_gamepad(GCController *controller) {
     }
     runtime_feedback_attach(controller);
     refresh_gamepads();
+    if (getenv("TOTK_BUTTON_ICONS")) {   /* the launcher's pick for auto at the next start, when no controller is on yet */
+        setting_write("controller-detected.txt", gamepad_type_name(gamepad_type_detect(controller.productCategory.UTF8String, controller.vendorName.UTF8String)), "connected controller");
+        button_icons_report("controller connected");
+    }
 }
 
 /* The settings panel (key 1, frontend.m): auto, Xbox, PlayStation or Switch; the held buttons are read again at once. */
@@ -1158,6 +1184,7 @@ int runtime_gamepad_type_set(int type) {
                 fprintf(stderr, "[totk-input] %s: face buttons by %s\n", (controller.vendorName ?: @"unknown").UTF8String,
                         face_by_position(controller) ? "position" : "label");
         refresh_gamepads();
+        button_icons_report("key 6");
     });
     return type;
 }

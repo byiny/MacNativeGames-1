@@ -44,6 +44,15 @@ static inline int bow_state_botw190(uint64_t main_base, BowRead read) {
     return timer > 0 ? BOW_DRAWN : BOW_NOT_DRAWN;
 }
 
+/* Breath of the Wild 1.6.0: no game site holds 1.9.0's timer, so the runtime counts the frames ZR was in the state it gave the
+   game (runtime_zr_frames, input.c), the number the game's own counter would hold. Like it, ZR held with no bow reads drawn. */
+#ifdef GAME_BOTW160
+static inline int bow_state_zr_frames(uint32_t frames) { return frames ? BOW_DRAWN : BOW_NOT_DRAWN; }
+/* The count as input.c gives it out: 0 while the pad in use is not connected (a disconnect reads no more states, so a ZR
+   held at that moment would keep the old count and R2 resisting). */
+static inline uint32_t bow_zr_frames_read(uint32_t frames, int connected) { return connected ? frames : 0; }
+#endif
+
 enum { TOTK_SCENE = 0x1e8, TOTK_SCENE_COUNT = 0x50, TOTK_SCENE_COMPONENTS = 0x58, TOTK_RESIDENT = 13, TOTK_LINK_COUNT = 0x20,
        TOTK_LINKS = 0x28, TOTK_LINK_STRIDE = 0x70, TOTK_LINK_DATA = 8, TOTK_DATA_ACTOR = 0x40, TOTK143_PLAYER_BLOCK = 0x248,
        TOTK143_BLOCK_STATE = 0x760, TOTK143_STATE_BYTE = 9, TOTK143_STATE_DRAWN = 0x20, TOTK143_ACTOR_FLAGS = 0x5ac,

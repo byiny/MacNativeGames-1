@@ -406,6 +406,33 @@ void ui_pack_harvest(const char *fs_key, const tex_t *t);
 #define UI_PACK_OWNED(pk)
 #define UI_PACK_FREE()
 #endif
+/* Fog-of-war map (local patch 0004, games/botw/gfx/botw_fog_map.h, included at the end of nvn_mtl.m): its own hooks, next to the
+   UI_PACK_* ones (BOTW 1.9.0 only). */
+#if defined(GAME_BOTW190)
+extern int g_fog;   /* -1 not yet set up, 0 off, 1 on */
+void botw_fog_uploaded(void *pk, const tex_t *t);
+void *botw_fog_pick(void *rp, void *base);
+#define FOG_PKG_FIELDS id fog;   /* the map tile object of this texture (BotwFogTile) */
+#define FOG_TP_UPLOADED(pk, t) if (g_fog) botw_fog_uploaded((__bridge void *)(pk), (t));
+#define FOG_TP_BASE(rp, b) if (g_fog > 0) (b) = (__bridge id<MTLTexture>)botw_fog_pick((rp), (__bridge void *)(b));
+#define FOG_TP_VIEW(rp, r, b) if (g_fog > 0) { void *tp_ = botw_fog_pick((rp), (__bridge void *)(b)); if (tp_ != (__bridge void *)(b)) { (b) = (__bridge id<MTLTexture>)tp_; (r).v.set_format = 0; } }
+#elif !defined(GAME_BOTW) && !defined(GAME_NS2) && !(defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE)
+/* TOTK 1.4.3 fog-of-war map (local mod, totk_fog_gfx.h at the end of nvn_mtl.m): the map tile textures it darkens are
+   the sampling base of the texture-pool slots that view them whole. g_totk_fog stays 0 until the 1.4.3 runtime starts it.
+   Each FOG_TP_* call comes after the UI_PACK_* call at the same site, so the fog wins. */
+extern int g_totk_fog;
+void totk_fog_uploaded(void *pk, const tex_t *t);
+void *totk_fog_pick(void *rp, void *base);
+#define FOG_PKG_FIELDS id fog;
+#define FOG_TP_UPLOADED(pk, t) if (g_totk_fog > 0) totk_fog_uploaded((__bridge void *)(pk), (t));
+#define FOG_TP_BASE(rp, b) if (g_totk_fog > 0) (b) = (__bridge id<MTLTexture>)totk_fog_pick((rp), (__bridge void *)(b));
+#define FOG_TP_VIEW(rp, r, b) if (g_totk_fog > 0) { void *tp_ = totk_fog_pick((rp), (__bridge void *)(b)); if (tp_ != (__bridge void *)(b)) { (b) = (__bridge id<MTLTexture>)tp_; (r).v.set_format = 0; } }
+#else
+#define FOG_PKG_FIELDS
+#define FOG_TP_UPLOADED(pk, t)
+#define FOG_TP_BASE(rp, b)
+#define FOG_TP_VIEW(rp, r, b)
+#endif
 /* Key 5 (MetalFX temporal anti-aliasing, totk_taa.m): the compose draw that samples the linear HDR scene at fragment
    texture slot 0 before tone mapping. TOTK: 0ac9a549 (tone mapping and bloom). Breath of the Wild 1.9.0: f7ee6fe1 (two
    texel reads: the 1600x900 R11G11B10F scene at slot 0, the 320x180 bloom at slot 1; it writes the 1600x900 RGB10A2

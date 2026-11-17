@@ -25,6 +25,9 @@ Styles:
             L R = L1 R1, ZL ZR = L2 R2, + - = Options and Create, the d-pad as a cross.
   playstation-label  the same, but A B X Y = Cross Circle Square Triangle, for TOTK_FACE_BUTTONS=label or a
             controls.txt with south = a, east = b, west = x, north = y.
+--face-buttons and --controls make xbox and playstation follow your setup: with your controls.txt the prompt for each Switch
+button shows the controller button you really press for it (the prompts listed before are for the default layout). The
+script prints one line per Switch button (`Switch A <- Xbox X`) so you can check it. prompt_layout.py does the work.
 The button guide in play is not drawn with this font but from eight textures of the common layout archive (A B X Y, L,
 ZL and two left-stick keys); they are redrawn from the same icons (HUD_TEXTURES). Other prompts drawn as fixed images
 (some tutorial animations) keep the Switch icons.
@@ -41,10 +44,17 @@ mod with each archive's entry at least the original entry plus what the archive 
 
 Needs fontTools (python3.14 -m pip install fonttools) and Python 3.14 (compression.zstd). An existing font archive in the mod
 folder (another mod's, or an earlier run) is only overwritten with --replace. The xbox style matches the default face-button
-mapping by position (not TOTK_FACE_BUTTONS=label or face buttons changed in controls.txt).
-usage: make_button_icons.py <mod folder> (--app <Tears of the Kingdom.app> | --romfs <folder>) [--version v121] [--style xbox] [--replace]
+mapping by position (for TOTK_FACE_BUTTONS=label or face buttons changed in controls.txt, pass --face-buttons and --controls).
+--our-art (xbox and playstation): draw the buttons with the Breath of the Wild art (botw_prompts.py) fitted on the box of each
+Switch glyph and button guide mask of this game (totk_prompt_art.py), with the advances of the game's glyphs; it needs the
+Switch system font of the app's firmware folder (extracted/firmware/shared-fonts/0-standard.bfttf). --our-art also redraws
+Controller_{Console,Grip,Pro}^w and their shadows in the same layout archive (totk_controller_art.py, BC5 in place), the tilted
+pictures Controller_*1^w of the ability guides with their shadows and R/ZR masks, the d-pad shortcut icon, and the 15 letters of the
+action popup (DoCommand_00).
+usage: make_button_icons.py <mod folder> (--app <Tears of the Kingdom.app> | --romfs <folder>) [--version v121] [--style xbox] [--face-buttons position|label] [--controls controls.txt] [--our-art] [--replace]
 """
 import argparse
+import fnmatch
 import io
 import struct
 import sys
@@ -58,6 +68,8 @@ except ImportError:
     sys.exit('needs Python 3.14 (compression.zstd): run it with python3.14')
 import make_mod_manifest
 from make_mod_manifest import VERSIONS, app_image_dir, merge_build_patches, read_index, write_manifest
+from sarc_repack import repack
+from prompt_layout import FACE_MODES, LayoutError, describe, prompt_controls
 
 try:
     from fontTools.pens.basePen import BasePen
@@ -72,6 +84,8 @@ except ImportError:
 
 ARCHIVE = 'Font/Font.Nin_NX_NVN.bfarc.zs'  # the default archive; the text fonts for the key letters are read from it
 FONT = 'scft/External.bfotf'
+MESSAGES_LEVEL = 9   # level 19 takes 2.5 s an archive (37 s for the 15); level 9 gives files 20% larger in 0.3 s
+MESSAGES = 'Mals/*.Product.*.sarc.zs'   # the message archives, one a language; --our-art patches the popup letters in them
 TEXT_FONTS = ('scft/ninP_RodinNTLG-B_DH_003_subset.bfotf', 'scft/nintendo_NTLG-DB_DH_002.bfotf')
 MAGIC = 0x18029a7f
 
@@ -125,35 +139,6 @@ def bfotf_encode(otf, key):
     for i in range(0, size - size % 4, 4):
         out += struct.pack('<I', struct.unpack_from('<I', otf, i)[0] ^ key)
     return bytes(out + otf[size - size % 4:])
-
-
-def repack(sarc, name, blob):
-    """The SARC with member `name` replaced by `blob`, every other member byte-identical, in the original order and alignment."""
-    start = struct.unpack_from('<I', sarc, 12)[0]
-    fat = 0x14; count = struct.unpack_from('<H', sarc, fat + 6)[0]
-    nodes = [list(struct.unpack_from('<4I', sarc, fat + 12 + i * 16)) for i in range(count)]
-    members = sarc_members(sarc); by_range = {(lo, hi): k for k, (lo, hi) in members.items()}
-    blobs = [blob if by_range[(start + n[2], start + n[3])] == name else sarc[start + n[2]:start + n[3]] for n in nodes]
-
-    def alignment(offset):
-        a = 1
-        while offset % (a * 2) == 0 and a < 0x2000:
-            a *= 2
-        return a
-    data, placed = bytearray(), {}
-    for i in sorted(range(count), key=lambda i: nodes[i][2]):
-        a = alignment(nodes[i][2]) if nodes[i][2] else 1
-        while len(data) % a:
-            data += b'\0'
-        placed[i] = (len(data), len(data) + len(blobs[i])); data += blobs[i]
-    head = bytearray(sarc[:start])
-    for i in range(count):
-        struct.pack_into('<II', head, fat + 12 + i * 16 + 8, *placed[i])
-    out = bytearray(bytes(head) + bytes(data)); struct.pack_into('<I', out, 8, len(out)); out = bytes(out)
-    check = sarc_members(out)
-    for k, (lo, hi) in members.items():
-        assert out[check[k][0]:check[k][1]] == (blob if k == name else sarc[lo:hi]), k
-    return out
 
 
 # ---- drawing (units of the font's 1000-unit em; the round A/B/X/Y icons fill y 20..585) ----
@@ -315,7 +300,9 @@ def stick(g, label, up=False, advance=640):
     return advance, draw
 
 
-def xbox_style(g):
+def xbox_drawers(g):
+    """Drawers of the Xbox controller buttons (keys of prompt_layout.prompt_controls) and the glyphs that no controller button
+    remaps (the d-pad and the left stick of the button guide) by code point."""
     def face(letter, advance=640):
         def draw(pen):
             circle(pen, advance / 2, CY, R); g.hole(pen, letter, advance / 2, CY, R * 0.95, R * 1.3)
@@ -354,14 +341,12 @@ def xbox_style(g):
             for d in lit:
                 polygon(pen, heads[d])   # already clockwise: a hole
         return advance, draw
-    return {
-        0xE040: face('B'), 0xE041: face('A'), 0xE042: face('Y'), 0xE043: face('X'),
-        0xE044: bumper('LB'), 0xE045: bumper('RB'), 0xE046: trigger('LT'), 0xE047: trigger('RT'),
-        0xE04B: menu(), 0xE04C: view(),
-        0xE049: dpad('up', 'down', 'left', 'right'), 0xE060: dpad('up'), 0xE061: dpad('down'),
-        0xE062: dpad('left'), 0xE063: dpad('right'), 0xE064: dpad('up', 'down'), 0xE065: dpad('left', 'right'),
-        0xE052: stick(g, 'LS', up=True), 0xE05E: stick(g, 'LS'),
-    }
+    drawers = {'a': face('A'), 'b': face('B'), 'x': face('X'), 'y': face('Y'), 'l1': bumper('LB'), 'r1': bumper('RB'),
+               'l2': trigger('LT'), 'r2': trigger('RT'), 'menu': menu(), 'view': view(), 'l3': face('LS'), 'r3': face('RS')}
+    fixed = {0xE049: dpad('up', 'down', 'left', 'right'), 0xE060: dpad('up'), 0xE061: dpad('down'),
+             0xE062: dpad('left'), 0xE063: dpad('right'), 0xE064: dpad('up', 'down'), 0xE065: dpad('left', 'right'),
+             0xE052: stick(g, 'LS', up=True), 0xE05E: stick(g, 'LS')}
+    return drawers, fixed
 
 
 def oriented(pen, points, hole):
@@ -370,9 +355,9 @@ def oriented(pen, points, hole):
     polygon(pen, points if (area > 0) != hole else points[::-1])
 
 
-def playstation_style(g, by_label=False):
-    """DualSense / DualShock symbols. By position (the default mapping): A B X Y = Circle Cross Triangle Square.
-    by_label (TOTK_FACE_BUTTONS=label, or controls.txt south = a, east = b, west = x, north = y): Cross Circle Square Triangle."""
+def playstation_drawers(g):
+    """Drawers of the DualSense / DualShock buttons by Xbox name (the keys of prompt_layout.prompt_controls): a Cross, b Circle,
+    x Square, y Triangle - the same places as Xbox A B X Y - and the d-pad glyphs by code point."""
     def face(symbol, advance=640):
         def draw(pen):
             cx, s = advance / 2, R * 0.50   # symbol half size
@@ -415,23 +400,44 @@ def playstation_style(g, by_label=False):
             for dx in (-110, 0, 110):
                 oriented(pen, [(cx + dx - 30, CY - 150), (cx + dx + 30, CY - 150), (cx + dx + 30, CY + 150), (cx + dx - 30, CY + 150)], hole=True)
         return advance, draw
-    dpad_style = xbox_style(g)
-    a, b, x, y = ('cross', 'circle', 'square', 'triangle') if by_label else ('circle', 'cross', 'triangle', 'square')
-    icons = {
-        0xE040: face(a), 0xE041: face(b), 0xE042: face(x), 0xE043: face(y),
-        0xE044: bumper('L1'), 0xE045: bumper('R1'), 0xE046: trigger('L2'), 0xE047: trigger('R2'),
-        0xE04B: options(), 0xE04C: create(),
-        0xE052: stick(g, 'L3', up=True), 0xE05E: stick(g, 'L3'),
-    }
-    for cp in (0xE049, 0xE060, 0xE061, 0xE062, 0xE063, 0xE064, 0xE065):   # the d-pad is drawn as for Xbox
-        icons[cp] = dpad_style[cp]
-    return icons
+    def stick_press(label, advance=640):
+        def draw(pen):
+            circle(pen, advance / 2, CY, R); g.hole(pen, label, advance / 2, CY, R * 0.95, R * 1.3)
+        return advance, draw
+    fixed = {**xbox_drawers(g)[1], 0xE052: stick(g, 'L3', up=True), 0xE05E: stick(g, 'L3')}   # the d-pad is drawn as for Xbox
+    drawers = {'a': face('cross'), 'b': face('circle'), 'x': face('square'), 'y': face('triangle'),
+               'l1': bumper('L1'), 'r1': bumper('R1'), 'l2': trigger('L2'), 'r2': trigger('R2'), 'menu': options(), 'view': create(),
+               'l3': stick_press('L3'), 'r3': stick_press('R3')}
+    return drawers, fixed
+
+
+# The Switch buttons the TOTK font has a glyph for (code points U+E040 to U+E068). A prompt names its Switch button,
+# prompt_layout says which controller button the player presses.
+SLOT_CODEPOINTS = {'a': 0xE040, 'b': 0xE041, 'x': 0xE042, 'y': 0xE043, 'l': 0xE044, 'r': 0xE045, 'zl': 0xE046, 'zr': 0xE047,
+                   'plus': 0xE04B, 'minus': 0xE04C, 'lstick': 0xE056, 'rstick': 0xE057}
+
+
+def slot_glyphs(drawers, controls):
+    """Switch button -> (advance, draw) of the controller button that drives it; a button nothing drives is left out."""
+    return {slot: drawers[pad] for slot, pad in controls.items() if pad in drawers}
+
+
+def icons_for(make, g, controls):
+    drawers, fixed = make(g)
+    icons = {SLOT_CODEPOINTS[slot]: glyph for slot, glyph in slot_glyphs(drawers, controls).items() if slot in SLOT_CODEPOINTS}
+    return {**fixed, **icons}
+
+
+def default_controls(face_buttons='position'):
+    return prompt_controls('', face_buttons)
 
 
 AZERTY = str.maketrans('QWAZ', 'AZQW')   # US key position -> the letter an AZERTY keyboard prints there
 
-STYLES = {'keyboard': keyboard_style, 'azerty': lambda g: keyboard_style(g, AZERTY), 'xbox': xbox_style, 'playstation': playstation_style,
-          'playstation-label': lambda g: playstation_style(g, by_label=True)}
+STYLES = {'keyboard': lambda g, controls=None: keyboard_style(g), 'azerty': lambda g, controls=None: keyboard_style(g, AZERTY),
+          'xbox': lambda g, controls=None: icons_for(xbox_drawers, g, controls or default_controls()),
+          'playstation': lambda g, controls=None: icons_for(playstation_drawers, g, controls or default_controls()),
+          'playstation-label': lambda g, controls=None: icons_for(playstation_drawers, g, controls or default_controls('label'))}
 
 
 # ---- the HUD's button guide: images, not glyphs ----
@@ -517,11 +523,17 @@ def redraw_hud(bntx, icons):
     return bytes(out)
 
 
-def redraw(otf, text_fonts, style):
+def redraw(otf, text_fonts, style, controls=None, art=None):
     font = TTFont(io.BytesIO(otf))
     cff = font['CFF '].cff; top = cff.topDictIndex[0]; charstrings = top.CharStrings; private = top.Private
     nominal = getattr(private, 'nominalWidthX', 0); cmap = font.getBestCmap()
-    icons = STYLES[style](Glyphs(text_fonts))
+    if art:
+        tpa, letters, art_controls = art
+        icons, notes = tpa.font_icons(font, art_controls, style, letters)
+        for note in notes:
+            print(f'note: {note}')
+    else:
+        icons = STYLES[style](Glyphs(text_fonts), controls)
     for cp, (advance, draw) in icons.items():
         pen = T2CharStringPen(advance - nominal, None); draw(pen)
         charstrings[cmap[cp]] = pen.getCharString(private=private, globalSubrs=cff.GlobalSubrs)
@@ -534,12 +546,24 @@ def redraw(otf, text_fonts, style):
     return out.getvalue(), len(icons)
 
 
-def write_mod_manifest(mod, romfs, index):
+def pack_restbl(pack, restbl):
+    """The installed texture pack's resource size table `restbl` (install_texture_pack.py): (its compressed bytes, the SHA-256
+    the pack's manifest gives it), or None when the pack does not replace the table."""
+    for line in (pack / 'manifest.tsv').read_text().splitlines():
+        fields = line.split('\t')
+        if fields[0] == restbl and len(fields) >= 3:
+            return (pack / restbl).read_bytes(), fields[2]
+    return None
+
+
+def write_mod_manifest(mod, romfs, index, based=None):
     """Merge the mod's Common archive with the build's own patch of it (make_romfs_patches.py patches the same archive),
     then write the manifest: (merged paths, Manifest). The merged file's line names the build's file as the original, so
-    the game loads it in place of the build's overlay; without the merge both replace one file and the game stops at start."""
+    the game loads it in place of the build's overlay; without the merge both replace one file and the game stops at start.
+    `based` maps a path written from another overlay's file (the texture pack's size table) to that file's SHA-256, which
+    its line names as the original in the same way."""
     merged = merge_build_patches(mod, romfs, index)
-    return merged, write_manifest(mod, romfs, merged=merged)
+    return merged, write_manifest(mod, romfs, merged={**merged, **(based or {})})
 
 
 def main():
@@ -556,7 +580,21 @@ def main():
     parser.add_argument('--bindings', type=Path, help='keyboard.txt to draw instead of the default keyboard layout')
     parser.add_argument('--mouse', action=argparse.BooleanOptionalAction, default=None,
                         help='include mouse bindings; with --bindings, defaults to its sibling mouse.txt setting')
+    parser.add_argument('--face-buttons', choices=FACE_MODES,
+                        help='how the controller\'s face buttons map (the runtime\'s TOTK_FACE_BUTTONS, or key 6: Xbox and '
+                             'PlayStation by position, Switch by label); default position, label for playstation-label')
+    parser.add_argument('--texture-pack', type=Path,
+                        help='the installed HD texture pack (texture-pack-path.txt): when it replaces the resource size '
+                             'table, the icons grow its table and the game loads theirs in place of the pack\'s')
+    parser.add_argument('--controls', type=Path,
+                        help='your controls.txt: the prompts then show the controller button you press for each Switch '
+                             'button (needs --face-buttons; xbox and playstation styles)')
+    parser.add_argument('--our-art', action='store_true',
+                        help='xbox/playstation drawn with the Breath of the Wild art, fitted on each Switch picture\'s box; '
+                             'needs extracted/firmware/shared-fonts/0-standard.bfttf')
     args = parser.parse_args()
+    if args.our_art and args.style in ('keyboard', 'azerty'):
+        parser.error('--our-art applies to the xbox and playstation styles')
     if args.bindings or args.mouse is not None:
         if args.style not in ('keyboard', 'azerty'):
             parser.error('--bindings and --mouse need --style keyboard or azerty')
@@ -572,13 +610,31 @@ def main():
             mouse_file = args.bindings.with_name('mouse.txt')
             mouse = mouse_file.is_file() and mouse_file.read_text().strip() == 'on'
         layout = str.maketrans('QWAZ', 'AZQW') if args.style == 'azerty' else None
-        STYLES[args.style] = lambda g: keyboard_style(g, layout, parsed.bindings, mouse)
+        STYLES[args.style] = lambda g, _controls=None: keyboard_style(g, layout, parsed.bindings, mouse)
     version = args.version or (args.mod.name if args.mod.name in VERSIONS else None)
     romfs = args.romfs
     if args.app:
         if not version:
             parser.error('name the game version with --version (or name the mod folder v0, v121 or v143)')
         romfs = args.app / f'Contents/Resources/totk/extracted/{version}/romfs'
+    controls = None
+    if args.controls and not args.face_buttons:
+        parser.error('--controls needs --face-buttons position or label: where the buttons sit depends on it '
+                     '(the app\'s TOTK_FACE_BUTTONS, or the type picked with key 6)')
+    if (args.controls or args.face_buttons) and args.style in ('keyboard', 'azerty'):
+        parser.error('--controls and --face-buttons apply to the xbox and playstation styles; the keyboard keys do not move')
+    if args.style == 'playstation-label' and args.face_buttons == 'position':
+        parser.error('playstation-label is --face-buttons label')
+    if args.controls or args.face_buttons:
+        face = args.face_buttons or ('label' if args.style == 'playstation-label' else 'position')
+        try:
+            controls = prompt_controls(args.controls.read_text() if args.controls else '', face)
+        except LayoutError as error:
+            parser.error(f'{args.controls}, {error}')
+        except (OSError, UnicodeDecodeError) as error:
+            parser.error(f'{args.controls}: {error}')
+        print('\n'.join(describe(args.controls.read_text() if args.controls else '', face,
+                               'playstation' if args.style.startswith('playstation') else 'xbox')))
     image_dir = args.romfs_data or romfs
     if args.app and not args.romfs_data and not (romfs / 'romfs.bin').exists():   # built with --mac-game-data library
         image_dir = app_image_dir(args.app, version)
@@ -586,6 +642,13 @@ def main():
     for need in (image_dir / 'romfs.bin', romfs / 'runtime-index.bin'):
         if not need.is_file():
             parser.error(f'{need} not found')
+    art = None
+    if args.our_art:
+        import totk_prompt_art as tpa
+        firmware = args.app / 'Contents/Resources/totk/extracted/firmware' if args.app else romfs.parent.parent / 'firmware'
+        if not (firmware / tpa.SYSTEM_FONT).is_file():
+            parser.error(f'--our-art needs {firmware / tpa.SYSTEM_FONT} (the Switch system font)')
+        art = (tpa, tpa.letters(firmware), controls or default_controls('label' if args.style == 'playstation-label' else 'position'))
 
     index = read_index(romfs / 'runtime-index.bin')
     archives = [ARCHIVE] + sorted(p for p in index if p.startswith('Font/') and p.endswith('.bfarc.zs') and p != ARCHIVE)
@@ -595,7 +658,9 @@ def main():
     restbl = next((p for p in index if p.startswith('System/Resource/ResourceSizeTable.') and p.endswith('.rsizetable.zs')), None)
     if not restbl:
         parser.error(f'{romfs} holds no System/Resource/ResourceSizeTable.*.rsizetable.zs: is this Tears of the Kingdom\'s RomFS?')
-    existing = [str(args.mod / p) for p in archives + [layout_path] if (args.mod / p).exists()]
+    pack_table = pack_restbl(args.texture_pack, restbl) if args.texture_pack else None
+    messages = sorted(p for p in index if fnmatch.fnmatchcase(p, MESSAGES)) if art else []   # the popup letters' texts, one archive a language
+    existing = [str(args.mod / p) for p in archives + [layout_path] + messages if (args.mod / p).exists()]
     if existing and not args.replace:
         parser.error(f'{", ".join(existing)} already exist(s) (another mod\'s font archive, or an earlier run): '
                      'pass --replace to overwrite')
@@ -610,6 +675,7 @@ def main():
         restbl_raw = read(restbl)
         layout = layout_path
         layout_raw = read(layout)
+        message_raws = {path: read(path) for path in messages}
 
     text_fonts, redrawn, growth = None, {}, {}
     for path in archives:
@@ -623,7 +689,7 @@ def main():
         otf, key = bfotf_decode(archive[slice(*members[FONT])])
         assert otf[:4] == b'OTTO', f'External.bfotf in {path} did not decode to an OpenType font'
         if otf not in redrawn:
-            redrawn[otf] = redraw(otf, text_fonts, args.style)
+            redrawn[otf] = redraw(otf, text_fonts, args.style, controls, art)
         new_otf, count = redrawn[otf]
         new_blob = bfotf_encode(new_otf, key); assert bfotf_decode(new_blob)[0] == new_otf
         new_archive = repack(archive, FONT, new_blob)
@@ -637,22 +703,65 @@ def main():
 
     info = zstd.get_frame_info(layout_raw); dictionary = dictionaries[info.dictionary_id]
     archive = zstd.decompress(layout_raw, zstd_dict=dictionary); members = sarc_members(archive)
-    new_archive = repack(archive, BNTX, redraw_hud(archive[slice(*members[BNTX])], STYLES[args.style](Glyphs(text_fonts))))
+    if art:
+        hud, notes = art[0].hud_textures(archive[slice(*members[BNTX])], art[2], args.style, art[1])
+        import totk_controller_art as tca
+        hud, pictures, more = tca.redraw_pictures(hud, art[2], args.style, art[1])
+        notes += more
+        hud, tilted, more = tca.redraw_tilted(hud, art[2], args.style, art[1])
+        notes += more
+        hud, more = tca.dpad_masks(hud, args.style, art[1])
+        notes += more
+        popup, more = tca.popup_letters(archive[slice(*members[tca.POPUP])], art[2], args.style)
+        notes += more
+        if version == 'v143':   # the popup's places: checked on 1.4.3's layout only
+            popup, more = tca.popup_places(popup, art[2])
+            notes += more
+        for note in notes:
+            print(f'note: {note}')
+    else:
+        hud = redraw_hud(archive[slice(*members[BNTX])], STYLES[args.style](Glyphs(text_fonts), controls))
+    new_archive = repack(archive, BNTX, hud)
+    if art:
+        new_archive = repack(new_archive, tca.POPUP, popup)
     assert len(new_archive) == len(archive)
     data = zstd.compress(new_archive, level=19, zstd_dict=dictionary)
     assert zstd.decompress(data, zstd_dict=dictionary) == new_archive
     growth[layout] = 0
     target = args.mod / layout; target.parent.mkdir(parents=True, exist_ok=True); target.write_bytes(data)
-    print(f'{target}: {len(HUD_TEXTURES)} button guide textures redrawn ({args.style}), {len(data)} bytes')
+    print(f'{target}: {len(HUD_TEXTURES)} button guide textures redrawn{f", {len(pictures)} + {len(tilted)} controller pictures, the d-pad shortcut icon and the popup letters" if art else ""} ({args.style}{", our art" if art else ""}), {len(data)} bytes')
+
+    if art:   # the game fills each popup text pane from LayoutMsg/DoCommand_00.msbt; the sizes stay, so the size table needs no entry
+        changed, notes = 0, set()
+        for path, raw in message_raws.items():
+            info = zstd.get_frame_info(raw); dictionary = dictionaries.get(info.dictionary_id)
+            archive = zstd.decompress(raw, zstd_dict=dictionary) if dictionary else zstd.decompress(raw)
+            members = sarc_members(archive)
+            if tca.POPUP_MESSAGES not in members:
+                notes.add(f'action popup messages: {path} holds no {tca.POPUP_MESSAGES}; its Switch letters stay')
+                continue
+            text, more = tca.popup_messages(archive[slice(*members[tca.POPUP_MESSAGES])], art[2], args.style)
+            notes.update(more)
+            new_archive = repack(archive, tca.POPUP_MESSAGES, text)
+            assert len(new_archive) == len(archive)
+            if new_archive == archive:
+                continue
+            data = zstd.compress(new_archive, level=MESSAGES_LEVEL, zstd_dict=dictionary) if dictionary else zstd.compress(new_archive, level=MESSAGES_LEVEL)
+            assert zstd.decompress(data, zstd_dict=dictionary) == new_archive if dictionary else zstd.decompress(data) == new_archive
+            target = args.mod / path; target.parent.mkdir(parents=True, exist_ok=True); target.write_bytes(data)
+            changed += 1
+        for note in sorted(notes):
+            print(f'note: {note}')
+        print(f'{args.mod / "Mals"}: {changed} message archives, popup letters ({args.style})')
 
     target = args.mod / restbl
     original = zstd.decompress(restbl_raw)
-    table = zstd.decompress(target.read_bytes()) if target.exists() else original
+    table = zstd.decompress(target.read_bytes()) if target.exists() else zstd.decompress(pack_table[0]) if pack_table else original
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(zstd.compress(grow_restbl(table, original, growth), level=19))
-    print(f'{target}: ' + ', '.join(f'{p} {g:+d}' for p, g in growth.items()))
+    print(f'{target}: ' + ', '.join(f'{p} {g:+d}' for p, g in growth.items()) + (' (the texture pack\'s table)' if pack_table else ''))
     try:
-        merged, found = write_mod_manifest(args.mod, romfs, index)
+        merged, found = write_mod_manifest(args.mod, romfs, index, {restbl: pack_table[1]} if pack_table else None)
     except ValueError as error:
         sys.exit(f'manifest not written: {error}')
     for name in merged:

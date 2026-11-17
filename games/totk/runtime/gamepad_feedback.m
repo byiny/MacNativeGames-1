@@ -816,7 +816,7 @@ static int triggers_wanted(void) {
     return triggerChoice = 1;
 }
 static int bow_state_supported(void) {
-#if defined(GAME_BOTW190) || defined(TOTK_GAME_V143)
+#if defined(GAME_BOTW190) || defined(GAME_BOTW160) || defined(TOTK_GAME_V143)
     return 1;
 #else
     return 0;
@@ -832,6 +832,8 @@ static int bow_state_now(void) {   /* the bow thread only */
 #if defined(GAME_BOTW190)
     uint64_t main_base = (uintptr_t)runtime_module_base("main");
     return main_base ? bow_state_botw190(main_base, bow_read) : BOW_UNKNOWN;
+#elif defined(GAME_BOTW160)
+    return bow_state_zr_frames(runtime_zr_frames());
 #elif defined(TOTK_GAME_V143)
     static BowTotkCache player;
     uint64_t main_base = (uintptr_t)runtime_module_base("main");

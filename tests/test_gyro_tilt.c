@@ -112,8 +112,8 @@ int main(void) {
     double det = q[0][0] * (q[1][1] * q[2][2] - q[1][2] * q[2][1]) - q[0][1] * (q[1][0] * q[2][2] - q[1][2] * q[2][0]) + q[0][2] * (q[1][0] * q[2][1] - q[1][1] * q[2][0]);
     expect(near(det, 1, 1e-12) && near(a[0] * a[0] + a[1] * a[1] + a[2] * a[2], 1, 1e-12), "the pose stays a rotation, gravity 1 G");
 
-    /* LB + LT (physical 6, 8): together within 150 ms, in either order; once per press. */
-    enum { LB = 1 << 6, LT = 1 << 8 }; const uint64_t ms = 1000000;
+    /* L3 + R3 (physical 4, 5): together within 150 ms, in either order; once per press. */
+    enum { LB = 1 << 4, LT = 1 << 5 }   /* local 2026-11-14: L3, R3 (names kept) */; const uint64_t ms = 1000000;
     GyroTiltChord c = {0};
     expect(!gyro_tilt_chord(&c, LB, LB, 1000 * ms) && gyro_tilt_chord(&c, LB | LT, LT, 1100 * ms), "LB then LT 100 ms later toggles");
     expect(!gyro_tilt_chord(&c, LB | LT, 0, 1200 * ms) && !gyro_tilt_chord(&c, LB | LT, 0, 3000 * ms), "a held pair toggles once");

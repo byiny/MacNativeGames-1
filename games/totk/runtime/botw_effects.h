@@ -1,17 +1,23 @@
-/* Breath of the Wild 1.9.0's effects page (PR #1602; included once by settings_panel.h, in place of the other versions' list,
+/* Breath of the Wild 1.9.0's and 1.6.0's effects page (PR #1602; included once by settings_panel.h, in place of the other versions' list,
    after its row helpers). The rows stand in Tears of the Kingdom 1.4.3's order, so both games' pages read the same; a row
    whose code is not there for this game shows its name greyed, "Not in this version".
    The effect switches are totk_fx.h's (dm_gfx_fx_*), saved as on 1.4.3: graphics-effects.txt holds the ids of the
-   effects that are off, one word each ("none" when all are on). On this game dm_gfx_fx_available opens only the switches
-   that act here: ambient occlusion, the AO patch's own switch (totk_ssao.h, c1[3].w bit 0 in the shader 0eeb23f2), while the AO
-   shaders are the patched ones, the grass blades (their own fragment / vertex shader pair in totk_fx.h), and the sun's
-   shadows, which are an Off choice in their row (settings_botw_shadow_row), as on 1.4.3.
+   effects that are off, one word each ("none" when all are on). On this game dm_gfx_fx_available opens the switches
+   that act here: ambient occlusion, the AO patch's own switch (totk_ssao.h, c1[3].w bit 0 in the shader 0eeb23f2, 1.6.0's d5e832b9), while the AO
+   shaders are the patched ones, the grass blades (1.9.0: their own fragment / vertex shader pair; 1.6.0: its own keys), volumetric
+   fog (shader keys for this game; fog has no draw of its own and stays fixed), and, on 1.9.0, the sun's
+   shadows, which are an Off choice in their row (settings_botw_shadow_row), as on 1.4.3. 1.6.0's shadow row has the sizes only.
    FXAA and sharpening are 1.4.3's rows and files (graphics-fxaa.txt, graphics-sharpen.txt) acting around this game's
-   FXAA / upscale draw (gfx/nvn/botw_finish.h); while MetalFX replaces that draw the FXAA row says so instead. */
+   FXAA / upscale draw (gfx/nvn/botw_finish.h); while MetalFX replaces that draw the FXAA row says so instead.
+   The model detail distance, the render distance and the depth of field are 1.4.3's rows and files too
+   (graphics-lod.txt, graphics-far.txt, graphics-dof.txt; game_patches_botw.c, botw_view_patches.h), on both versions
+   (the tables differ); a row whose code is not as shipped shows "Not in this version" (runtime_*_available() is false);
+   the rows, restore and reset are the same code. */
 int dm_gfx_fx_count(void); const char *dm_gfx_fx_id(int i); const char *dm_gfx_fx_name(int i, int english);   /* totk_fx.h */
 int dm_gfx_fx_available(int i); int dm_gfx_fx_on(int i); void dm_gfx_fx_set(int i, int on);
 void dm_gfx_fxaa_set(int on); int dm_gfx_fxaa_on(void); void dm_gfx_sharpen_set(int pct); int dm_gfx_sharpen(void);   /* gfx/nvn/totk_finish.h */
 int dm_gfx_botw_fxaa_replaced(void);   /* gfx/nvn/botw_finish.h */
+#define SETTINGS_LOD_MAX 1e6   /* "Always the finest": a factor no distance in the map reaches (graphics-lod.txt "max") */
 
 static void settings_effects_save(void) {
  char line[512]="";size_t n=0;
@@ -28,11 +34,21 @@ static void settings_effects_restore(void) {
  char word[16];double pct;
  if(runtime_setting_word("graphics-fxaa.txt",word,sizeof word)&&!strncmp(word,"off",3))dm_gfx_fxaa_set(0);
  if(settings_read_number("graphics-sharpen.txt",0,100,&pct))dm_gfx_sharpen_set((int)pct);   /* as 1.4.3 reads it */
+ if(!runtime_lod_scale_locked()){   /* as 1.4.3 reads them; the render distance's file, in percent, is taken from 10 (0.1x) to 150 (1.5x) */
+  if(runtime_setting_word("graphics-lod.txt",word,sizeof word)&&!strncmp(word,"max",3))runtime_lod_scale_set(SETTINGS_LOD_MAX);
+  else if(settings_read_number("graphics-lod.txt",100,10000,&pct))runtime_lod_scale_set(pct/100);
+ }
+ if(!runtime_far_scale_locked()&&settings_read_number("graphics-far.txt",10,150,&pct))runtime_far_scale_set(pct/100);
+ if(runtime_setting_word("graphics-dof.txt",word,sizeof word)&&!strncmp(word,"off",3))runtime_dof_set(0);
 }
-/* The page's "Reset to defaults": every switch on, FXAA on, no sharpening, and their files removed. */
+/* The page's "Reset to defaults": every switch on, FXAA on, no sharpening, the distances 1x, depth of field on, and
+   their files removed (a distance the environment decides stays). */
 static void settings_botw_effects_reset(void) {
  for(int i=0;i<dm_gfx_fx_count();i++)if(!dm_gfx_fx_on(i))dm_gfx_fx_set(i,1);
  dm_gfx_fxaa_set(1);dm_gfx_sharpen_set(0);
+ if(runtime_lod_available()&&!runtime_lod_scale_locked()){runtime_lod_scale_set(1);runtime_setting_remove("graphics-lod.txt");}
+ if(runtime_far_available()&&!runtime_far_scale_locked()){runtime_far_scale_set(1);runtime_setting_remove("graphics-far.txt");}
+ if(runtime_dof_available()){runtime_dof_set(1);runtime_setting_remove("graphics-dof.txt");}
  for(const char *const *f=(const char *const[]){"graphics-effects.txt","graphics-fxaa.txt","graphics-sharpen.txt",NULL};*f;f++)runtime_setting_remove(*f);
 }
 /* The sun shadows' row (settings_botw_shadow_row in settings_panel.h names it): off, the game's sizes or 2048 per cascade.
@@ -52,15 +68,43 @@ static TOTKSettingRow *settings_botw190_shadow_row(NSString *t) {
   ^int{return dm_gfx_fx_on(fx)?runtime_shadow_res_saved():-1;},
   ^(int v){dm_gfx_fx_set(fx,v>=0);if(v>=0)runtime_shadow_res_save(v);settings_effects_save();});
 }
+/* The two distances as 1.4.3's settings_distance_row: the model detail distance x100 (1x .. 100x, "Always the finest"),
+   the render distance (here the object and actor display distance, which sets how many actors are alive) x1000, offered
+   up to 1.5x only (1.4.3's 10x would exhaust the actor heaps, and 2x and 3x crashed the 1.9.0 world load); a file or TOTK_*_SCALE value outside the offered ones is
+   still shown. */
+static TOTKSettingRow *settings_botw_distance_row(int lod) {
+ NSString *t=lod?settings_text("模型细节距离（LOD）","Model detail distance (LOD)"):settings_text("渲染距离","Render distance");
+ if(lod?!runtime_lod_available():!runtime_far_available())return settings_fixed(t,settings_text("这个版本没有","Not in this version"));
+ double unit=lod?100:1000;
+ int (^current)(void)=^int{double k=lod?runtime_lod_scale():runtime_far_scale();return lod&&k>=SETTINGS_LOD_MAX?-1:(int)lround(k*unit);};
+ int now=current();
+ NSString *(^text)(int)=^NSString *(int v){
+  if(v<0)return settings_text("始终最高精度","Always the finest");
+  if(v==unit)return settings_text("1×（游戏原样）","1x (as the game has it)");
+  return [NSString stringWithFormat:@"%g×",v/unit];};
+ if(lod?runtime_lod_scale_locked():runtime_far_scale_locked())return settings_fixed(t,text(now));
+ NSMutableArray<NSNumber *> *values=[(lod?@[@100,@200,@400,@1000,@2000,@5000,@10000,@-1]:@[@1000,@1250,@1500]) mutableCopy];
+ if(![values containsObject:@(now)])[values addObject:@(now)];
+ NSMutableArray<NSString *> *choices=[NSMutableArray array];for(NSNumber *v in values)[choices addObject:text(v.intValue)];
+ return settings_row(t,choices,values,current,^(int v){
+  if(lod&&v<0){runtime_lod_scale_set(SETTINGS_LOD_MAX);runtime_setting_save("graphics-lod.txt","max","model detail distance");}
+  else if(lod){runtime_lod_scale_set(v/100.0);settings_save_int("graphics-lod.txt",v,"model detail distance");}
+  else{char word[16];snprintf(word,sizeof word,"%g",v/10.0);runtime_far_scale_set(v/1000.0);runtime_setting_save("graphics-far.txt",word,"render distance");}});
+}
+/* Depth of field: on (the game's own) or off, at once. */
+static TOTKSettingRow *settings_botw_dof_row(void) {
+ NSString *t=settings_text("景深","Depth of field");
+ if(!runtime_dof_available())return settings_fixed(t,settings_text("这个版本没有","Not in this version"));
+ return settings_row(t,nil,nil,^int{return runtime_dof_on();},^(int v){runtime_dof_set(v);runtime_setting_save("graphics-dof.txt",v?"on":"off","depth of field");});
+}
 static NSArray<TOTKSettingRow *> *settings_effect_rows(void) {
  NSString *none=settings_text("这个版本没有","Not in this version");
  NSMutableArray<TOTKSettingRow *> *rows=[NSMutableArray arrayWithObjects:settings_botw_fov_row(),
-  settings_fixed(settings_text("模型细节距离（LOD）","Model detail distance (LOD)"),none),settings_fixed(settings_text("渲染距离","Render distance"),none),
-  settings_botw_shadow_row(),nil];
+  settings_botw_distance_row(1),settings_botw_distance_row(0),settings_botw_shadow_row(),nil];
  NSString *fxaa=settings_text("FXAA 抗锯齿","FXAA anti-aliasing");
  [rows addObject:dm_gfx_botw_fxaa_replaced()?settings_fixed(fxaa,settings_text("MetalFX 取代了它","MetalFX replaces it")):
   settings_row(fxaa,nil,nil,^int{return dm_gfx_fxaa_on();},^(int v){dm_gfx_fxaa_set(v);runtime_setting_save("graphics-fxaa.txt",v?"on":"off","FXAA");})];
- [rows addObject:settings_fixed(settings_text("景深","Depth of field"),none)];
+ [rows addObject:settings_botw_dof_row()];
  [rows addObject:settings_row(settings_text("锐化","Sharpening"),@[settings_text("关（游戏原样）","Off (as the game has it)"),@"25%",@"50%",@"75%",@"100%"],@[@0,@25,@50,@75,@100],
   ^int{return dm_gfx_sharpen();},^(int v){dm_gfx_sharpen_set(v);settings_save_int("graphics-sharpen.txt",v,"sharpening");})];
  for(int i=0;i<dm_gfx_fx_count();i++){
@@ -69,5 +113,6 @@ static NSArray<TOTKSettingRow *> *settings_effect_rows(void) {
   if(!dm_gfx_fx_available(i)){[rows addObject:settings_fixed(t,none)];continue;}
   [rows addObject:settings_row(t,nil,nil,^int{return dm_gfx_fx_on(i);},^(int v){dm_gfx_fx_set(i,v);settings_effects_save();})];
  }
+ if(totk_hdr_available())settings_hdr_rows(rows);   /* HDR / EDR, as on 1.4.3 (gfx/nvn/totk_hdr_compose.h) */
  return rows;
 }

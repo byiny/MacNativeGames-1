@@ -189,6 +189,11 @@ void nvn_dirty_fast_stats(int *on, uint64_t *blk_skips, uint64_t *hash_hits, uin
 #include <sys/ucontext.h>
 #define DREC_N 65536   // OOT (2026-11-09): 4096 held about two frames of page unprotections; the race inventory reads the ring one or two frames after the writes
 static nvn_dirty_rec g_drec[DREC_N]; static _Atomic uint64_t g_drec_n; static int g_drec_on;
+#ifdef GAME_BOTW   /* local diagnostic (2026-11-09): always on, so a skipped write-back names its writers in play builds */
+#define DREC_ALWAYS 1
+#else
+#define DREC_ALWAYS 0
+#endif
 uint64_t dm_host_write_pc;   // set by dm_guest_write_prepare (runtime/gfx_bridge.c) before calling prep_write
 static void drec_add(uintptr_t page, uint64_t pc, uint64_t lr, uint32_t src) {
     if (!g_drec_on) return;
@@ -287,7 +292,7 @@ void nvn_dirty_gpu_write_end(void *tok) {
 #if !defined(GAME_BOTW)
 void nvn_dirty_add_range(const void *mem, size_t size) {
     static int inited;
-    if (!inited) { inited = 1; g_pg = (uintptr_t)getpagesize(); g_shift = __builtin_ctzl(g_pg); mach_timebase_info(&g_tb); dirty_fast_init(); dm_fault_hook_register(on_fault); dm_guest_write_prep_register(prep_write); g_drec_on = getenv("DM_NVN_TILELOG") != NULL; }
+    if (!inited) { inited = 1; g_pg = (uintptr_t)getpagesize(); g_shift = __builtin_ctzl(g_pg); mach_timebase_info(&g_tb); dirty_fast_init(); dm_fault_hook_register(on_fault); dm_guest_write_prep_register(prep_write); g_drec_on = DREC_ALWAYS || getenv("DM_NVN_TILELOG") != NULL; }
     atomic_fetch_add(&g_adds_total, 1);
     pthread_mutex_lock(&g_slot_mu);
     int n = atomic_load(&g_nr);
@@ -475,7 +480,7 @@ static void ov_log(const char *what, _Atomic uint64_t *c, const void *mem, size_
 }
 void nvn_dirty_add_range(const void *mem, size_t size) {
     static int inited;
-    if (!inited) { inited = 1; g_pg = (uintptr_t)getpagesize(); g_shift = __builtin_ctzl(g_pg); mach_timebase_info(&g_tb); dirty_fast_init(); dm_fault_hook_register(on_fault); dm_guest_write_prep_register(prep_write); g_drec_on = getenv("DM_NVN_TILELOG") != NULL; }
+    if (!inited) { inited = 1; g_pg = (uintptr_t)getpagesize(); g_shift = __builtin_ctzl(g_pg); mach_timebase_info(&g_tb); dirty_fast_init(); dm_fault_hook_register(on_fault); dm_guest_write_prep_register(prep_write); g_drec_on = DREC_ALWAYS || getenv("DM_NVN_TILELOG") != NULL; }
     atomic_fetch_add(&g_adds_total, 1);
     pthread_mutex_lock(&g_slot_mu);
     int n = atomic_load(&g_nr);

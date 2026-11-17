@@ -22,6 +22,15 @@ static pthread_mutex_t inputLock=PTHREAD_MUTEX_INITIALIZER;
 static unsigned char keys[128];static uint64_t pending;
 static uint32_t styles=1;static bool enabled,allowed=true;static int holdType;
 static int64_t sample;static uint64_t padSeen;
+#ifdef GAME_BOTW160
+#include "bow_state.h"
+/* Breath of the Wild 1.6.0's bow state (gamepad_feedback.m): the frames ZR has been held in the state the game reads, as 1.9.0's
+   controller object counts them (+0x744 of the object in main+0x1e14fb0); no game site of 1.6.0 holds it. */
+static _Atomic uint32_t zrFrames;
+/* The pad in use going away (disconnect() sets allowed = false) reads no more states, so a ZR held then would stay counted:
+   the count drops to 0 here, under the lock the states take, until a pad is allowed again. */
+uint32_t runtime_zr_frames(void){pthread_mutex_lock(&inputLock);uint32_t n=bow_zr_frames_read(atomic_load(&zrFrames),enabled&&allowed);atomic_store(&zrFrames,n);pthread_mutex_unlock(&inputLock);return n;}
+#endif
 /* Scripted and auto-load presses (runtime_input_key_synthetic: TOTK_INPUT_SCRIPT, TOTK_INPUT_FILE, autoload.c) keep this
    fixed layout, whatever the player's, so test scripts mean the same keys on every Mac: J A, K / Space B, I X, U Y, Q / E
    L / R, Option / Shift ZL / ZR, Return +, Tab / Esc -, F T H G the d-pad, Z / C the stick presses; W A S D and the arrow
@@ -155,6 +164,9 @@ static int pad_states(NpadState *out,int max,const uint32_t *id,uint32_t want_st
  if(abs(pad.lx)>abs(state.lx))state.lx=pad.lx;if(abs(pad.ly)>abs(state.ly))state.ly=pad.ly;
  if(abs(pad.rx)>abs(state.rx))state.rx=pad.rx;if(abs(pad.ry)>abs(state.ry))state.ry=pad.ry;
  if(runtime_vr_stick_pitch_locked())state.ry=0;   /* zeldaVR: up / down is the headset's (game_patches_v143.c) */
+#ifdef GAME_BOTW160
+ atomic_store(&zrFrames,state.buttons&512?atomic_load(&zrFrames)+1:0);   /* ZR (bit 9) in the state the game reads */
+#endif
  if(runtime_tilt_active())state.lx=state.ly=state.rx=state.ry=0;   /* tilt mode: the sticks tilt and turn the controller (runtime/gamepad.m) */
  }*out=state;pthread_mutex_unlock(&inputLock);return 1;}
 static int disconnected_states(NpadState *out,int max,const uint32_t *id){if(id)input_log("joy-con state",*id);if(max<=0)return 0;if(!out)runtime_fail("controller output pointer");pthread_mutex_lock(&inputLock);*out=(NpadState){.sampling=++sample};pthread_mutex_unlock(&inputLock);return 1;}

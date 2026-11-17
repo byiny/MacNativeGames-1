@@ -1,6 +1,7 @@
 /* Test the bow-drawn reader (games/totk/runtime/bow_state.h) on a fake guest memory: the pointer paths of Breath of the
    Wild 1.9.0 and Tears of the Kingdom 1.4.3 (with 1.4.3's pause word), every way a path can be missing, wrong or stale,
    and the rule that lets R2 resist only when every part agrees. */
+#define GAME_BOTW160 1   /* bow_state_zr_frames is 1.6.0 only */
 #include "../games/totk/runtime/bow_state.h"
 #include <math.h>
 #include <stdio.h>
@@ -84,6 +85,17 @@ int main(void) {
     expect(bow_state_botw190(MAIN, fake_read) == BOW_UNKNOWN, "botw_nan_timer: a non-finite timer is unknown");
     botw(12.5f, 0x7000001000, MAIN + 0x1d4fd88);
     expect(bow_state_botw190(MAIN, failing_read) == BOW_UNKNOWN, "botw_unreadable: a failed read is unknown");
+
+    /* Breath of the Wild 1.6.0: the runtime's own count of the frames ZR was held */
+    expect(bow_state_zr_frames(37) == BOW_DRAWN && bow_state_zr_frames(1) == BOW_DRAWN, "botw160_held: ZR held is drawn");
+    expect(bow_state_zr_frames(0) == BOW_NOT_DRAWN, "botw160_released: ZR released is not drawn");
+    {   /* input.c's count: ZR held for 37 frames, then the pad in use disconnects with ZR still held; input.c stores what is read */
+        uint32_t stored = 37;
+        expect(bow_zr_frames_read(stored, 1) == 37 && bow_state_zr_frames(bow_zr_frames_read(stored, 1)) == BOW_DRAWN, "botw160_connected: the held count is read and drawn");
+        stored = bow_zr_frames_read(stored, 0);
+        expect(stored == 0 && bow_state_zr_frames(stored) == BOW_NOT_DRAWN, "botw160_disconnect: ZR held while the pad goes away is not drawn");
+        expect(bow_zr_frames_read(stored, 1) == 0 && bow_state_zr_frames(bow_zr_frames_read(stored, 1)) == BOW_NOT_DRAWN, "botw160_reconnect: the count stays 0 until a state counts ZR again");
+    }
 
     /* Tears of the Kingdom 1.4.3 */
     BowTotkCache cache = {0, 0};

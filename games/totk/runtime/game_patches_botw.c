@@ -15,8 +15,9 @@
 #include "game_version.h"
 #include "pchtxt.h"
 #include "aspect_math.h"   /* the aspect ratio: TOTK_ASPECT parsing */
-#include "botw_shadow_res.h"   /* 1.9.0's sun shadow map at 2048 (TOTK_SHADOW_RES, shadows.txt) */
-#include "botw_fov.h"   /* 1.9.0's field of view (TOTK_FOV_SCALE, graphics-fov.txt) */
+#include "botw_shadow_res.h"   /* 1.9.0 and 1.6.0: the sun shadow map at 2048 (TOTK_SHADOW_RES, shadows.txt) */
+#include "botw_fov.h"   /* 1.9.0 and 1.6.0: the field of view (TOTK_FOV_SCALE, graphics-fov.txt) */
+#include "botw_view_patches.h"   /* 1.9.0 and 1.6.0: model detail distance, render distance, depth of field (TOTK_LOD_SCALE, TOTK_FAR_SCALE) */
 #include "botw_heap_patch.h"   /* startup/root heap sizes above 4 GiB */
 #include "botw_output_heaps.h"
 #include "../zeldaVR/gfx/vr_resolution_policy.h"
@@ -210,7 +211,7 @@ static void pad_tick_advance(void) {
    the data page; at each present while it falls and moves, one line: the frame ratio, the actor's position (its matrix
    at +0x398), the shot's start (+0x11c), the velocity (+0x110, per 30 fps frame), the speed (+0xb4) and the gravity
    (+0x108). Reads go through vm_read_overwrite: the object may be gone. */
-enum { ARROW_SLOT = 0x58 };   /* the data page: +0 the frame step, +0x10 the output size, +0x20 the aspect, +0x48 the FOV */
+enum { ARROW_SLOT = 0x58 };   /* the data page: +0 the frame step, +0x10 the output size, +0x20 the aspect, +0x48 the FOV; this slot is 8 bytes (+0x58 .. +0x5f); the view slots are +0x60 .. +0x68 (botw_view_patches.h) */
 static _Atomic uint64_t *g_arrow_slot;
 static int arrow_read(uint64_t a, void *out, size_t n) {
     vm_size_t got = 0;
@@ -498,7 +499,7 @@ static void patch_realtime(Module *m) {
             sizeof put / sizeof *put, sizeof check / sizeof *check);
     patch_pad_repeat(m, page);
     patch_slink_rate(m, page);
-    patch_blend_first_step(m, ((m->text_end + 15) & ~15ULL) + 16);   /* after the sound-link veneer (4 words) */
+    patch_blend_first_step(m, ((m->text_end + 15) & ~15ULL) + 16);   /* after the sound-link veneer (4 words); the FOV stubs follow at +48 */
 }
 #else
 /* Breath of the Wild 1.9.0: the same real-time step at the 1.9.0 sites (found by disassembly; MacNativeGames
@@ -685,61 +686,6 @@ static void patch_sound_step(Module *m) {
             sizeof put / sizeof *put, sizeof check / sizeof *check);
 }
 
-/* Moving platforms above 30 fps (TOTK_KF_ANGLE=0: as shipped). The bodies the game moves (a Divine Beast's floor while
-   it tilts, lifts, gates) get each physics step the angular velocity that takes them to their target; main+0x12d57fc
-   takes the angle of the turn left from hkQuaternion::getAngle (main+0xb06d4), 2 acos(|w|). Below about a milliradian
-   w rounds to 1.0 in a float and the turn reads as none. Vah Medoh's floor turns about 1.7 mrad per 30 fps frame, less
-   per step at higher rates: the floor stood still for some steps and then caught up at once, and Link on it hopped in
-   place, more the higher the frame rate, not at 30+30 (user, 2026-11-13). Cause and cure as found by SavageWindRecomp
-   (pull request #312: at 120 fps, Link's vertical speed jitter fell from 0.9-1.6 m/s to 0.07-0.13). The call now goes to
-   a veneer that returns 2 atan2(|xyz|, |w|), the same angle without the rounding, through the game's own atan2f import
-   (PLT main+0x159ff10, GOT main+0x1d78050). getAngle's caller only reads s0 back (main+0x12d5804) and keeps its values on
-   the stack across the call; the veneer uses only caller-saved registers, as getAngle and its acosf call do. */
-static void patch_kf_angle(Module *m, uint64_t stub) {
-    const char *e = getenv("TOTK_KF_ANGLE");
-    if (!ios_code() && e && !strcmp(e, "0")) { fprintf(stderr, "[botw] moving platforms' turn angle as shipped, 2 acos(|w|) (TOTK_KF_ANGLE=0)\n"); return; }
-    enum { SITE = 0x12d57fc, ATAN2F = 0x159ff10 };
-    static const struct { uint32_t off, original; } check[] = {
-        {0x12d57f8u, 0x3c9983a0u},     /* stur q0, [x29, #-0x68] */
-        {0x12d57fcu, 0x97b76bb6u},     /* bl main+0xb06d4 (hkQuaternion::getAngle) */
-        {0x12d5800u, 0x3cd883a6u},     /* ldur q6, [x29, #-0x78] */
-        {0x12d5804u, 0x1e2008c0u},     /* fmul s0, s6, s0 */
-        {0xb06d4u, 0x3dc00000u},       /* ldr q0, [x0] */
-        {0xb06f8u, 0x9453bdf6u},       /* bl main+0x159fed0 (acosf) */
-        {0x159ff10u, 0xb0003ed0u},     /* adrp x16, main+0x1d78000 */
-        {0x159ff14u, 0xf9402a11u},     /* ldr x17, [x16, #0x50] (atan2f) */
-        {0x159ff1cu, 0xd61f0220u},     /* br x17 */
-    };
-    for (size_t i = 0; !CODE_PATCHED_AT_BUILD && i < sizeof check / sizeof *check; i++) {
-        uint32_t w; memcpy(&w, m->base + check[i].off, 4);
-        if (w != check[i].original) {
-            fprintf(stderr, "[botw] moving platforms main+%#x: found %08x expected %08x\n", check[i].off, w, check[i].original);
-            runtime_fail("the moving platforms' turn angle requires the 1.9.0 keyframed-body code");
-        }
-    }
-    const uint32_t veneer[] = {
-        0x3dc00000u,   /* ldr q0, [x0]                 x, y, z, w of the turn left */
-        0x6e20dc01u,   /* fmul v1.4s, v0.4s, v0.4s */
-        0x7e30d822u,   /* faddp s2, v1.2s              x² + y² */
-        0x5e140423u,   /* mov s3, v1.s[2] */
-        0x1e232842u,   /* fadd s2, s2, s3              + z² */
-        0x5e1c0401u,   /* mov s1, v0.s[3] */
-        0x1e20c021u,   /* fabs s1, s1                  |w| */
-        0x1e21c040u,   /* fsqrt s0, s2                 |xyz| */
-        0xa9bf7bfdu,   /* stp x29, x30, [sp, #-16]! */
-        0x910003fdu,   /* mov x29, sp */
-        0x94000000u | (uint32_t)((((int64_t)ATAN2F - (int64_t)(stub + 40)) >> 2) & 0x3ffffff),   /* bl atan2f */
-        0xa8c17bfdu,   /* ldp x29, x30, [sp], #16 */
-        0x1e202800u,   /* fadd s0, s0, s0              2 atan2(|xyz|, |w|) */
-        0xd65f03c0u,   /* ret */
-    };
-    if (stub + sizeof veneer > ((m->text_end + 0xfff) & ~0xfffULL)) runtime_fail("moving platforms veneer layout");
-    for (size_t i = 0; !CODE_PATCHED_AT_BUILD && i < sizeof veneer; i++) if (m->base[stub + i]) runtime_fail("moving platforms veneer padding not empty");
-    put_words(m, stub, veneer, sizeof veneer / sizeof *veneer, "moving platforms veneer");
-    put_word(m, SITE, 0x94000000u | (uint32_t)((((int64_t)stub - (int64_t)SITE) >> 2) & 0x3ffffff), "moving platforms turn angle");
-    fprintf(stderr, "[botw] moving platforms: the turn angle is 2 atan2(|xyz|, |w|), small turns kept (veneer +%#llx; TOTK_KF_ANGLE=0: as shipped)\n",
-            (unsigned long long)stub);
-}
 static void patch_realtime(Module *m) {
     uint64_t data_off = (m->file_size + 0x3fff) & ~0x3fffULL;
     if (data_off + 0x4000 != m->size || data_off & 0xfff) runtime_fail("real-time frame-step page layout");
@@ -778,8 +724,7 @@ static void patch_realtime(Module *m) {
     patch_pad_repeat(m, page);
     patch_sound_step(m);
     patch_blend_first_step(m, ((m->text_end + 15) & ~15ULL) + 80);   /* after the FOV stub (+32, 11 words) */
-    patch_arrow_gravity(m, page, ((m->text_end + 15) & ~15ULL) + 104);   /* after the camera blend veneer (+80, 6 words), before the VR camera's (+128) */
-    patch_kf_angle(m, ((m->text_end + 15) & ~15ULL) + 0x300);        /* past the VR and heap veneers (+0x80..+0x158) */
+    patch_arrow_gravity(m, page, ((m->text_end + 15) & ~15ULL) + 104);   /* after the camera blend veneer (+80, 6 words), before the VR camera's (+128 .. +200); the view stubs are at -12, +128 and +884 (botw_view_patches.h), the heap stubs at +256 and +272 (botw_heap_patch.h; the sensor caves cover them) */
 }
 #endif
 /* Diagnostics (TOTK_JQ_CHECK=1): random crashes look like one job run twice (two threads in the same skinning job, a list
@@ -889,7 +834,7 @@ static void patch_render_1080(Module *m) {
     put_word(m, RENDER_MOVK, movk, "docked render size");
     fprintf(stderr, "[botw] docked render size 1920x1080 (shipped: 1600x900; TOTK_RENDER_RES=900 keeps it)\n");
 }
-#ifdef GAME_BOTW190
+#if defined(GAME_BOTW190) || defined(GAME_BOTW160)   /* the size helpers below: 1.6.0 takes TOTK_OUTPUT_RES=screen too */
 /* Native size, 1.9.0: the sizes and heaps for patch_output_res (the output-size block after the JQ diagnostics, shared
    with 1.6.0; the settings panel switches the size in play). The docked canvas size is a static {1920, 1080} (main+0x1e43dc0) set by
    three guarded inits (two in nnMain, one in its getter main+0x1261880); nnMain hands it to the graphics init and
@@ -916,12 +861,15 @@ static int native_k_from_screen(unsigned w, unsigned h) {   /* 0 = 1920x1080 or 
     if (k > NATIVE_K_MAX) k = NATIVE_K_MAX;
     return k > 120 ? (int)k : 0;
 }
+#ifdef GAME_BOTW190
 static int native_k_parse(const char *e) {   /* -1 = not a size this mode takes */
     unsigned w, h; char end;
     if (sscanf(e, "%ux%u%c", &w, &h, &end) != 2 || w % 128 || w / 16 * 9 != h || w / 16 <= 120 || w / 16 > NATIVE_K_MAX) return -1;
     return (int)(w / 16);
 }
+#endif
 #include "native_screen.h"
+#ifdef GAME_BOTW190
 static unsigned native_round_up(double mib, unsigned step) { return (unsigned)ceil(mib / step) * step; }
 static void native_heaps(int k, unsigned *display_mib, unsigned *gpu_mib, unsigned *extra_mib) {
     double px = 144.0 * k * k, f = (px - 2560.0 * 1440) / (3456.0 * 1944 - 2560.0 * 1440);
@@ -946,135 +894,7 @@ static uint32_t native_word(uint32_t original, int kind, int k) {   /* the same 
     return (original & ~(0xffffu << 5)) | (imm & 0xffffu) << 5;
 }
 #endif
-#if defined(GAME_BOTW190) || defined(GAME_BOTW160)
-/* HD heaps, 1.9.0 and 1.6.0 (TOTK_BOTW_HD_HEAPS=1, Mac only, default off; the owner, 2026-10-24: "make the pack work in 1.9.0, rise
-   any mem cap if needed"). The HDPacks 4k texture pack (made for 1.6.0, with its own 1.6.0 heap patch) crashed 1.9.0 in
-   two places once its RSTB was right: its 346 MiB TitleBG.pack overflows the 225 MiB StarterPackMgr heap at boot (a null
-   resource handle at main+0x155dda8), and at the first world load a texture never loads (fault 0x1c at main+0xef69f4)
-   because the texture compaction heap "Main" (500 MiB) is full. patch_hd_heaps gives StarterPackMgr and ForResourceL / S
-   the pack's own 1.6.0 sizes (each ForResource mode +409 / +505 MiB) and the compaction heap 2032 MiB. That heap is one
-   NVN memory pool, so nvn_mtl.m's zero-copy limit (POOL_BUFFER_MAX) is 2 GiB with these heaps; at 992 MiB textures were
-   evicted and reloaded and a ruin wall (FldObj_HyliaStoneRuin_A) never appeared (2026-10-24). The game adds 30 MiB to
-   it when w27 is set (main+0x127b774), which would pass 2 GiB and stop at the pool check. It raises the memory heap
-   (nninitStartup) to 7.5 GiB and RootHeap (nnMain) to 7 GiB: one 64-bit orr with a logical immediate, since mov w stops
-   below 4 GiB. Need: 3888 MiB (the 3456x1944 native size) + 409 + 505 + 1532 = 6334 MiB < 7 GiB. services.c raises the heap cap to 8 GiB and the guest
-   region to 9 GiB, and the application pool takes the memory-heap delta (runtime_output_res_extra_bytes). The GPU memory
-   budget (TOTK_GPU_BUDGET_MB, 5000 MB from the launcher on a 16 GB Mac) becomes at least 7000 MB: the 2032 MiB heap took
-   the game to 5017 MB in the first world load (the owner, 2026-10-24: "Raise the GPU budget to 7000 MB"); the kernel
-   panics it guards against came at about 15 GB resident.
-   1.6.0 has the same shipped heaps (StarterPackMgr 225 / 20 MiB at main+0x1778ce0, compaction 500 MiB at main+0x182fad0),
-   and the pack's own 1.6.0.pchtxt cannot be used as it stands: its memory and root heap lines are on sites
-   patch_output_res owns, so g_pchtxt_reserved refuses it. patch_hd_heaps writes the pack's other 1.6.0 values instead. */
-enum { HD_MEMORY_HEAP_MIB = 7680, HD_ROOT_HEAP_MIB = 7168, SHIPPED_MEMORY_HEAP_MIB = 3120, HD_GPU_BUDGET_MB = 7000 };
-int runtime_botw_hd_heaps(void) { const char *e = getenv("TOTK_BOTW_HD_HEAPS"); return e && !strcmp(e, "1") && !ios_code(); }
-#endif
-/* The phone's render size (user 2026-10-23: "内部960×540，输出 用默认 放大机制"): the iPhone / iPad runs the handheld
-   mode, whose branch of the 1.6.0 display-mode routine (jump table at main+0x26164f8: mode 1 -> main+0x18216c8) stores
-   the screen width 1280.0 and the render width 1280.0 as one pair:
-     main+0x18216c8  mov x8, #0x44a00000              (1280.0, the screen)
-     main+0x18216cc  movk x8, #0x44a0, lsl #48        (1280.0, the render width) -> movk x8, #0x4470, lsl #48 (960.0)
-   The renderer scales its targets by render / screen width, as docked play does at 1600 / 1920, so the scene is drawn at
-   960x540 and the game's own upscale draws it into the 1280x720 canvas (MetalFX does not replace it on the phone:
-   totk_mfx_up.m mfxup_enabled).
-   1.9.0: the display-mode routine main+0x1266074 jumps by a byte table (main+0x1725916, base main+0x12660bc): mode 1 ->
-   main+0x1266114, the same pair (str x8, [x19, #0x1210]); mode 3 (VR) computes its own and is left alone:
-     main+0x1266114  mov x8, #0x44a00000
-     main+0x1266118  movk x8, #0x44a0, lsl #48        -> movk x8, #0x4470, lsl #48 (960.0)
-   (its dynamic-resolution scale, main+0x12661e8, divides the render width +0x1214 by 1280.0 in handheld: 0.75). */
-#ifdef GAME_BOTW160
-enum { PHONE_RENDER = 0x18216c8u, PHONE_RENDER_STR = 0xf9094b88u };   /* str x8, [x28, #0x1290] */
-#else
-enum { PHONE_RENDER = 0x1266114u, PHONE_RENDER_STR = 0xf9090a68u };   /* str x8, [x19, #0x1210] */
-#endif
-static void patch_phone_render(Module *m) {
-    if (!ios_code()) return;
-    const struct { uint32_t off, original; } check[] = {{PHONE_RENDER, 0xd2a89408u}, {PHONE_RENDER + 4, 0xf2e89408u}, {PHONE_RENDER + 8, PHONE_RENDER_STR}};
-    for (size_t i = 0; !CODE_PATCHED_AT_BUILD && i < sizeof check / sizeof *check; i++) {
-        uint32_t w; memcpy(&w, m->base + check[i].off, 4);
-        if (w != check[i].original) {
-            fprintf(stderr, "[botw] handheld render size main+%#x: found %08x expected %08x\n", check[i].off, w, check[i].original);
-            runtime_fail("the phone's render size requires the " TOTK_GAME_VERSION " handheld display-mode instructions");
-        }
-    }
-    put_word(m, PHONE_RENDER + 4, 0xf2e88e08u, "handheld render size");   /* movk x8, #0x4470, lsl #48: 960.0 */
-    fprintf(stderr, "[botw] handheld render size 960x540, the game's own upscale to the 1280x720 canvas (phone)\n");
-}
-#ifdef GAME_BOTW190
-/* The sun shadow map at 2048 per cascade (botw_shadow_res.h): TOTK_SHADOW_RES=2048, or 2048 in shadows.txt (the settings
-   panel's row), read once before the guest starts; Mac only (the phone's memory is tighter and it was not tried there),
-   off by default. A value that is neither leaves the game's sizes and says so; a site that is not as shipped stops the
-   game. */
-static struct shadow_res_state g_shadow;
-static void patch_shadow_res(Module *m) {
-    if (ios_code()) return;
-    char word[32]; const char *env = getenv("TOTK_SHADOW_RES");
-    int have = runtime_setting_word("shadows.txt", word, sizeof word);
-    g_shadow = shadow_res_start(env, have ? word : NULL);
-    if (g_shadow.bad && g_shadow.from == SHADOW_FROM_ENV) fprintf(stderr, "[botw] TOTK_SHADOW_RES=%s: not 0 or 2048; shadows as shipped\n", env);
-    if (g_shadow.bad && g_shadow.from == SHADOW_FROM_FILE) fprintf(stderr, "[botw] shadows.txt: not off or 2048; shadows as shipped\n");
-    if (!g_shadow.applied) { fprintf(stderr, "[botw] sun shadow map as shipped (480/720/720/896 per level; TOTK_SHADOW_RES=2048 or the settings panel for 2048)\n"); return; }
-    uint32_t found = 0;
-    int bad = shadow_res_apply(m->base, g_shadow.applied, &found);
-    if (bad) {
-        fprintf(stderr, "[botw] sun shadow size main+%#x: found %08x expected %08x\n", shadow_res_site[bad - 1].off, found, shadow_res_site[bad - 1].original);
-        runtime_fail("the 2048 sun shadow map requires the " TOTK_GAME_VERSION " cascade size instructions");
-    }
-    fprintf(stderr, "[botw] sun shadow map 2048 per cascade (shipped 480/720/720/896; from %s)\n", g_shadow.from == SHADOW_FROM_ENV ? "TOTK_SHADOW_RES" : "shadows.txt");
-}
-int runtime_shadow_res_available(void) { return !ios_code(); }   /* the settings panel: where patch_shadow_res acts */
-int runtime_shadow_res_locked(void) { return getenv("TOTK_SHADOW_RES") != NULL; }
-int runtime_shadow_res_saved(void) { return g_shadow.saved; }
-void runtime_shadow_res_save(int size) {   /* the settings panel: the next launch's choice; this run keeps its own */
-    shadow_res_save(&g_shadow, size);
-    runtime_setting_save("shadows.txt", g_shadow.saved ? "2048" : "off", "sun shadow size");
-}
-#endif
-#ifdef GAME_BOTW190
-/* The field of view (botw_fov.h): TOTK_FOV_SCALE=<K> first, else graphics-fov.txt (x100, the settings panel's row), read
-   before the guest starts; the row changes it at once. Mac only. A value that is neither keeps 1x and says so; code that
-   is not as shipped leaves the game's code and field of view, and the row unavailable, without stopping the game. */
-static _Atomic uint32_t *g_fov_factor;
-static const float *g_fov_game;
-static double g_fov_k = 1;
-static int g_fov_refused;
-static void patch_fov(Module *m) {
-    if (ios_code()) return;
-    const char *env = getenv("TOTK_FOV_SCALE"); char word[32];
-    if (env && *env) {
-        double k = fov_parse_env(env);
-        if (k) g_fov_k = k; else fprintf(stderr, "[botw] TOTK_FOV_SCALE=%s: not 0.5 to 2; the game's field of view\n", env);
-    } else if (runtime_setting_word("graphics-fov.txt", word, sizeof word)) {
-        int v = fov_parse_file(word);
-        if (v > 0) g_fov_k = v / 100.0; else fprintf(stderr, "[botw] graphics-fov.txt: not 50 to 200; the game's field of view\n");
-    }
-    uint64_t data = (m->file_size + 0x3fff) & ~0x3fffULL; uint32_t found = 0;
-    int bad = data + 0x4000 == m->size ? fov_apply(m->base, (uintptr_t)m->base, m->text_end, data, m->size, g_fov_k, &found) : -1;
-    if (bad > 0) fprintf(stderr, "[botw] field of view main+%#x: found %08x expected %08x\n", fov_guard[bad - 1].off, found, fov_guard[bad - 1].original);
-    if (bad) {
-        g_fov_refused = 1;
-        fprintf(stderr, "[botw] field of view as shipped: the camera code or its room is not as expected (the row unavailable)\n");
-        return;
-    }
-    g_fov_factor = (_Atomic uint32_t *)(void *)(m->base + data + FOV_FACTOR_SLOT);
-    g_fov_game = (const float *)(void *)(m->base + data + FOV_GAME_SLOT);
-    fprintf(stderr, "[botw] field of view x%g (the main camera's vertical FOV at main+%#x), stub +%#llx\n", g_fov_k, FOV_SITE,
-            (unsigned long long)fov_stub_at(m->text_end));
-}
-int runtime_fov_available(void) { return !ios_code() && !g_fov_refused; }   /* the settings panel: where patch_fov acts */
-int runtime_fov_scale_locked(void) { const char *e = getenv("TOTK_FOV_SCALE"); return e && *e; }
-double runtime_fov_scale(void) { return g_fov_k; }
-void runtime_fov_scale_set(double k) {   /* the settings panel: at once (the camera update reads the factor every frame) */
-    uint32_t bits;
-    if (!fov_factor_bits(k, &bits)) { fprintf(stderr, "[botw] fovscale: x%g is not 0.5 to 2; x%g kept\n", k, g_fov_k); return; }
-    g_fov_k = k;
-    if (g_fov_factor) atomic_store(g_fov_factor, bits);
-    float now = g_fov_game ? *(const volatile float *)g_fov_game : 0, f; memcpy(&f, &bits, 4);
-    /* The game's FOV as the stub last kept it (before the factor), and what the stub then hands setFovy: computed from
-       those two, not read back from the game. */
-    fprintf(stderr, "[botw] fovscale: field of view x%g (the game's vertical FOV now %.1f degrees; %.1f with it, computed)\n", k,
-            now * 57.29578f, fov_result(now, f) * 57.29578f);
-}
-#endif
+#endif   /* the size helpers (GAME_BOTW190 or GAME_BOTW160) */
 #ifdef GAME_BOTW
 /* Font raster size, 1.9.0 and 1.6.0 (the owner, 2026-10-23: "patch the font size up by canvas height / 720"). The Chinese and Korean
    languages (region languages 13, 14, 15 and 17; the others use bitmap fonts, Font/Font_%s.bfarc) draw their text with
@@ -1451,6 +1271,377 @@ static void patch_capture_res(Module *m) {
             "stubs at main+%#llx; TOTK_CAPTURE_RES=0 keeps 720p)\n", k, h, min_w, (unsigned long long)stub);
 }
 #endif
+#ifdef GAME_BOTW190
+/* TOTK_BOTW_COOK_COUNT=1..5 (default 2): dishes per cook of the cook_multiple exefs mod (local build only). The mod's loop
+   count is the word `mov w21, #N` at main+0x792668 (the pot AI at main+0x62393c calls cookItemGet N times); it is rewritten
+   only when the mod put a mov w21, #1..5 there, so a build without the mod keeps the game's one dish. */
+static void patch_cook_count(Module *m) {
+    if (ios_code()) return;
+    uint32_t w; memcpy(&w, m->base + 0x792668, 4);
+    unsigned have = (w >> 5) & 0xffff;
+    if ((w & 0xffe0001fu) != 0x52800015u || have < 1 || have > 5) { fprintf(stderr, "[botw] cook count: main+0x792668 is %08x, not the cook_multiple mod's mov w21,#N: dishes per cook as shipped\n", w); return; }
+    const char *e = getenv("TOTK_BOTW_COOK_COUNT"); int n = e && *e ? atoi(e) : 2;
+    if (n < 1 || n > 5) { fprintf(stderr, "[botw] TOTK_BOTW_COOK_COUNT=%s is not 1..5: using 2\n", e); n = 2; }
+    w = 0x52800015u | ((uint32_t)n << 5);
+    memcpy(m->base + 0x792668, &w, 4);
+    fprintf(stderr, "[botw] cook count: %d dish%s per cook (TOTK_BOTW_COOK_COUNT, 1 = as shipped)\n", n, n == 1 ? "" : "es");
+}
+#endif
+#ifdef GAME_BOTW190
+/* Sheikah Sensor and shrine map mod (local build only; map: docs/botw-v1.9.0-sensor.md, host side:
+   games/botw/gfx/botw_sensor_shrines.h). Needs botw_shrines.bin in the app's Resources (TOTK_BOTW_SENSOR_MOD=0 off).
+   Caves in main's text padding (main+0x15a1d38 = the padding's start main+0x15a1c70 (text end rounded up to 16) + 0xc8,
+   before the 4 KiB page end 0x15a2000; source caves.s in the task folder, each cave tested in Unicorn on the 1.9.0 text).
+   The padding's 912 bytes: the FOV stub +0x20 (botw_fov.h, 11 words), the camera blend veneer +0x50, the arrow gravity
+   veneer +0x68 (6 words each), the VR camera veneer +0x80 .. +0xc8, then the caves (684 bytes, to +0x374), then the depth
+   of field stub (+0x374, botw_view_patches.h); the render distance stub (-12, 9 words) sits before the FOV stub and the model detail
+   distance stub (+0x80) in the VR camera veneer's room. Upstream's heap veneers at +0x100 / +0x110 (native 5K or HD heaps only) overlap the caves. They are reached from eight sites whose original words are checked first:
+     0xd7c748 / 0xd7cf94  shrine / DLC shrine icon slot 11 thunk "b 0xd7bdbc" -> b vis: the vanilla body (flag value > 0 sets
+                          the discovered bit 0x8000 and the draw bit 0x80), then while 0x8000 is clear 0x80 = the reveal byte
+     0xd7c80c / 0xd7d058  slot 12 "copy 0x8000 to 0x80" -> b copy: the same with the reveal byte
+     0xdac260 / 0xdac378  "movi d0, #0" (Color frame 0, orange) -> b col: frame 0.5 (grey) while 0x8000 is clear
+     0xdfdbf0             "bl 0xe84940" (setText of the big map's tower name; x21 = the hovered icon) -> bl text_t: an
+                          icon of the flag class (vtable +0x58 = 0xd7bdbc) labelled Location_MapTowerNN gets the host's " 61%" for its region
+     0xd882d0             "ldr w8, [x8, #0x178]" (the map manager updates the shrine icons, +0x2f0 / +0x300, slot +0x28, only in a
+                          frame with a game flag change) -> b trig: also while the host holds data page +0x10c at 1 (one second after
+                          a reveal byte changed)
+   The text cave uses only caller-saved registers, keeps x0-x2 and the caller's LR and tail-calls setText with a view on the
+   data page; a final "。" moves after the suffix; a seqlock miss, no suffix or a message over 495 units gives the vanilla text.
+   The sensor itself is as shipped here (no height text, owner 2026-10-29); the facing gauge is the sensor_facing pchtxt. No save flag is written. */
+enum { SC_ADRP, SC_B, SC_BL };
+static const uint32_t g_sensor_cave[171] = {   /* caves.s, assembled at main+0x15a1d38 */
+    0xa9be7bfdu, 0xf9000bf3u, 0x910003fdu, 0xaa0003f3u, 0x94000000u, 0xf9000fe0u, 0xaa1303e0u, 0xb9403c08u,
+    0x377800e8u, 0xf9402c09u, 0xb40000a9u, 0x94000012u, 0xb9403c08u, 0x33190128u, 0xb9003c08u, 0xf9400fe0u,
+    0xf9400bf3u, 0xa8c27bfdu, 0xd65f03c0u, 0xb9403c08u, 0x530f7d09u, 0x377800a8u, 0xaa1e03f1u, 0x94000006u,
+    0xaa1103feu, 0xb9403c08u, 0x33190128u, 0xb9003c08u, 0xd65f03c0u, 0x52800009u, 0xf9402c0au, 0xb400044au,
+    0xf940094au, 0xb400040au, 0xf940054bu, 0xd2888becu, 0xf2adceacu, 0xf2ccacecu, 0xf2edcdecu, 0xeb0c017fu,
+    0x54000321u, 0x39404d4bu, 0x350002ebu, 0x3940414bu, 0x5100c16bu, 0x7100257fu, 0x54000268u, 0x3940454cu,
+    0x5100c18cu, 0x7100259fu, 0x540001e8u, 0x0b0b096bu, 0x0b0b058bu, 0x3940494cu, 0x5100c18cu, 0x7100259fu,
+    0x54000128u, 0x0b0b096bu, 0x0b0b058bu, 0x7102217fu, 0x540000a2u, 0x9000000au, 0x9108014au, 0x386b4949u,
+    0x12000129u, 0xd65f03c0u, 0x1e2c1000u, 0x36780048u, 0x2f00e400u, 0x14000000u, 0x1e2c1000u, 0x36780048u,
+    0x2f00e400u, 0x14000000u, 0xaa1503e9u, 0xb40004a9u, 0xf940012au, 0xf9402d4au, 0x9000000bu, 0x9136f16bu,
+    0xeb0b015fu, 0x540003e1u, 0xf9402d29u, 0xb40003a9u, 0xf9400929u, 0xb4000369u, 0xf840912au, 0xd28c29abu,
+    0xf2aa8e0bu, 0xf2ceedebu, 0xf2ee4cabu, 0xeb0b015fu, 0x54000281u, 0x39404d2au, 0x3500024au, 0x3940452au,
+    0x5100c14au, 0x7100255fu, 0x540001c8u, 0x3940492bu, 0x5100c16bu, 0x7100257fu, 0x54000148u, 0x0b0a094au,
+    0x0b0a056au, 0x5100054bu, 0x7100397fu, 0x540000a8u, 0x90000009u, 0x910c0129u, 0x8b0a1529u, 0x14000002u,
+    0x14000000u, 0x9000000au, 0x9104014bu, 0x88dffd6bu, 0x3707ff8bu, 0x7940012cu, 0x34ffff4cu, 0x71003d9fu,
+    0x54ffff08u, 0xf940004du, 0xb4fffecdu, 0xb940084eu, 0x9118014fu, 0xd2800010u, 0xeb0e021fu, 0x54000102u,
+    0x787079b1u, 0x340000d1u, 0xf107c21fu, 0x54fffda2u, 0x783079f1u, 0x91000610u, 0x17fffff8u, 0xeb0e021fu,
+    0x1a9f27f1u, 0x52800008u, 0xb40000f0u, 0xd100060du, 0x786d79e8u, 0x51400d08u, 0x7100091fu, 0x9a9001b0u,
+    0x1a9f17e8u, 0x0b0c020eu, 0x0b1101ceu, 0x0b0801ceu, 0x8b1005edu, 0x91000929u, 0x78402531u, 0x780025b1u,
+    0x7100058cu, 0x54ffffa1u, 0x34000068u, 0x52860051u, 0x780025b1u, 0x790001bfu, 0xd50339bfu, 0xb9410151u,
+    0x6b0b023fu, 0x54fff9e1u, 0x9117c142u, 0xf900004fu, 0xb900084eu, 0x14000000u, 0xb9417908u, 0x90000009u,
+    0xb9410d29u, 0x2a090108u, 0x14000000u,
+};
+static const struct { uint16_t word; uint8_t kind; uint32_t target; } g_sensor_reloc[] = {   /* target: main offset, or 0 = the data page */
+    {4, SC_BL, 0xd7bdbc}, {61, SC_ADRP, 0}, {69, SC_B, 0xdac280}, {73, SC_B, 0xdac398}, {78, SC_ADRP, 0xd7b000}, {108, SC_ADRP, 0}, {112, SC_B, 0xe84940}, {113, SC_ADRP, 0}, {165, SC_B, 0xe84940}, {167, SC_ADRP, 0}, {170, SC_B, 0xd882d4},
+};
+enum { SC_VIS = 0, SC_COPY = 19, SC_COL1 = 66, SC_COL2 = 70, SC_TEXT_T = 74, SC_TRIG = 166 };   /* entry points (word index) */
+static const struct { uint32_t off, original; uint8_t entry, call; } g_sensor_site[] = {
+    {0xd7c748u, 0x17fffd9du, SC_VIS, 0}, {0xd7cf94u, 0x17fffb8au, SC_VIS, 0}, {0xd7c80cu, 0xb9403c08u, SC_COPY, 0}, {0xd7d058u, 0xb9403c08u, SC_COPY, 0},
+    {0xdac260u, 0x2f00e400u, SC_COL1, 0}, {0xdac378u, 0x2f00e400u, SC_COL2, 0}, {0xdfdbf0u, 0x94021b54u, SC_TEXT_T, 1}, {0xd882d0u, 0xb9417908u, SC_TRIG, 0},
+};
+static const struct { uint32_t off, original; } g_sensor_check[] = {   /* what the caves rely on next to the sites */
+    {0xd7c810u, 0x530f7d09u}, {0xd7c81cu, 0xd65f03c0u}, {0xd7d05cu, 0x530f7d09u}, {0xd7d068u, 0xd65f03c0u},   /* the slot-12 copies they replace */
+    {0xdac24cu, 0xb9403e68u}, {0xdac264u, 0x14000007u}, {0xdac364u, 0xb9403e68u}, {0xdac37cu, 0x14000007u},   /* w8 = state; b to the tail */
+    {0xdfdb90u, 0xaa0103f5u}, {0xdfdbecu, 0x910003e2u},   /* x21 = the tower icon; x2 = the view */
+    {0xd882d4u, 0x35fff688u}, {0xd882d8u, 0x17ffffc7u},   /* cbnz w8 -> the shrine icons' update; b past it */
+};
+static uint32_t sensor_branch(uint64_t site, uint64_t target, int link) {   /* b / bl <target>, both offsets in main */
+    int64_t delta = (int64_t)target - (int64_t)site;
+    if ((delta & 3) || delta < -(1 << 27) || delta >= (1 << 27)) runtime_fail("sensor caves: branch outside range");
+    return (link ? 0x94000000u : 0x14000000u) | ((uint32_t)(delta >> 2) & 0x3ffffffu);
+}
+static void sensor_check(Module *m, uint32_t off, uint32_t want) {
+    uint32_t w; memcpy(&w, m->base + off, 4);
+    if (w != want) { fprintf(stderr, "[botw] sensor caves main+%#x: found %08x expected %08x\n", off, w, want); runtime_fail("the sensor and shrine map mod requires the 1.9.0 instructions"); }
+}
+static void patch_sensor_shrines(Module *m) {
+    int botw_shrines_load(void); void botw_shrines_start(uint8_t *page);   /* botw_sensor_shrines.h (nvn_mtl.m) */
+    const char *e = getenv("TOTK_BOTW_SENSOR_MOD");
+    if (ios_code() || strcmp(m->name, "main")) return;
+    if (e && !strcmp(e, "0")) { fprintf(stderr, "[botw] sensor and shrine map mod off (TOTK_BOTW_SENSOR_MOD=0)\n"); return; }
+    /* The caves start after the VR camera veneer (pad+0x80 .. +0xc8, botw_vr_camera.h) and overlap upstream's heap veneers
+       (pad+0x100 and +0x110, botw_heap_patch.h: native 5K or HD heaps only, off on this Mac; with them on, the check below
+       stops the start). The view stubs (botw_view_patches.h) sit at pad-12, pad+0x80 and after the caves. */
+    enum { CAVE_AT = 0xc8 };
+    _Static_assert(CAVE_AT >= 0x80 + 72, "sensor caves start inside the VR camera veneer");
+    const view_patch *const view[] = {&view_lod, &view_disp, &view_dof};   /* patch_view writes them after the caves, so this checks the layout, not the bytes */
+    for (size_t i = 0; i < sizeof view / sizeof *view; i++)
+        if (view[i]->skip + 4 * (int64_t)view[i]->words > CAVE_AT && view[i]->skip < CAVE_AT + (int64_t)sizeof g_sensor_cave) runtime_fail("sensor caves: a view stub is inside the caves");
+    const uint64_t pad = (m->text_end + 15) & ~15ULL, stub = pad + CAVE_AT, data_off = (m->file_size + 0x3fff) & ~0x3fffULL;
+    if (pad != 0x15a1c70u || stub + sizeof g_sensor_cave > ((m->text_end + 0xfff) & ~0xfffULL) || data_off + 0x4000 != m->size) {
+        fprintf(stderr, "[botw] sensor and shrine map mod: main text ends at %#llx, not the 1.9.0 layout: off\n", (unsigned long long)m->text_end); return;
+    }
+    for (size_t i = 0; i < sizeof g_sensor_cave; i++) if (m->base[stub + i]) {
+        fprintf(stderr, "[botw] sensor caves need main+%#llx..%#llx free, but main+%#llx is written (the VR camera veneer ends at +%#llx, the heap veneers are at +%#llx and +%#llx)\n",
+                (unsigned long long)stub, (unsigned long long)(stub + sizeof g_sensor_cave), (unsigned long long)(stub + i), (unsigned long long)(pad + 0xc8), (unsigned long long)(pad + 0x100), (unsigned long long)(pad + 0x110));
+        runtime_fail("sensor caves: another patch writes in main's text padding where the caves go");
+    }
+    for (size_t i = 0; i < sizeof g_sensor_site / sizeof *g_sensor_site; i++) sensor_check(m, g_sensor_site[i].off, g_sensor_site[i].original);
+    for (size_t i = 0; i < sizeof g_sensor_check / sizeof *g_sensor_check; i++) sensor_check(m, g_sensor_check[i].off, g_sensor_check[i].original);
+    if (!botw_shrines_load()) return;   /* no table: as shipped */
+    uint32_t cave[sizeof g_sensor_cave / 4];
+    memcpy(cave, g_sensor_cave, sizeof cave);
+    for (size_t i = 0; i < sizeof g_sensor_reloc / sizeof *g_sensor_reloc; i++) {
+        unsigned k = g_sensor_reloc[i].word; uint64_t at = stub + 4 * k, t = g_sensor_reloc[i].target;
+        cave[k] = g_sensor_reloc[i].kind == SC_ADRP ? adrp_reg(cave[k] & 31, (uintptr_t)m->base + at, (uintptr_t)m->base + (t ? t : data_off))
+                : sensor_branch(at, t, g_sensor_reloc[i].kind == SC_BL);
+    }
+    put_words(m, stub, cave, sizeof cave / 4, "sensor caves");
+    for (size_t i = 0; i < sizeof g_sensor_site / sizeof *g_sensor_site; i++)
+        put_word(m, g_sensor_site[i].off, sensor_branch(g_sensor_site[i].off, stub + 4 * g_sensor_site[i].entry, g_sensor_site[i].call), "sensor site");
+    botw_shrines_start(m->base + data_off);
+    fprintf(stderr, "[botw] sensor and shrine map mod: %zu sites, caves at +%#llx (%zu bytes) (TOTK_BOTW_SENSOR_MOD=0: as shipped)\n",
+            sizeof g_sensor_site / sizeof *g_sensor_site, (unsigned long long)stub, sizeof g_sensor_cave);
+}
+#endif
+#if defined(GAME_BOTW190) || defined(GAME_BOTW160)
+/* HD heaps, 1.9.0 and 1.6.0 (TOTK_BOTW_HD_HEAPS=1, Mac only, default off; the owner, 2026-10-24: "make the pack work in 1.9.0, rise
+   any mem cap if needed"). The HDPacks 4k texture pack (made for 1.6.0, with its own 1.6.0 heap patch) crashed 1.9.0 in
+   two places once its RSTB was right: its 346 MiB TitleBG.pack overflows the 225 MiB StarterPackMgr heap at boot (a null
+   resource handle at main+0x155dda8), and at the first world load a texture never loads (fault 0x1c at main+0xef69f4)
+   because the texture compaction heap "Main" (500 MiB) is full. patch_hd_heaps gives StarterPackMgr and ForResourceL / S
+   the pack's own 1.6.0 sizes (each ForResource mode +409 / +505 MiB) and the compaction heap 2032 MiB. That heap is one
+   NVN memory pool, so nvn_mtl.m's zero-copy limit (POOL_BUFFER_MAX) is 2 GiB with these heaps; at 992 MiB textures were
+   evicted and reloaded and a ruin wall (FldObj_HyliaStoneRuin_A) never appeared (2026-10-24). The game adds 30 MiB to
+   it when w27 is set (main+0x127b774), which would pass 2 GiB and stop at the pool check. It raises the memory heap
+   (nninitStartup) to 7.5 GiB and RootHeap (nnMain) to 7 GiB: one 64-bit orr with a logical immediate, since mov w stops
+   below 4 GiB. Need: 3888 MiB (the 3456x1944 native size) + 409 + 505 + 1532 = 6334 MiB < 7 GiB. services.c raises the heap cap to 8 GiB and the guest
+   region to 9 GiB, and the application pool takes the memory-heap delta (runtime_output_res_extra_bytes). The GPU memory
+   budget (TOTK_GPU_BUDGET_MB, 5000 MB from the launcher on a 16 GB Mac) becomes at least 7000 MB: the 2032 MiB heap took
+   the game to 5017 MB in the first world load (the owner, 2026-10-24: "Raise the GPU budget to 7000 MB"); the kernel
+   panics it guards against came at about 15 GB resident.
+   1.6.0 has the same shipped heaps (StarterPackMgr 225 / 20 MiB at main+0x1778ce0, compaction 500 MiB at main+0x182fad0),
+   and the pack's own 1.6.0.pchtxt cannot be used as it stands: its memory and root heap lines are on sites
+   patch_output_res owns, so g_pchtxt_reserved refuses it. patch_hd_heaps writes the pack's other 1.6.0 values instead.
+   1.9.0 also gets a 64 MiB shrine pack heap (2026-11-16: the owner could not enter the add-on shrine Dungeon120, the load
+   never ended). DungeonPackMgr (main+0xd0380c) loads Pack/<shrine>.pack into a heap it makes on the compaction heap's
+   temp buffer, 30 MiB as shipped (main+0x1560878). The pack's Dungeon120.pack is 31,954,600 bytes (shipped 22,863,848),
+   so the unit heap failed (main+0x156b6dc), the pack was never read, and the stage waited for the shrine's files as
+   loose files. The shipped pack padded to 28 MiB loaded, to 30 MiB it did not. The pack's largest shrine pack is 32.8 MB. */
+enum { HD_MEMORY_HEAP_MIB = 7680, HD_ROOT_HEAP_MIB = 7168, SHIPPED_MEMORY_HEAP_MIB = 3120, HD_GPU_BUDGET_MB = 7000 };
+int runtime_botw_hd_heaps(void) { const char *e = getenv("TOTK_BOTW_HD_HEAPS"); return e && !strcmp(e, "1") && !ios_code(); }
+#endif
+#ifdef GAME_BOTW190
+/* Two faults that Savage Wind Recomp (a static recompilation of the same 1.9.0 code) found and fixed; local patch 0025,
+   own code after their mechanism. Main has no free run of more than 3 words, so the stubs sit in 3-word udf pads: each
+   pad follows a ret / b / br and ends at a 16-byte function start (eh_frame_hdr), and no 1.9.0 pchtxt mod uses them.
+   Each fix checks every word it replaces or fills before it writes any; a word that is not as shipped (a mod or another
+   patch took it) leaves that fix off with one line, and the game runs as shipped there.
+   - Keyframed bodies' turn (SWR #209; TOTK_BOTW_KF_ANGLE=0: as shipped). The platforms, lifts, gates and Divine Beast
+     parts the game moves get, each physics step, the angular velocity of the turn left to their target
+     (main+0x12d5598). Its angle comes from hkQuaternion::getAngle (main+0xb06d4), 2 acos(|w|): below about 0.45 mrad
+     w rounds to 1 in a float and the turn reads as none, then jumps to 0.69 mrad. A 0.05 rad/s tilt reads 17% short at
+     60 fps and not at all at 120 fps, so the body stands still and then catches up, and Link hops on it. The call at
+     main+0x12d57fc now goes to a stub that returns the same angle without the rounding: 2 atan2(|xyz|, |w|), written
+     with the double-angle form atan2(2 |w| |xyz|, w^2 - |xyz|^2) so that it can end in a tail call of the game's
+     atan2f (PLT main+0x159ff10). Range [0, pi] as getAngle; q and -q give the same angle.
+   - An actor whose link is gone (SWR #393: SIGSEGV at 0x88 with Magnesis or the camera on a removed actor; TOTK_BOTW_STALE_ACTOR=0:
+     as shipped). The helper main+0x120bc40 (254 callers) reads actor+0x570, then +0x88, then asks main+0x14c1850; a
+     null +0x570 now answers 0, as a null actor does (in place, with the helper's own pad). Its inline copy at
+     main+0xdea400 (the camera target, function main+0xdea2f8) leaves by the function's "no target" epilogue
+     main+0xdea3b8 instead. A freed actor pointer (SWR #391) is not checked. */
+static uint32_t bl_to(uint64_t site, uint64_t target) { return 0x80000000u | branch_to(site, target); }
+static uint32_t cbz_x_to(uint64_t site, uint64_t target, unsigned rt) {   /* cbz x<rt>, <target> */
+    int64_t delta = (int64_t)target - (int64_t)site;
+    if ((delta & 3) || delta < -(1 << 20) || delta >= (1 << 20)) runtime_fail("patch cbz outside range");
+    return 0xb4000000u | (((uint32_t)(delta >> 2) & 0x7ffffu) << 5) | (rt & 31u);
+}
+typedef struct { uint32_t off, word; } SwrWord;
+static int swr_apply(Module *m, const view_guard *orig, size_t no, const SwrWord *put, size_t np, const char *what) {
+    uint32_t w; const int bad = CODE_PATCHED_AT_BUILD ? 0 : verify_words(m->base, orig, (unsigned)no, &w);
+    if (bad) {
+        fprintf(stderr, "[botw] %s: main+%#x is %08x, not the shipped %08x (a mod or another patch uses it): off\n", what, orig[bad - 1].off, w, orig[bad - 1].original);
+        return 0;
+    }
+    for (size_t i = 0; i < np; i++) put_word(m, put[i].off, put[i].word, what);
+    return 1;
+}
+static int swr_off(const char *name) { const char *e = getenv(name); return !ios_code() && e && !strcmp(e, "0"); }
+enum { KF_SITE = 0x12d57fc, KF_GETANGLE = 0xb06d4, KF_ATAN2F = 0x159ff10, KF_PADS = 5 };
+static const uint32_t g_kf_pad[KF_PADS] = {0x120aed4, 0x120b964, 0x120b9b4, 0x120bac4, 0x120baf4};
+static void patch_kf_angle(Module *m) {
+    if (swr_off("TOTK_BOTW_KF_ANGLE")) { fprintf(stderr, "[botw] keyframed bodies' turn angle as shipped (TOTK_BOTW_KF_ANGLE=0)\n"); return; }
+    static const uint32_t body[2 * KF_PADS] = {   /* q at [x0]; returns s0 */
+        0x3dc00001u, 0x6e21dc22u,   /* ldr q1, [x0] / fmul v2.4s, v1.4s, v1.4s (the squares) */
+        0x5e1c0443u, 0x4e1c1fe2u,   /* mov s3, v2.s[3] (w^2) / mov v2.s[3], wzr */
+        0x6e22d442u, 0x7e30d842u,   /* faddp v2.4s, v2.4s, v2.4s / faddp s2, v2.2s (S = x^2 + y^2 + z^2) */
+        0x1e223861u, 0x1e220863u,   /* fsub s1, s3, s2 (w^2 - S) / fmul s3, s3, s2 */
+        0x1e21c060u, 0x1e202800u,   /* fsqrt s0, s3 (|w| |xyz|) / fadd s0, s0, s0; then b atan2f */
+    };
+    static const view_guard orig[] = {   /* the call (bl main+0xb06d4) and the five empty pads; literal rows, so that
+                                         scripts/patch_sites.py reserves them for the build's --mod */
+        {0x12d57fcu, 0x97b76bb6u},
+        {0x120aed4u, 0}, {0x120aed8u, 0}, {0x120aedcu, 0}, {0x120b964u, 0}, {0x120b968u, 0}, {0x120b96cu, 0},
+        {0x120b9b4u, 0}, {0x120b9b8u, 0}, {0x120b9bcu, 0}, {0x120bac4u, 0}, {0x120bac8u, 0}, {0x120baccu, 0},
+        {0x120baf4u, 0}, {0x120baf8u, 0}, {0x120bafcu, 0},
+    };
+    if (bl_to(KF_SITE, KF_GETANGLE) != orig[0].original) runtime_fail("keyframed bodies' turn angle: call word");
+    SwrWord put[1 + 3 * KF_PADS]; size_t np = 0;
+    for (unsigned p = 0; p < KF_PADS; p++) {
+        const uint32_t pad = g_kf_pad[p];
+        if (orig[1 + 3 * p].off != pad) runtime_fail("keyframed bodies' turn angle: pad table");
+        put[np++] = (SwrWord){pad, body[2 * p]};
+        put[np++] = (SwrWord){pad + 4, body[2 * p + 1]};
+        put[np++] = (SwrWord){pad + 8, branch_to(pad + 8, p + 1 < KF_PADS ? g_kf_pad[p + 1] : KF_ATAN2F)};
+    }
+    put[np++] = (SwrWord){KF_SITE, bl_to(KF_SITE, g_kf_pad[0])};
+    if (swr_apply(m, orig, sizeof orig / sizeof *orig, put, np, "keyframed bodies' turn angle"))
+        fprintf(stderr, "[botw] keyframed bodies' turn angle: 2 atan2(|xyz|, |w|) at main+%#x, stub in %d pads from main+%#x (TOTK_BOTW_KF_ANGLE=0: as shipped)\n",
+                KF_SITE, KF_PADS, g_kf_pad[0]);
+}
+enum { SA_HELPER = 0x120bc40, SA_ASK = 0x14c1850, SA_INLINE = 0xdea400, SA_PAD = 0xdea014, SA_EXIT = 0xdea3b8 };
+static void patch_stale_actor(Module *m) {
+    if (swr_off("TOTK_BOTW_STALE_ACTOR")) { fprintf(stderr, "[botw] actor link reads as shipped (TOTK_BOTW_STALE_ACTOR=0)\n"); return; }
+    const uint32_t h = SA_HELPER;
+    static const view_guard horig[] = {   /* cbz x0, ret / ldr x8, [x0, #0x570] / ldr x0, [x8, #0x88] / b main+0x14c1850 / ret / pad */
+        {0x120bc40u, 0xb4000080u}, {0x120bc44u, 0xf942b808u}, {0x120bc48u, 0xf9404500u}, {0x120bc4cu, 0x140ad701u},
+        {0x120bc50u, 0xd65f03c0u}, {0x120bc54u, 0}, {0x120bc58u, 0},
+    };
+    if (horig[0].original != cbz_x_to(h, h + 0x10, 0) || horig[3].original != branch_to(h + 0xc, SA_ASK)) runtime_fail("actor link helper: words");
+    const SwrWord hput[] = {   /* cbz x0, ret / ldr x8, [x0, #0x570] / cbz x8, none / ldr x0, [x8, #0x88] / b ask / none: mov x0, xzr / ret */
+        {h, cbz_x_to(h, h + 0x18, 0)}, {h + 0x8, cbz_x_to(h + 0x8, h + 0x14, 8)}, {h + 0xc, 0xf9404500u},
+        {h + 0x10, branch_to(h + 0x10, SA_ASK)}, {h + 0x14, 0xaa1f03e0u}, {h + 0x18, 0xd65f03c0u},
+    };
+    static const view_guard iorig[] = {   /* the epilogue's first word, the two loads, the empty pad */
+        {0xdea3b8u, 0x6d43a3e9u}, {0xdea400u, 0xf942ba68u}, {0xdea404u, 0xf9404500u}, {0xdea014u, 0}, {0xdea018u, 0}, {0xdea01cu, 0},
+    };
+    const SwrWord iput[] = {   /* the pad: ldr x8, [x19, #0x570] / cbz x8, no target / b back to the +0x88 load */
+        {SA_PAD, 0xf942ba68u}, {SA_PAD + 4, cbz_x_to(SA_PAD + 4, SA_EXIT, 8)}, {SA_PAD + 8, branch_to(SA_PAD + 8, SA_INLINE + 4)},
+        {SA_INLINE, branch_to(SA_INLINE, SA_PAD)},
+    };
+    const int a = swr_apply(m, horig, sizeof horig / sizeof *horig, hput, sizeof hput / sizeof *hput, "actor link helper");
+    const int b = swr_apply(m, iorig, sizeof iorig / sizeof *iorig, iput, sizeof iput / sizeof *iput, "camera target actor link");
+    if (a || b)
+        fprintf(stderr, "[botw] an actor whose link (+0x570) is gone reads as none:%s%s (TOTK_BOTW_STALE_ACTOR=0: as shipped)\n",
+                a ? " helper main+0x120bc40" : "", b ? " camera target main+0xdea400" : "");
+}
+#endif
+/* The phone's render size (user 2026-10-23: "内部960×540，输出 用默认 放大机制"): the iPhone / iPad runs the handheld
+   mode, whose branch of the 1.6.0 display-mode routine (jump table at main+0x26164f8: mode 1 -> main+0x18216c8) stores
+   the screen width 1280.0 and the render width 1280.0 as one pair:
+     main+0x18216c8  mov x8, #0x44a00000              (1280.0, the screen)
+     main+0x18216cc  movk x8, #0x44a0, lsl #48        (1280.0, the render width) -> movk x8, #0x4470, lsl #48 (960.0)
+   The renderer scales its targets by render / screen width, as docked play does at 1600 / 1920, so the scene is drawn at
+   960x540 and the game's own upscale draws it into the 1280x720 canvas (MetalFX does not replace it on the phone:
+   totk_mfx_up.m mfxup_enabled).
+   1.9.0: the display-mode routine main+0x1266074 jumps by a byte table (main+0x1725916, base main+0x12660bc): mode 1 ->
+   main+0x1266114, the same pair (str x8, [x19, #0x1210]); mode 3 (VR) computes its own and is left alone:
+     main+0x1266114  mov x8, #0x44a00000
+     main+0x1266118  movk x8, #0x44a0, lsl #48        -> movk x8, #0x4470, lsl #48 (960.0)
+   (its dynamic-resolution scale, main+0x12661e8, divides the render width +0x1214 by 1280.0 in handheld: 0.75). */
+#ifdef GAME_BOTW160
+enum { PHONE_RENDER = 0x18216c8u, PHONE_RENDER_STR = 0xf9094b88u };   /* str x8, [x28, #0x1290] */
+#else
+enum { PHONE_RENDER = 0x1266114u, PHONE_RENDER_STR = 0xf9090a68u };   /* str x8, [x19, #0x1210] */
+#endif
+static void patch_phone_render(Module *m) {
+    if (!ios_code()) return;
+    const view_guard check[] = {{PHONE_RENDER, 0xd2a89408u}, {PHONE_RENDER + 4, 0xf2e89408u}, {PHONE_RENDER + 8, PHONE_RENDER_STR}};
+    uint32_t w; const int bad = CODE_PATCHED_AT_BUILD ? 0 : verify_words(m->base, check, sizeof check / sizeof *check, &w);
+    if (bad) {
+        fprintf(stderr, "[botw] handheld render size main+%#x: found %08x expected %08x\n", check[bad - 1].off, w, check[bad - 1].original);
+        runtime_fail("the phone's render size requires the " TOTK_GAME_VERSION " handheld display-mode instructions");
+    }
+    put_word(m, PHONE_RENDER + 4, 0xf2e88e08u, "handheld render size");   /* movk x8, #0x4470, lsl #48: 960.0 */
+    fprintf(stderr, "[botw] handheld render size 960x540, the game's own upscale to the 1280x720 canvas (phone)\n");
+}
+/* The sun shadow map at 2048 per cascade (botw_shadow_res.h): TOTK_SHADOW_RES=2048, or 2048 in shadows.txt (the settings
+   panel's row), read once before the guest starts; Mac only (the phone's memory is tighter and it was not tried there),
+   off by default. A value that is neither leaves the game's sizes and says so; a site that is not as shipped stops the
+   game. */
+static struct shadow_res_state g_shadow;
+static void patch_shadow_res(Module *m) {
+    if (ios_code()) return;
+    char word[32]; const char *env = getenv("TOTK_SHADOW_RES");
+    int have = runtime_setting_word("shadows.txt", word, sizeof word);
+    g_shadow = shadow_res_start(env, have ? word : NULL);
+    if (g_shadow.bad && g_shadow.from == SHADOW_FROM_ENV) fprintf(stderr, "[botw] TOTK_SHADOW_RES=%s: not 0 or 2048; shadows as shipped\n", env);
+    if (g_shadow.bad && g_shadow.from == SHADOW_FROM_FILE) fprintf(stderr, "[botw] shadows.txt: not off or 2048; shadows as shipped\n");
+    if (!g_shadow.applied) { fprintf(stderr, "[botw] sun shadow map as shipped (480/720/720/896 per level; TOTK_SHADOW_RES=2048 or the settings panel for 2048)\n"); return; }
+    uint32_t found = 0;
+    int bad = shadow_res_apply(m->base, g_shadow.applied, &found);
+    if (bad) {
+        fprintf(stderr, "[botw] sun shadow size main+%#x: found %08x expected %08x\n", shadow_res_site[bad - 1].off, found, shadow_res_site[bad - 1].original);
+        runtime_fail("the 2048 sun shadow map requires the " TOTK_GAME_VERSION " cascade size instructions");
+    }
+    fprintf(stderr, "[botw] sun shadow map 2048 per cascade (shipped 480/720/720/896; from %s)\n", g_shadow.from == SHADOW_FROM_ENV ? "TOTK_SHADOW_RES" : "shadows.txt");
+}
+int runtime_shadow_res_available(void) { return !ios_code(); }   /* the settings panel: where patch_shadow_res acts */
+int runtime_shadow_res_locked(void) { return getenv("TOTK_SHADOW_RES") != NULL; }
+int runtime_shadow_res_saved(void) { return g_shadow.saved; }
+void runtime_shadow_res_save(int size) {   /* the settings panel: the next launch's choice; this run keeps its own */
+    shadow_res_save(&g_shadow, size);
+    runtime_setting_save("shadows.txt", g_shadow.saved ? "2048" : "off", "sun shadow size");
+}
+/* The field of view (botw_fov.h): TOTK_FOV_SCALE=<K> first, else graphics-fov.txt (x100, the settings panel's row), read
+   before the guest starts; the row changes it at once. Mac only. A value that is neither keeps 1x and says so; code that
+   is not as shipped leaves the game's code and field of view, and the row unavailable, without stopping the game. */
+static _Atomic uint32_t *g_fov_factor;
+static const float *g_fov_game;
+static double g_fov_k = 1;
+static int g_fov_refused;
+static void patch_fov(Module *m) {
+    if (ios_code()) return;
+    const char *env = getenv("TOTK_FOV_SCALE"); char word[32];
+    if (env && *env) {
+        double k = fov_parse_env(env);
+        if (k) g_fov_k = k; else fprintf(stderr, "[botw] TOTK_FOV_SCALE=%s: not 0.5 to 2; the game's field of view\n", env);
+    } else if (runtime_setting_word("graphics-fov.txt", word, sizeof word)) {
+        int v = fov_parse_file(word);
+        if (v > 0) g_fov_k = v / 100.0; else fprintf(stderr, "[botw] graphics-fov.txt: not 50 to 200; the game's field of view\n");
+    }
+    uint64_t data = (m->file_size + 0x3fff) & ~0x3fffULL; uint32_t found = 0;
+    int bad = data + 0x4000 == m->size ? fov_apply(m->base, (uintptr_t)m->base, m->text_end, data, m->size, g_fov_k, &found) : -1;
+    if (bad > 0) fprintf(stderr, "[botw] field of view main+%#x: found %08x expected %08x\n", fov_guard[bad - 1].off, found, fov_guard[bad - 1].original);
+    if (bad) {
+        g_fov_refused = 1;
+        fprintf(stderr, "[botw] field of view as shipped: the camera code or its room is not as expected (the row unavailable)\n");
+        return;
+    }
+    g_fov_factor = (_Atomic uint32_t *)(void *)(m->base + data + FOV_FACTOR_SLOT);
+    g_fov_game = (const float *)(void *)(m->base + data + FOV_GAME_SLOT);
+    fprintf(stderr, "[botw] field of view x%g (the main camera's vertical FOV at main+%#x", g_fov_k, fov_guard[fov_load[0]].off);
+    for (unsigned s = 1; s < FOV_SITES; s++) fprintf(stderr, ", +%#x", fov_guard[fov_load[s]].off);
+    fprintf(stderr, "), stub +%#llx\n", (unsigned long long)fov_stub_at(m->text_end));
+}
+int runtime_fov_available(void) { return !ios_code() && !g_fov_refused; }   /* the settings panel: where patch_fov acts */
+int runtime_fov_scale_locked(void) { const char *e = getenv("TOTK_FOV_SCALE"); return e && *e; }
+double runtime_fov_scale(void) { return g_fov_k; }
+void runtime_fov_scale_set(double k) {   /* the settings panel: at once (the camera update reads the factor every frame) */
+    uint32_t bits;
+    if (!fov_factor_bits(k, &bits)) { fprintf(stderr, "[botw] fovscale: x%g is not 0.5 to 2; x%g kept\n", k, g_fov_k); return; }
+    g_fov_k = k;
+    if (g_fov_factor) atomic_store(g_fov_factor, bits);
+    float now = g_fov_game ? *(const volatile float *)g_fov_game : 0, f; memcpy(&f, &bits, 4);
+    /* The game's FOV as the stub last kept it (before the factor), and what the stub then hands setFovy: computed from
+       those two, not read back from the game. */
+    fprintf(stderr, "[botw] fovscale: field of view x%g (the game's vertical FOV now %.1f degrees; %.1f with it, computed)\n", k,
+            now * 57.29578f, fov_result(now, f) * 57.29578f);
+}
+/* Model detail distance, render distance (the object and actor display distance: the camera's far plane spans the map
+   already) and depth of field (botw_view_patches.h; 1.9.0 and 1.6.0, whose tables differ; 1.6.0's model detail
+   distance is 32 sites with one stub each): TOTK_LOD_SCALE / TOTK_FAR_SCALE first (the panel's restore reads the
+   files, graphics-lod.txt / graphics-far.txt / graphics-dof.txt, through the setters before the guest starts, and the rows
+   change them at once). Mac only, always installed: 1x / on is the game's own result bit for bit. An env value that is not
+   valid keeps 1x and says so; code that is not as shipped leaves the game's code and the row unavailable, without
+   stopping the game. */
+#ifdef GAME_BOTW160
+#define VIEW_LOD_PATCH view_lod160
+#define VIEW_LOD_APPLY view_lod160_apply
+#define VIEW_DISP_PATCH view_far160
+#define VIEW_DISP_APPLY view_far160_apply
+#define VIEW_DOF_PATCH view_dof160
+#define VIEW_DOF_APPLY view_dof160_apply
+#else
+#define VIEW_LOD_PATCH view_lod
+#define VIEW_LOD_APPLY view_lod_apply
+#define VIEW_DISP_PATCH view_disp
+#define VIEW_DISP_APPLY view_disp_apply
+#define VIEW_DOF_PATCH view_dof
+#define VIEW_DOF_APPLY view_dof_apply
+#endif
 
 /* TOTK_PCHTXT=<file> (runtime/pchtxt.h, the reader both games share), 1.9.0 and 1.6.0 (1.6.0 untested: no 1.6.0 game
    files were at hand). A line on a site the app patches or checks itself (g_pchtxt_reserved, the sites
@@ -1459,22 +1650,95 @@ static void patch_capture_res(Module *m) {
 #include "botw_pchtxt_sites.h"
 
 static void patch_pchtxt(Module *m) { pchtxt_apply(m, "botw", g_pchtxt_reserved, sizeof g_pchtxt_reserved / sizeof *g_pchtxt_reserved); }
+static _Atomic uint32_t *g_lod_slot, *g_disp_slot, *g_dof_slot;
+static double g_lod_k = 1, g_disp_k = 1;
+static int g_dof_off, g_lod_refused, g_disp_refused, g_dof_refused;
+static int view_install(const char *what, int bad, uint32_t found, const view_patch *p, uint64_t text_end, int *refused) {
+    if (bad > 0) fprintf(stderr, "[botw] %s main+%#x: found %08x expected %08x\n", what, p->guard[bad - 1].off, found, p->guard[bad - 1].original);
+    if (bad) {
+        *refused = 1;
+        fprintf(stderr, "[botw] %s as shipped: the game code or its room is not as expected (the row unavailable)\n", what);
+        return 0;
+    }
+    if (p->sites > 1) fprintf(stderr, "[botw] %s at %u sites from main+%#x, stubs +%#llx\n", what, p->sites, p->site, (unsigned long long)view_stub_at(p, text_end));
+    else fprintf(stderr, "[botw] %s at main+%#x, stub +%#llx\n", what, p->site, (unsigned long long)view_stub_at(p, text_end));
+    return 1;
+}
+static void patch_view(Module *m) {
+    if (ios_code()) return;
+    const char *env = getenv("TOTK_LOD_SCALE");
+    if (env && *env) {
+        double k = view_lod_parse_env(env);
+        if (k) g_lod_k = k; else fprintf(stderr, "[botw] TOTK_LOD_SCALE=%s: not 0.1 to 100 or max; the game's model detail distance\n", env);
+    }
+    env = getenv("TOTK_FAR_SCALE");
+    if (env && *env) {
+        double k = view_disp_parse_env(env);
+        if (k) g_disp_k = k; else fprintf(stderr, "[botw] TOTK_FAR_SCALE=%s: not 0.1 to 10; the game's render distance\n", env);
+    }
+    uint64_t data = (m->file_size + 0x3fff) & ~0x3fffULL; uint32_t found = 0;
+    const int page = data + 0x4000 == m->size;
+    const uint64_t base = (uintptr_t)m->base;
+    char what[64];
+    snprintf(what, sizeof what, "model detail distance x%g", g_lod_k);
+    if (view_install(what, page ? VIEW_LOD_APPLY(m->base, base, m->text_end, data, m->size, g_lod_k, &found) : -1, found, &VIEW_LOD_PATCH, m->text_end, &g_lod_refused))
+        g_lod_slot = (_Atomic uint32_t *)(void *)(m->base + data + VIEW_LOD_SLOT);
+    snprintf(what, sizeof what, "render distance x%g (display distance)", g_disp_k);
+    if (view_install(what, page ? VIEW_DISP_APPLY(m->base, base, m->text_end, data, m->size, g_disp_k, &found) : -1, found, &VIEW_DISP_PATCH, m->text_end, &g_disp_refused))
+        g_disp_slot = (_Atomic uint32_t *)(void *)(m->base + data + VIEW_DISP_SLOT);
+    snprintf(what, sizeof what, "depth of field %s", g_dof_off ? "off" : "on");
+    if (view_install(what, page ? VIEW_DOF_APPLY(m->base, base, m->text_end, data, m->size, g_dof_off, &found) : -1, found, &VIEW_DOF_PATCH, m->text_end, &g_dof_refused))
+        g_dof_slot = (_Atomic uint32_t *)(void *)(m->base + data + VIEW_DOF_SLOT);
+}
+int runtime_lod_available(void) { return !ios_code() && !g_lod_refused; }   /* the settings panel: where patch_view acts */
+int runtime_far_available(void) { return !ios_code() && !g_disp_refused; }
+int runtime_dof_available(void) { return !ios_code() && !g_dof_refused; }
+int runtime_lod_scale_locked(void) { const char *e = getenv("TOTK_LOD_SCALE"); return e && *e; }
+int runtime_far_scale_locked(void) { const char *e = getenv("TOTK_FAR_SCALE"); return e && *e; }
+double runtime_lod_scale(void) { return g_lod_k; }
+double runtime_far_scale(void) { return g_disp_k; }
+void runtime_lod_scale_set(double k) {   /* the settings panel: at once (the stub reads the word at every call) */
+    uint32_t bits;
+    if (!view_lod_bits(k, &bits)) { fprintf(stderr, "[botw] lodscale: x%g is not 0.1 to 1000000; x%g kept\n", k, g_lod_k); return; }
+    g_lod_k = k;
+    if (g_lod_slot) atomic_store(g_lod_slot, bits);
+    fprintf(stderr, "[botw] lodscale: model detail distance x%g\n", k);
+}
+void runtime_far_scale_set(double k) {
+    uint32_t bits;
+    if (!view_disp_bits(k, &bits)) { fprintf(stderr, "[botw] farscale: x%g is not 0.1 to 10; x%g kept\n", k, g_disp_k); return; }
+    g_disp_k = k;
+    if (g_disp_slot) atomic_store(g_disp_slot, bits);
+    fprintf(stderr, "[botw] farscale: render distance (the object and actor display distance) x%g\n", k);
+}
+void runtime_dof_set(int on) {
+    g_dof_off = !on;
+    if (g_dof_slot) atomic_store(g_dof_slot, (uint32_t)g_dof_off);
+    fprintf(stderr, "[botw] depth of field %s\n", on ? "on" : "off");
+}
+int runtime_dof_on(void) { return !g_dof_off; }
 void runtime_game_patches(Module *m) {
     fprintf(stderr, "[botw] %s game-code patches\n", TOTK_GAME_VERSION);
     botw_stereo_install(m);
     runtime_survey_init(m);   /* TOTK_SURVEY=1: survey pos / move (world_survey.c) */
+#ifdef GAME_BOTW190
+    { void botw_fog_init(uintptr_t main_base, uint64_t main_size); if (!strcmp(m->name, "main")) botw_fog_init((uintptr_t)m->base, m->size); }   /* fog-of-war map (gfx/botw_fog_map.h) */
+#endif
     patch_pchtxt(m);   /* first: on a Mac the patches below check the original words they replace (the phone's code is patched at build, CODE_PATCHED_AT_BUILD) */
+#ifdef GAME_BOTW190
+    patch_cook_count(m);   /* after the pchtxt mods, whose word it rewrites */
+    patch_sensor_shrines(m);   /* after the pchtxt mods: it checks the words they must not change */
+    patch_kf_angle(m);         /* local 0025: after the pchtxt mods, whose pads it must find empty */
+    patch_stale_actor(m);
+#endif
     if (!patch_output_res(m)) patch_render_1080(m);
     patch_phone_render(m);
 #if defined(GAME_BOTW190) || defined(GAME_BOTW160)
     patch_hd_heaps(m);
 #endif
-#ifdef GAME_BOTW190
     patch_shadow_res(m);
-#endif
-#ifdef GAME_BOTW190
     patch_fov(m);
-#endif
+    patch_view(m);   /* 1.9.0 and 1.6.0 (the tables differ) */
     patch_font_size(m);
     patch_capture_res(m);   /* after patch_font_size: its stubs follow the typing-speed stub */
     botw_aspect_install(m);
@@ -1906,7 +2170,7 @@ int runtime_render_res(unsigned *w, unsigned *h) { (void)w; (void)h; return 0; }
    1.9.0 values (changed in play, the screen size kept): unset or auto as 1.6.0; 1440p the same
    cycle, starting at 2560x1440; screen takes the largest 16:9 size of the main display (native_k_from_screen), starts at
    it, and the settings panel's picture offers off, MetalFX 2K, native (the screen size) and native 2K + MetalFX (the
-   2560x1440 canvas that MetalFX scales to the window);
+   2560x1440 canvas that MetalFX scales to the window; 1.6.0 takes screen the same way, with its own heaps, heaps160);
    0 or 1080p the shipped size; a 16:9 <w>x<h> (native_k_parse) that size, fixed. The swapchain and the heaps are made for
    the largest size (native_heaps: 1.9.0 needs more than 1.6.0, see the GAME_BOTW190 block above). */
 enum { OUT_OFF, OUT_AUTO, OUT_FIXED };
@@ -1940,6 +2204,7 @@ static int native_5k_app(void) {
     return v;
 }
 #ifdef GAME_BOTW160
+static int g_out_start_big;   /* 1: the canvas starts at the largest size (screen), as on 1.9.0 */
 static void output_parse(void) {
     if (g_out_mode >= 0) return;
     if (ios_code()) { g_out_mode = OUT_OFF; return; }   /* the phone: the game's own size (handheld 720p) */
@@ -1956,8 +2221,14 @@ static void output_parse(void) {
     const char *e = getenv("TOTK_OUTPUT_RES"); unsigned a, b; char tail;
     if (e && !strcmp(e, "0")) { g_out_mode = OUT_OFF; return; }
     if (!e || !*e || !strcmp(e, "auto")) { g_out_mode = OUT_AUTO; g_out_w = native_5k_app() ? 5120 : native_4k_app() ? 3840 : 2560; g_out_h = native_5k_app() ? 2880 : native_4k_app() ? 2160 : 1440; return; }
+    if (!strcmp(e, "screen")) {   /* the largest 16:9 size of the main display, switchable (as 1.9.0's screen: native_k_from_screen) */
+        unsigned w, h; native_screen_pixels(&w, &h); int k = native_k_from_screen(w, h);
+        if (!k) { fprintf(stderr, "[botw] native size from the screen: main display %ux%u has no 16:9 size above 1920x1080; shipped canvas\n", w, h); g_out_mode = OUT_OFF; return; }
+        fprintf(stderr, "[botw] native size from the screen: main display %ux%u (native mode) -> %ux%u\n", w, h, 16u * k, 9u * k);
+        g_out_mode = OUT_AUTO; g_out_start_big = 1; g_out_w = 16u * k; g_out_h = 9u * k; return;
+    }
     if (sscanf(e, "%ux%u%c", &a, &b, &tail) != 2 || a < 1280 || b < 720 || a > 5120 || b > 2880)
-        runtime_fail("TOTK_OUTPUT_RES must be auto, 0 or <width>x<height> (1280x720 .. 5120x2880)");
+        runtime_fail("TOTK_OUTPUT_RES must be auto, screen, 0 or <width>x<height> (1280x720 .. 5120x2880)");
     g_out_mode = OUT_FIXED; g_out_w = a; g_out_h = b;
 }
 #else
@@ -2127,8 +2398,9 @@ static int patch_output_res(Module *m) {
     const uint64_t page = (uintptr_t)m->base + data_off;
     g_out_main = m->base; g_out_page = (_Atomic uint64_t *)(void *)(page + 16);
     uint64_t initial_vr=atomic_load(&g_out_vr_requested);
-    output_page(g_out_vr?(unsigned)initial_vr:g_out_mode==OUT_AUTO?1920:w,
-                g_out_vr?(unsigned)(initial_vr>>32):g_out_mode==OUT_AUTO?1080:h);
+    int small = g_out_mode == OUT_AUTO && !g_out_start_big;   /* auto starts at 1080p, screen at the screen size */
+    output_page(g_out_vr?(unsigned)initial_vr:small?1920:w,
+                g_out_vr?(unsigned)(initial_vr>>32):small?1080:h);
     uint32_t mw = movz_x(9, w, 0), mh = movk_x(9, h, 2);   /* the swapchain at the largest size */
     for (size_t i = 0; i < sizeof size_init / sizeof *size_init; i++) { memcpy(m->base + size_init[i], &mw, 4); memcpy(m->base + size_init[i] + 12, &mh, 4); }
     const uint32_t branch[4] = {
@@ -2153,7 +2425,7 @@ static int patch_output_res(Module *m) {
     else if (!botw_heap_patch(m->base, m->size, m->text_end, 0xe53fa0, 0x52b82015u, 21, 1, (uint64_t)(3088 + extra) << 20))
         runtime_fail("the output size: cannot install the 64-bit root heap size");
     fprintf(stderr, "[botw] output: a %ux%u swapchain, starting at %s; heaps: render %u MiB, graphics %u MiB, +%u MiB (25 instructions verified)%s\n",
-            w, h, g_out_mode == OUT_AUTO ? "1920x1080" : "that size", render, gfx, extra, g_out_mode == OUT_AUTO ? "; the settings panel switches" : "");
+            w, h, small ? "1920x1080" : "that size", render, gfx, extra, g_out_mode == OUT_AUTO ? "; the settings panel switches" : "");
     return 1;
 }
 #else
@@ -2241,8 +2513,8 @@ static void patch_hd_heaps(Module *m) {   /* TOTK_BOTW_HD_HEAPS=1: the comment a
         {0x1778ce0u, 0x52a1c208u, 0xd2a37b08u},   /* StarterPackMgr: mov w8, #0xe100000 (225 MiB) -> 445.5 MiB */
         {0x1778ce4u, 0x52a02809u, 0x52a0c009u},   /* the same, other mode: mov w9, #0x1400000 (20 MiB) -> 96 MiB */
         {0x182fad0u, 0x52a3e808u, 0x52afa408u},   /* texture compaction "Main": mov w8, #0x1f400000 (500 MiB) -> 2002 MiB */
-        {0x182f368u, 0x52a2ec00u, 0xd2a8a000u},   /* ForResourceL: 374 -> 1104 MiB */
-        {0x182f3e0u, 0x320607e0u, 0xd2a6e000u},   /* ForResourceS: 192 -> 880 MiB */
+        {0x182f368u, 0x52a2ec00u, 0xd2a8a000u},   /* FixedHeap: 374 -> 1104 MiB (the name string at the site; not ForResourceL) */
+        {0x182f3e0u, 0x320607e0u, 0xd2a6e000u},   /* TexArcWork, a child of FixedHeap: 192 -> 880 MiB (not ForResourceS) */
         {0x182f39cu, 0x320a03e0u, 0x52a01800u},   /* 4 -> 12 MiB */
         {0xdfa578u, 0x52a03600u, 0x52a06c00u},    /* 27 -> 54 MiB */
         {0x1c8f060u, 0x52a05a00u, 0x52a06f00u},   /* 45 -> 55.5 MiB */
@@ -2271,6 +2543,8 @@ static void patch_hd_heaps(Module *m) {   /* TOTK_BOTW_HD_HEAPS=1: the comment a
         {0x127b730u, 0x52a21219u, 0x52a60419u},   /* ForResourceS, mode 1: 265 -> 770 MiB */
         {0x127b738u, 0x52a3b617u, 0x52a6e817u},   /* ForResourceL, mode 2: 475 -> 884 MiB */
         {0x127b73cu, 0x52a17c19u, 0x52a56e19u},   /* ForResourceS, mode 2: 190 -> 695 MiB */
+        {0x156087cu, 0x72a03c00u, 0x72a08000u},   /* shrine pack heap, its allocation: movk w0, #0x1e0, lsl #16 (0x1e01000) -> 0x4001000 */
+        {0x1560894u, 0x52a03c02u, 0x52a08002u},   /* the same, the size DungeonPackMgr reads: mov w2, #0x1e00000 (30 MiB) -> 64 MiB */
     };
     unsigned w, h; int native = runtime_output_res(&w, &h);
     const struct { uint32_t off, original; int kind; uint32_t word; } big[] = {   /* patch_output_res may have written them */
@@ -2363,7 +2637,7 @@ int runtime_game_fps_limit(void) {
 /* The settings panel's picture (runtime.h OUTPUT_MODE_*). MetalFX 2K: MetalFX replaces the game's own upscale of the
    scene into the 1080p canvas (nvn_mtl.m mfxup_dock, BOTW_MFXUP_DOCK_KEY) and upscales the canvas into a window or full
    screen bigger than 1080p at the present (the output stage). With a switchable start (TOTK_OUTPUT_RES auto, the default;
-   on 1.9.0 also 1440p and screen) the panel also offers native: the canvas and the scene at the largest size of the
+   screen on both versions, and on 1.9.0 also 1440p) the panel also offers native: the canvas and the scene at the largest size of the
    session (output_switch; 2560x1440, or the screen size under TOTK_OUTPUT_RES=screen), and native + MetalFX: the
    2560x1440 canvas that MetalFX scales to the window (1.9.0 on a screen bigger than 2K: bog 2026-10-24, clean edges at 51
    FPS, native 2K 50, the screen size 42-44). Both versions also offer 720p (the canvas and the scene at 1280x720).
@@ -2382,7 +2656,7 @@ int runtime_output_native(int mode, unsigned *w, unsigned *h) {
     if (mode == OUTPUT_MODE_NATIVE) { *w = g_out_w; *h = g_out_h; return 1; }
     if (mode != OUTPUT_MODE_NATIVE_METALFX) return 0;
 #ifdef GAME_BOTW160
-    if (app4k) { *w = 2560; *h = 1440; } else { *w = g_out_w; *h = g_out_h; }
+    if (g_out_w >= 2560) { *w = 2560; *h = 1440; } else { *w = g_out_w; *h = g_out_h; }   /* as 1.9.0; a screen below 2K keeps its size */
 #else
     if (g_out_w < 2560) return 0;   /* a screen below 2560x1440: the swapchain cannot take the 2K canvas */
     *w = 2560; *h = 1440;   /* the largest size is 2560x1440 or bigger (screen); MetalFX scales this canvas to the window */

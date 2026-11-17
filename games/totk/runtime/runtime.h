@@ -185,6 +185,9 @@ extern int (*runtime_vr_pad)(int plain, uint64_t *buttons, int32_t *lx, int32_t 
 void runtime_gamepad_text_capture(int on);
 void runtime_gamepad_text_read(RuntimeGamepadState *out);
 int runtime_gamepad_game_input(void);   /* any thread: 1 while the game gets the controllers (no capture, nor its release wait) */
+#ifdef GAME_BOTW160
+uint32_t runtime_zr_frames(void);   /* the bow thread: frames ZR has been held in the state the game reads (input.c) */
+#endif
 /* macOS opts in; the controller's settings button (L3 + R3 together, or the one picked in the key bindings) is latched
    independently of guest polling. */
 void runtime_gamepad_settings_enable(int enabled);
@@ -282,7 +285,7 @@ void runtime_dsu_status(RuntimeDSUStatus *out);       /* main queue; passive sna
 int runtime_dsu_apply(const RuntimeDSUSettings *settings); /* 0 applied and saved, -1 invalid, -2 environment locked */
 void runtime_feedback_motion_source_changed(void);   /* switch between DSU and native motion without changing rumble */
 int runtime_motion_controller_live(void);   /* a controller with motion is attached now */
-int runtime_tilt_active(void);   /* runtime/gamepad.m: tilt mode (LB + LT, runtime/gyro_tilt.h) owns the sticks */
+int runtime_tilt_active(void);   /* runtime/gamepad.m: tilt mode (L3 + R3, runtime/gyro_tilt.h) owns the sticks */
 int runtime_tilt_speed(void);          /* the settings panel's tilt rows: 60, 90, 180 or 360 degrees a second, saved in tilt.txt */
 void runtime_tilt_speed_set(int speed);
 int runtime_tilt_invert(void);         /* the stick axes reversed: TILT_INVERT_* bits (runtime/gyro_tilt.h), 0 none */

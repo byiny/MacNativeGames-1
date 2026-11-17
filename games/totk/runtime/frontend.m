@@ -399,9 +399,7 @@ static NSString *settings_panel_pad_text(int family);  /* settings_panel.h: the 
 /* The box's last line (user 2026-10-30): how to open the settings panel, as it is bound now: key 1, and with a
    controller connected its button or chord (L3 + R3 unless the key bindings set one). */
 static NSString *hud_settings_hint(void) {
- int detected=-1;runtime_gamepad_type(&detected);
- if(detected<=GAMEPAD_TYPE_AUTO)return @(TOTK_UI("设置：键盘 1","Settings: key 1"));
- return [NSString stringWithFormat:@(TOTK_UI("设置：键盘 1 · 手柄 %@","Settings: key 1 · controller %@")),settings_panel_pad_text(settings_pad_family())];
+ return @(TOTK_UI("设置：键盘 1","Settings: key 1"));   /* local (owner 2026-11-14): no controller button opens the panel */
 }
 @implementation TOTKHudBox
 -(instancetype)initWithFrame:(NSRect)frame{if((self=[super initWithFrame:frame])){self.wantsLayer=YES;self.layer.backgroundColor=[NSColor colorWithCalibratedWhite:0.04 alpha:0.72].CGColor;self.layer.cornerRadius=7;self.layer.borderWidth=1;self.layer.borderColor=[NSColor colorWithCalibratedWhite:1 alpha:0.14].CGColor;
@@ -929,8 +927,13 @@ void runtime_front_run(void(*callback)(void)){
      with it (a test's frames and pictures then say nothing). */
   {const char *e=getenv("TOTK_WINDOW_FLOAT");if(e&&!strcmp(e,"1")){window.level=NSFloatingWindowLevel;window.collectionBehavior|=NSWindowCollectionBehaviorCanJoinAllSpaces|NSWindowCollectionBehaviorFullScreenAuxiliary;}}   /* also over another app in full screen */
   /* An agent's test game (TOTK_SLOT_OWNER other than user) says so in its title: it plays a save copy and its script closes it. */
+#ifdef GAME_BOTW   /* BOTW: owner and purpose are enough (owner, 2026-10-24) */
+#define TEST_TITLE TOTK_UI("测试局（%s）Ver. %s：%s","Test session (%s) Ver. %s: %s")
+#else
+#define TEST_TITLE TOTK_UI("测试局（%s）Ver. %s：%s — 存档副本，进度不会存进你的存档，脚本会自己关闭","Test session (%s) Ver. %s: %s — save copy, progress is not saved to your save, the script closes it")
+#endif
   const char *owner=getenv("TOTK_SLOT_OWNER"),*purpose=getenv("TOTK_SLOT_PURPOSE");
-  window.title=owner&&*owner&&strcmp(owner,"user")?[NSString stringWithFormat:@(TOTK_UI("测试局（%s）Ver. %s：%s — 存档副本，进度不会存进你的存档，脚本会自己关闭","Test session (%s) Ver. %s: %s — save copy, progress is not saved to your save, the script closes it")),owner,TOTK_GAME_VERSION,purpose&&*purpose?purpose:TOTK_UI("代理测试","agent test")]:[NSString stringWithFormat:@GAME_NAME "  Mac — Ver. %s",TOTK_GAME_VERSION];
+  window.title=owner&&*owner&&strcmp(owner,"user")?[NSString stringWithFormat:@(TEST_TITLE),owner,TOTK_GAME_VERSION,purpose&&*purpose?purpose:TOTK_UI("代理测试","agent test")]:[NSString stringWithFormat:@GAME_NAME "  Mac — Ver. %s",TOTK_GAME_VERSION];
   windowDelegate=[TOTKWindowDelegate new];window.delegate=windowDelegate;
   front_hdr_init();
   front_install_menu();
@@ -941,7 +944,7 @@ void runtime_front_run(void(*callback)(void)){
   if(totk_hdr_available()){
    front_hdr_present_mode(front_hdr_enabled());front_hdr_update();
    [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(NSTimer *timer){(void)timer;front_hdr_update();}];
-   fprintf(stderr,"[hdr] TOTK 1.4.3 scene HDR: EDR %s (choice %s), FP16 extended linear sRGB, RenoDX-style tone mapping\n",front_hdr_enabled()?"on":"off",hdr_choice_word(front_hdr_choice()));
+   fprintf(stderr,HDR_START_LOG,front_hdr_enabled()?"on":"off",hdr_choice_word(front_hdr_choice()));
   }
   metalLayer.drawableSize=CGSizeMake(ww,wh);runtime_aspect_view(ww,wh);
   metalLayer.framebufferOnly=NO;window.contentView.wantsLayer=YES;window.contentView.layer=metalLayer;

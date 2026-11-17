@@ -12,7 +12,11 @@ static int failures;
 /* Worked out by hand from the A64 encoding (MOVZ 0xd2800000 / MOVK 0xf2800000, hw << 21, imm16 << 5, Rd = 8). */
 static const uint32_t shipped[4] = {0xd2803c08u, 0xf2a05a08u, 0xf2c05a08u, 0xf2e07008u};   /* 480, 720, 720, 896 */
 static const uint32_t patched[4] = {0xd2810008u, 0xf2a10008u, 0xf2c10008u, 0xf2e10008u};   /* 2048 at each */
+#ifdef GAME_BOTW160
+#define IMAGE 0x1900000u   /* above the last site (build with -DGAME_BOTW160 for 1.6.0's offsets) */
+#else
 #define IMAGE 0x1300000u   /* above the last site */
+#endif
 
 static uint8_t *fake_main(void) {
     uint8_t *m = malloc(IMAGE);

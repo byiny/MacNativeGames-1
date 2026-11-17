@@ -7,6 +7,7 @@
 //   ~/Library/Logs/MacNativeGames/totk.log             this run, only with the debug log on (totk.previous.log: the one before; botw.log for Breath of the Wild)
 // If the game is already running, the launcher only brings it to the front.
 #import <AppKit/AppKit.h>
+#import <CommonCrypto/CommonDigest.h>
 #import <GameController/GameController.h>
 #include <IOKit/hid/IOHIDManager.h>
 #include <IOKit/hid/IOHIDUsageTables.h>
@@ -24,10 +25,14 @@
 #include "../third_party/d2r_gfx/gfx/nvn/dmsh_chain.h"
 #include "../runtime/game_version.h"
 #include "../runtime/controller_map.h"
+#include "../runtime/gamepad_layout.h"   // gamepad_icon_style: the button icons for key 6's type and the connected controller
 #include "../runtime/runtime.h"
 #include "../third_party/d2r_gfx/gfx/nvn/include/totk_ui_lang.h"
 #include "../third_party/d2r_gfx/gfx/nvn/totk_shader_contrib.h"
 #include "../third_party/d2r_gfx/gfx/nvn/totk_contrib_upload.h"
+#ifdef TOTK_GAME_V143
+#include "settings_txt.h"   /* <data>/settings.txt, TOTK 1.4.3 local build only */
+#endif
 
 static void show_error(NSString *detail) {
     NSAlert *alert = [NSAlert new];
@@ -36,6 +41,7 @@ static void show_error(NSString *detail) {
     [alert runModal];
 }
 
+#ifdef GAME_BOTW
 /* Whether a game controller is connected: a HID joystick / gamepad (DualSense, Pro Controller, Xbox over Bluetooth),
    or one the GameController framework adopts (Xbox over USB), which it reports a moment after the first run loop turns. */
 static BOOL controller_connected(void) {
@@ -55,6 +61,7 @@ static BOOL controller_connected(void) {
     }
     return found;
 }
+#endif
 
 static NSDictionary<NSString *, NSString *> *kv_read(NSString *path) {
     NSMutableDictionary *out = [NSMutableDictionary dictionary];
@@ -188,6 +195,123 @@ static BOOL make_dir(NSString *path) {
     return [NSFileManager.defaultManager createDirectoryAtPath:path withIntermediateDirectories:YES attributes:nil error:nil];
 }
 
+/* Button icons (docs/mods.md, Button prompts): an app built with them (build_app.py: button-icons/kit.txt) draws the game's
+   prompts for the controller in use. The style comes from key 6's type in controller-type.txt, or for auto from the
+   controller connected now, else the last one the game saw (controller-detected.txt, runtime/gamepad.m); the face mode
+   and controls.txt as the game maps them; the size from the main display (gamepad_icon_scale: 2x for 3456x2234). Switch
+   icons are drawn only at 2x or more (only the Breath of the Wild tool draws them); at 1x the game keeps its own. Each style,
+   face mode, size and controls.txt gets its own folder of RomFS files under
+   <controls folder>/button-icons/<version>/<key>, made once by the bundled tool from this app's RomFS (seconds) and
+   then reused; runtime/romfs.c loads it like a mod (TOTK_ROMFS_BUTTON_ICONS). The game reads it at start only, so a
+   new pick shows from the next start. Any failure starts the game with its own Switch icons. Returns the style word for
+   TOTK_BUTTON_ICONS, and *folder the folder to load or nil. */
+static NSString *button_icons(NSString *root, NSString *controls, NSString **folder) {
+    *folder = nil;
+    NSString *kit = [root stringByAppendingPathComponent:@"button-icons"];
+    NSDictionary *info = kv_read([kit stringByAppendingPathComponent:@"kit.txt"]);
+    if (!info[@"python"] || !info[@"tool"] || !info[@"id"]) return nil;
+    NSString *settings = controls.stringByDeletingLastPathComponent;
+    NSString *(^word)(NSString *) = ^NSString *(NSString *name) {
+        NSString *text = [NSString stringWithContentsOfFile:[settings stringByAppendingPathComponent:name] encoding:NSUTF8StringEncoding error:nil];
+        return text ?: @""; };
+    int type = gamepad_type_parse(word(@"controller-type.txt").UTF8String);
+    if (type < 0) type = GAMEPAD_TYPE_AUTO;
+    int detected = -1;
+    if (type == GAMEPAD_TYPE_AUTO) {
+        /* controllers macOS already knows show up within a few run loop turns */
+        for (int i = 0; i < 5 && detected < 0; i++) {
+            for (GCController *c in GCController.controllers)
+                if (c.extendedGamepad) { detected = gamepad_type_detect(c.productCategory.UTF8String, c.vendorName.UTF8String); break; }
+            if (detected < 0) [NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.1]];
+        }
+        if (detected < 0) detected = gamepad_type_parse(word(@"controller-detected.txt").UTF8String);
+#ifndef GAME_BOTW
+        if (detected < 0) detected = GAMEPAD_TYPE_XBOX;     /* no pad seen yet: Xbox prompts */
+#endif
+    }
+    NSScreen *screen = NSScreen.mainScreen;     /* sharper icons for a bigger display: the game's size times this */
+    CGFloat backing = screen ? screen.backingScaleFactor : 1;
+    int scale = screen && [info[@"tool"] hasSuffix:@"botw_prompts.py"]
+        ? gamepad_icon_scale(screen.frame.size.width * backing, screen.frame.size.height * backing) : 1;
+    setenv("TOTK_BUTTON_ICONS_SCALE", @(scale).stringValue.UTF8String, 1);   /* runtime/gamepad.m logs the next start's pick with it */
+    int by_position = 1, style = gamepad_icon_style(type, detected, scale, &by_position);
+    if (style < 0) return @"none";
+    NSString *name = [NSString stringWithFormat:@"%s-%s", gamepad_type_name(style), by_position ? "position" : "label"];
+    NSData *layout = [NSData dataWithContentsOfFile:controls];
+    NSMutableData *keyed = [[[NSString stringWithFormat:@"%@\n%@\n%d\n", info[@"id"], name, scale] dataUsingEncoding:NSUTF8StringEncoding] mutableCopy];
+    if (layout) [keyed appendData:layout];
+#ifdef GAME_BOTW
+    /* A mod with its own resource size table (an HD texture pack): the tool raises that table (botw_prompts.py --mods), so a
+       new table of the mods makes a new set at 2x or more. TOTK_ROMFS_MODS is set before this runs. */
+    const char *mods = getenv("TOTK_ROMFS_MODS");
+    NSString *modsFolder = scale > 1 && mods && *mods && strcmp(mods, "0") ? @(mods) : nil;   /* at 1x the set has no table */
+    for (NSString *line in [[NSString stringWithContentsOfFile:[modsFolder stringByAppendingPathComponent:@"manifest.tsv"] encoding:NSUTF8StringEncoding error:nil] componentsSeparatedByString:@"\n"])
+        if ([line hasPrefix:@"System/Resource/ResourceSizeTable.product.srsizetable\t"]) [keyed appendData:[line dataUsingEncoding:NSUTF8StringEncoding]];
+#else
+    /* The HD texture pack (runtime/romfs.c, TOTK_TEXTURE_PACK=1) replaces the resource size table too: the tool grows the
+       pack's table (--texture-pack), and its manifest line keys the set, so pack on, off or changed each get their own set
+       (a set made on the pack's table cannot load without the pack). */
+    NSString *pack = nil;
+    const char *packOn = getenv("TOTK_TEXTURE_PACK"), *packDir = getenv("TOTK_TEXTURE_PACK_DIR");
+    if (packOn && !strcmp(packOn, "1")) {
+        pack = packDir ? @(packDir) : [word(@"texture-pack-path.txt") stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        BOOL table = NO;
+        for (NSString *line in [[NSString stringWithContentsOfFile:[pack stringByAppendingPathComponent:@"manifest.tsv"] encoding:NSUTF8StringEncoding error:nil] componentsSeparatedByString:@"\n"])
+            if ([line hasPrefix:@"System/Resource/ResourceSizeTable."]) { [keyed appendData:[line dataUsingEncoding:NSUTF8StringEncoding]]; table = YES; }
+        if (!table) pack = nil;
+    }
+#endif
+    uint8_t digest[CC_SHA256_DIGEST_LENGTH]; CC_SHA256(keyed.bytes, (CC_LONG)keyed.length, digest);
+    NSMutableString *key = [NSMutableString string];
+    for (int i = 0; i < 8; i++) [key appendFormat:@"%02x", digest[i]];
+    NSString *cache = [settings stringByAppendingPathComponent:@"button-icons/" TOTK_GAME_DIR];
+    NSString *target = [cache stringByAppendingPathComponent:key];
+    NSFileManager *fm = NSFileManager.defaultManager;
+    if (![fm fileExistsAtPath:[target stringByAppendingPathComponent:@"manifest.tsv"]]) {
+        NSString *temporary = [target stringByAppendingFormat:@".tmp-%d", getpid()];
+        [fm removeItemAtPath:temporary error:nil];
+        if (![fm createDirectoryAtPath:temporary withIntermediateDirectories:YES attributes:nil error:nil]) return @"none";
+        NSMutableArray *arguments = [@[@"-B", [kit stringByAppendingPathComponent:info[@"tool"]], temporary,   /* -B: nothing written into the signed app */ @"--romfs", @"extracted/" TOTK_GAME_DIR "/romfs",
+                                       @"--version", @TOTK_GAME_DIR, @"--style", @(gamepad_type_name(style)), @"--face-buttons", by_position ? @"position" : @"label"] mutableCopy];
+        if ([info[@"tool"] hasSuffix:@"botw_prompts.py"])      /* only the Breath of the Wild tool draws at a scale */
+            [arguments addObjectsFromArray:@[@"--scale", @(scale).stringValue]];
+        if ([info[@"tool"] hasSuffix:@"make_button_icons.py"]) [arguments addObject:@"--our-art"];   /* the Breath of the Wild art on the game's own picture boxes */
+#ifdef GAME_BOTW
+        if (modsFolder && [info[@"tool"] hasSuffix:@"botw_prompts.py"]) [arguments addObjectsFromArray:@[@"--mods", modsFolder]];
+#else
+        if (pack) [arguments addObjectsFromArray:@[@"--texture-pack", pack]];
+#endif
+        if (layout) [arguments addObjectsFromArray:@[@"--controls", controls]];
+        fprintf(stderr, "[launcher] button icons: making %s (%s, %dx) in %s\n", name.UTF8String, layout ? "controls.txt" : "default layout", scale, target.fileSystemRepresentation);
+        NSTask *task = [NSTask new];
+        task.executableURL = [NSURL fileURLWithPath:info[@"python"]];
+        task.arguments = arguments;
+        NSDate *start = NSDate.date;
+        NSError *error = nil;
+        BOOL ok = [task launchAndReturnError:&error];
+        if (ok) { [task waitUntilExit]; ok = task.terminationStatus == 0; }
+        if (!ok || ![fm moveItemAtPath:temporary toPath:target error:&error]) {
+            fprintf(stderr, "[launcher] button icons: could not make them (%s); the game's own icons this time\n",
+                    error ? error.localizedDescription.UTF8String : "the tool failed, see above");
+            [fm removeItemAtPath:temporary error:nil];
+            return @"none";
+        }
+        fprintf(stderr, "[launcher] button icons: made in %.1f s\n", -start.timeIntervalSinceNow);
+        /* keep the four newest sets (a few tens of MB each) */
+        NSArray<NSURL *> *sets = [fm contentsOfDirectoryAtURL:[NSURL fileURLWithPath:cache] includingPropertiesForKeys:@[NSURLContentModificationDateKey] options:0 error:nil];
+        sets = [sets sortedArrayUsingComparator:^NSComparisonResult(NSURL *a, NSURL *b) {
+            NSDate *x = nil, *y = nil;
+            [a getResourceValue:&x forKey:NSURLContentModificationDateKey error:nil]; [b getResourceValue:&y forKey:NSURLContentModificationDateKey error:nil];
+            return [y compare:x ?: NSDate.distantPast]; }];
+        for (NSUInteger i = 4; i < sets.count; i++) [fm removeItemAtURL:sets[i] error:nil];
+    } else {
+        fprintf(stderr, "[launcher] button icons: %s %dx (%s)\n", name.UTF8String, scale, target.fileSystemRepresentation);
+        [fm setAttributes:@{NSFileModificationDate: NSDate.date} ofItemAtPath:target error:nil];   /* newest for the four kept */
+    }
+    *folder = target;
+    return name;
+}
+
 /* build_app.py --mac-game-data library: the app carries no RomFS image. A folder holds it when its romfs.bin (in it, or in
    <folder>/<version>) has the size the build pinned (romfs-config.txt) and a romfs.sha256 beside it, if any, names the
    pinned image: the build copies to romfs.bin.partial first, so a romfs.bin of the full size is a complete copy. Its hash
@@ -265,10 +389,36 @@ int runtime_app_launch(int argc, char **argv, char ***boot) {
         NSString *home = NSHomeDirectory();
         NSString *data = [home stringByAppendingPathComponent:@"Library/Application Support/MacNativeGames/" GAME_FOLDER];   /* game_version.h: TOTK, BotW */
         NSString *logs = [home stringByAppendingPathComponent:@"Library/Logs/MacNativeGames"];
+#ifdef GAME_BOTW
+        /* Local build only: the player's settings: <data>/settings.txt, one TOTK_NAME=value per line (# starts a comment), read at
+           each launch (e.g. TOTK_BOTW_COOK_COUNT=3). Only TOTK_ names; a line here wins over the app's Info.plist environment. */
+        { NSString *path = [data stringByAppendingPathComponent:@"settings.txt"];
+          NSString *text = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
+          NSCharacterSet *ws = NSCharacterSet.whitespaceCharacterSet;
+          NSCharacterSet *bad = [NSCharacterSet characterSetWithCharactersInString:@"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"].invertedSet;
+          __block int n = 0, badline = 0;
+          [text enumerateLinesUsingBlock:^(NSString *raw, BOOL *stop) {
+              n++;
+              NSString *line = [[raw componentsSeparatedByString:@"#"].firstObject stringByTrimmingCharactersInSet:ws];
+              if (!line.length) return;
+              NSRange eq = [line rangeOfString:@"="];
+              NSString *name = eq.location == NSNotFound ? line : [[line substringToIndex:eq.location] stringByTrimmingCharactersInSet:ws];
+              if (eq.location == NSNotFound || ![name hasPrefix:@"TOTK_"] || [name rangeOfCharacterFromSet:bad].location != NSNotFound) { badline = n; *stop = YES; return; }
+              setenv(name.UTF8String, [[line substringFromIndex:eq.location + 1] stringByTrimmingCharactersInSet:ws].UTF8String, 1);
+          }];
+          if (badline) { show_error([NSString stringWithFormat:@"%@, line %d: expected TOTK_NAME=value", path, badline]); return 1; } }
+#endif
         /* Folders the environment already names are kept (open --env TOTK_PROFILE_DIR=... runs a test on a save copy,
            TOTK_GAME_SLOT_DIR shares one game slot with another build of the game: one game at a time on the Mac). */
         NSString *(^env_or)(const char *, NSString *) = ^NSString *(const char *name, NSString *fallback) {
             const char *v = getenv(name); return v && *v ? @(v) : fallback; };
+#ifdef TOTK_GAME_V143
+        /* Local build only: the player's settings, <data>/settings.txt, one TOTK_NAME=value per line (# starts a comment), read at
+           each launch. A line here wins over the app's Info.plist environment; a bad line shows an alert instead of a start. */
+        { NSString *path = [data stringByAppendingPathComponent:@"settings.txt"];
+          int badline = settings_txt_apply([NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil]);
+          if (badline) { show_error([NSString stringWithFormat:@"%@, line %d: expected TOTK_NAME=value", path, badline]); return 1; } }
+#endif
         NSString *profile = env_or("TOTK_PROFILE_DIR", [data stringByAppendingPathComponent:@"profile"]);
         NSString *slot = env_or("TOTK_GAME_SLOT_DIR", [data stringByAppendingPathComponent:@"game-slot"]);
         NSString *cache = env_or("TOTK_SHADER_CACHE", [data stringByAppendingPathComponent:[NSString stringWithFormat:@"shader-cache/rt-%s", DMSH_CHAIN]]);
@@ -356,10 +506,12 @@ int runtime_app_launch(int argc, char **argv, char ***boot) {
            start, <data>/mods/<version>-keyboard takes its place when it holds a manifest (keyboard key icons in the prompts:
            scripts/make_button_icons.py --style keyboard or azerty). The fonts are read once, so it holds for the session. */
         NSString *mods = [data stringByAppendingPathComponent:@"mods/" TOTK_GAME_DIR];
+#ifdef GAME_BOTW
         NSString *keyboardMods = [mods stringByAppendingString:@"-keyboard"];
         if (!getenv("TOTK_ROMFS_MODS") && [NSFileManager.defaultManager fileExistsAtPath:[keyboardMods stringByAppendingPathComponent:@"manifest.tsv"]] &&
             !controller_connected())
             mods = keyboardMods;
+#endif
         setenv("TOTK_ROMFS_MODS", mods.fileSystemRepresentation, 0);
         /* The game's language (runtime/services.c): the app's first preferred language, which also follows a per-app
            language (defaults write org.macnativegames.totk AppleLanguages -array pt-BR). TOTK_LANG still overrides it. */
@@ -418,6 +570,12 @@ int runtime_app_launch(int argc, char **argv, char ***boot) {
             dup2(fileno(lf), STDERR_FILENO);
             fclose(lf);
         }
+        NSString *icons = nil, *style = button_icons(root, controls, &icons);
+        if (style) setenv("TOTK_BUTTON_ICONS", style.UTF8String, 1);
+#ifndef GAME_BOTW
+        if (style) setenv("TOTK_PROMPT_ICONS", "0", 0);   /* our art is in the font: upstream's live prompt overlay stays off (settings.txt or the environment still win) */
+#endif
+        if (icons) setenv("TOTK_ROMFS_BUTTON_ICONS", icons.fileSystemRepresentation, 1);
 #if defined(GAME_BOTW190) || defined(GAME_BOTW160)
         /* A mod that replaces 4 GiB or more, or Pack/TitleBG.pack with 200 MiB or more, is an HD texture pack, which needs
            the HD heaps (about 6.3 GB of memory): TOTK_BOTW_HD_HEAPS=1 then, unless the environment sets it. After the

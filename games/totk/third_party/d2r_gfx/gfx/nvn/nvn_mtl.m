@@ -608,9 +608,21 @@ static uint64_t gpu_budget_bytes(void) {
 }
 static void defer_drain(void);
 static void stor_diag_report(void);
+/* Long-run diagnostics (local patch, owner 2026-10-25: an abort here after ~6 h, and textures that flicker late in a long
+   run). The wall clock of each memory readout and budget warning, so a moment the player saw can be matched to the log. */
+static const char *wall_clock(char out[16]) { time_t t = time(NULL); struct tm tm; localtime_r(&t, &tm); strftime(out, 16, "%H:%M:%S", &tm); return out; }
 static void gpu_budget_check(const char *where) {
     uint64_t budget = gpu_budget_bytes(); if (!budget) return;
-    uint64_t cur = (uint64_t)g_dev.currentAllocatedSize; if (cur <= budget) return;
+    uint64_t cur = (uint64_t)g_dev.currentAllocatedSize;
+    /* one warning (with the top residency sites) as GPU memory first passes 80% and 90% of the budget; armed again below 70% */
+    static _Atomic int warned;
+    int level = cur > budget / 10 * 9 ? 2 : cur > budget / 10 * 8 ? 1 : 0, was = atomic_load(&warned);
+    if (level > was && atomic_compare_exchange_strong(&warned, &was, level)) {
+        char w[16];
+        MLOG("【红】[budget] %s %s：显卡已分配 %llu MB，已到预算 %llu MB 的 %d%%（下面是驻留集明细）", wall_clock(w), where, (unsigned long long)(cur >> 20), (unsigned long long)(budget >> 20), level == 2 ? 90 : 80);
+        res_site_report(12);
+    } else if (!level && was && cur < budget / 10 * 7) atomic_store(&warned, 0);
+    if (cur <= budget) return;
     /* Over the line, part of it can be objects already retired and the staging of submissions still on the GPU, both freed
        when those submissions complete (#616: stopped 51 s after the start while the world loaded; #614: on a dive). Let the
        running work complete and release what it held (at most 2 s; it stops early once nothing more completes), then look
@@ -1605,6 +1617,18 @@ static int usnap_on(void) {
     if (v < 0) { const char *e = getenv("TOTK_UBO_SNAPSHOT"); v = !(e && !strcmp(e, "0")); atomic_store(&g_usnap_on, v); fprintf(stderr, "[dm] [nvn-mtl] uniform 内容按提交时刻快照：%s\n", v ? "开" : "关（读实时内存，旧行为）"); }
     return v;
 }
+#ifdef TOTK_GAME_V143
+/* 1.4.3 (local 0020; BOTW uses upstream's encode-time copy sbuf_snap_get instead, PR #2201): read-only storage buffers read the submit-time copy, as uniforms do. The game refills
+   its per-frame rings after the submit call returns, so a late GPU read of live memory can show another frame's data. A writable binding still drops the copy
+   (usnap_drop). TOTK_SSBO_SNAPSHOT=0 reads live memory as before. */
+static int totk_ssbo_snap_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("TOTK_SSBO_SNAPSHOT"); v = !(e && !strcmp(e, "0")); MLOG("TOTK_SSBO_SNAPSHOT: read-only storage buffers read %s", v ? "the submit-time copy" : "live memory (the old behaviour)"); } return v; }
+#else
+#define totk_ssbo_snap_on() 0
+#endif
+/* 1.4.3 (local 0020, 2026-11-14): the recorder's presorted range lists (hle_nvn.c flat_note, used by usnap_take
+   since 2026-11-08) take read-only storage buffers too while 0020 is on; without them only bindings that a merged uniform
+   range happened to cover were copied, and glyphs read the next frame's refill. */
+int nvn_ssbo_snap_lists(void) { return totk_ssbo_snap_on(); }
 static int usnap_first(uint64_t a) {   // first region whose end is above a
     int lo = 0, hi = g_nusnap;
     while (lo < hi) { int m = (lo + hi) / 2; if (g_usnap[m].hi <= a) lo = m + 1; else hi = m; }
@@ -2208,7 +2232,7 @@ static void usnap_collect(usnap_rngs *v, const uint8_t *p, int depth) {
         if (h.op == OP_END) return;
         if (h.op == OP_JUMP) { memcpy(&p, p + 8, 8); continue; }
         if (h.op == OP_CALL) { uint64_t t; memcpy(&t, p + 8, 8); if (depth < 16) usnap_collect(v, (const uint8_t *)(uintptr_t)t, depth + 1); }
-        else if (h.op == OP_BIND_UBO) {
+        else if (h.op == OP_BIND_UBO || (h.op == OP_BIND_SSBO && totk_ssbo_snap_on())) {   // 1.4.3 (local 0020): read-only storage buffers too (encode_args drops the copy of a writable one)
             const p_bind_buf *b = (const p_bind_buf *)(p + 8);
             if (b->addr && b->size && b->size <= 65536) {
                 if (v->n == v->cap) { v->cap = v->cap ? v->cap * 2 : 4096; v->r = realloc(v->r, v->cap * sizeof *v->r); if (!v->r) MDIE("uniform copy ranges"); }
@@ -3949,7 +3973,7 @@ static int pkg_final_cache_on(void) {
     if (v < 0) { const char *e = getenv("TOTK_PKG_FINAL_CACHE"); v = !(e && !atoi(e)); atomic_store(&g_pkg_final_cache, v); }
     return v;
 }
-@interface NvPkg : NSObject { @public id<MTLTexture> tex; NSMutableDictionary *views; __unsafe_unretained id<MTLTexture> view_base; uint64_t stamp, seen, hash, owned_gen; int tracked, owned, hashed, vol, lost, keep_full; reup_key key; uint64_t chash, csub, used; uintptr_t lo, hi; uint8_t *edge; uint32_t eh, et; int edge_want; BOTW_PKG_FIELDS UI_PACK_PKG_FIELDS } @end   // lo / hi (TOTK): the texture's memory (pkg_orphan_report)   // tracked (TOTK): result of the last nvn_dirty_tracked   // hash：DM_NVN_DIRTYCHECK 时上传内容的全量哈希 | hash: full hash of the uploaded content under DM_NVN_DIRTYCHECK
+@interface NvPkg : NSObject { @public id<MTLTexture> tex; NSMutableDictionary *views; __unsafe_unretained id<MTLTexture> view_base; uint64_t stamp, seen, hash, owned_gen; int tracked, owned, hashed, vol, lost, keep_full; reup_key key; uint64_t chash, csub, used; uintptr_t lo, hi; uint8_t *edge; uint32_t eh, et; int edge_want; BOTW_PKG_FIELDS UI_PACK_PKG_FIELDS FOG_PKG_FIELDS } @end   // lo / hi (TOTK): the texture's memory (pkg_orphan_report)   // tracked (TOTK): result of the last nvn_dirty_tracked   // hash：DM_NVN_DIRTYCHECK 时上传内容的全量哈希 | hash: full hash of the uploaded content under DM_NVN_DIRTYCHECK
 static void pkg_views_drop(NvPkg *pkg) {
     if (pkg->views) defer_obj_unref(pkg->views);
     pkg->views = nil; pkg->view_base = nil;
@@ -4041,7 +4065,7 @@ void dm_gfx_set_flag(const char *name, int v) {
     if (!strcmp(name, "function_cache")) { function_cache_set(v); MLOG("[flag] function_cache = %d (border and varying shader variants looked up in the per-shader function cache)", v != 0); return; }
     if (!strcmp(name, "gpu_trace")) { gpu_trace_set(v); MLOG("[flag] gpu_trace = %d (pipeline binds recorded for GPU failure reports)", v != 0); return; }
     if (!strcmp(name, "cube_merge")) { atomic_store(&g_cg_on, v != 0); MLOG("[flag] cube_merge = %d", v != 0); return; }
-    if (!strcmp(name, "skip_invisible")) { skv_set(v); return; }
+    if (!strcmp(name, "skip_invisible")) { skv_set(v); return; } HDR_FLAG(name, v)
     if (!strcmp(name, "skipvc")) { atomic_store(&g_skipvc_any, v); MLOG("[flag] skipvc = %d", v); return; }
     if (!strcmp(name, "skipvc_color")) { atomic_store(&g_skipvc_color, v); MLOG("[flag] skipvc_color = %d", v); return; }
     if (!strcmp(name, "skipvc_depth")) { atomic_store(&g_skipvc_depth, v); MLOG("[flag] skipvc_depth = %d", v); return; }
@@ -4547,7 +4571,12 @@ static void wb_write_list_body(wb_ent **list, int nl, int force) {
         uint32_t upf; int ubpp;
         if (fresh[i] == 2 || !mt) { wb_ent_free(e); continue; }   // !mt: copy evicted (pkg_evict_sweep) before the GPU rendered into it
         TILELOG(t, "write-back request: %s", !fresh[i] ? "CPU wrote since the render, skip" : "write back");
-        if (tilelog_match(t) && !fresh[i]) {   // who wrote it
+#ifdef GAME_BOTW   /* local diagnostic (2026-11-09, sinking legs in snow and sand): the first 24 skips and every 20th after them name the texture, its writers and its changed bytes */
+        int wbs = !fresh[i] && (g_wb_skip_cpu < 24 || (g_wb_skip_cpu + 1) % 20 == 0);
+#else
+        int wbs = 0;
+#endif
+        if ((tilelog_match(t) || wbs) && !fresh[i]) {   // who wrote it
             extern int runtime_module_offset(uint64_t pc, const char **name, uint64_t *off);
             nvn_dirty_rec rec[64]; int nr = nvn_dirty_recent((uintptr_t)t->mem & ~(uintptr_t)16383, (uintptr_t)t->mem + t->L.size, rec, 64);
             char line[900]; size_t o2 = 0; int shown = 0; uint64_t seen[8]; int ns = 0;
@@ -4559,11 +4588,14 @@ static void wb_write_list_body(wb_ent **list, int nl, int force) {
                                okl ? ln : "-", (unsigned long long)(okl ? lo2 : 0), (unsigned long long)(rec[q].page - (uintptr_t)t->mem)); shown++;
             }
             TILELOG(t, "writers since the render (%d records):%s", nr, line);
+            if (wbs) MLOG("[wbskip] skip %llu f%llu ser=%llu mem=%p %ux%u nvnfmt=%#x lv%u size %#llx, writers since the render (%d records):%s", (unsigned long long)g_wb_skip_cpu + 1, (unsigned long long)atomic_load(&g_cur_frame),
+                          (unsigned long long)t->serial, (void *)t->mem, t->d.width, t->d.height, t->d.format, t->d.levels, (unsigned long long)t->L.size, nr, nr ? line : " none");
         }
-        if (!fresh[i] && tilelog_match(t) && e->snap && e->snap_n == t->L.size) {   // which of its own bytes the CPU changed
+        if (!fresh[i] && (tilelog_match(t) || wbs) && e->snap && e->snap_n == t->L.size) {   // which of its own bytes the CPU changed
             const uint8_t *a = e->snap, *b = t->mem; size_t nd = 0, lo = 0, hi = 0, nz = 0;
             for (size_t q = 0; q < e->snap_n; q++) if (a[q] != b[q]) { if (!nd++) lo = q; hi = q; nz += b[q] != 0; }
             TILELOG(t, "own bytes changed since the render: %zu (offsets %#zx..%#zx, %zu now non-zero)", nd, lo, hi, nz);
+            if (wbs) MLOG("[wbskip] skip %llu own bytes changed since the render: %zu of %zu (offsets %#zx..%#zx, %zu now non-zero)", (unsigned long long)g_wb_skip_cpu + 1, nd, e->snap_n, lo, hi, nz);
         }
         if (!fresh[i]) {   // the CPU wrote it since: its bytes are newer
             if (++g_wb_skip_cpu <= 24) MLOG("[writeback] skipped (CPU wrote since the render) ser=%llu %ux%u nvnfmt=%#x lv%u", (unsigned long long)t->serial, t->d.width, t->d.height, t->d.format, t->d.levels);
@@ -5108,7 +5140,7 @@ static unsigned g_up_seq;
 /* Upload batch ids: up_begin gives each batch the next id and records it in its allocator slot. A batch is in
    flight while its slot is busy and still holds its id; the completion handler clears the slot and signals g_up_slot_cv, and
    a slot taken again by a later batch means the earlier one completed. g_up_cur_id: the batch begun last (open while g_up_cb). */
-static uint64_t g_up_ctr, g_up_cur_id, g_up_slot_id[3];
+static uint64_t g_up_ctr, g_up_cur_id, g_up_slot_id[UP_SLOTS_MAX];
 #endif
 #define UP_BLOCK_SIZE (32u * 1024u * 1024u)
 typedef struct {
@@ -5392,7 +5424,7 @@ static void up_wait_batch(uint64_t id) {
     if (g_up_cb && g_up_cur_id == id) up_flush();
     pthread_mutex_lock(&g_up_slot_mu);
     for (;;) {
-        int busy = 0; for (int s = 0; s < 3; s++) busy |= g_up_slot_id[s] == id && atomic_load(&g_up_alloc_busy[s]);
+        int busy = 0; for (int s = 0; s < UP_SLOTS_MAX; s++) busy |= g_up_slot_id[s] == id && atomic_load(&g_up_alloc_busy[s]);
         if (!busy) break;
         pthread_cond_wait(&g_up_slot_cv, &g_up_slot_mu);
     }
@@ -6033,7 +6065,7 @@ static void *tex_mtl_p(const tex_t *ct) {
                   if (k < 64 && (cnt[k]++ % 100) == 0) MLOG("[reup] f%llu ser=%llu %ux%u fmt=%#x lv%u mem=%p size=%#llx owned=%d hashed=%d (%u times)", (unsigned long long)atomic_load(&g_cur_frame),
                       (unsigned long long)t->serial, t->d.width, t->d.height, t->d.format, t->d.levels, (void *)t->mem, (unsigned long long)t->L.size, pk->owned, pk->hashed, cnt[k]); } }
             uint64_t st; BOTW_PKG_WB_TAKE() reup_key nk; g_mip_nodrop = pk->owned; g_mip_keep = pk->keep_full; id<MTLTexture> nt = pkg_upload(t, &st, &nk, pk); g_mip_nodrop = 0; g_mip_keep = 0;   // 池内容变了（流式素材写进同一存储）：换新贴图，在途绘制仍读旧的 | Pool content changed (streamed assets written into the same storage): switch to a new texture; in-flight draws still read the old one
-            if (nt) { id<MTLTexture> old = pk->tex; pkg_views_drop(pk); pk->tex = nt; reup_retire(old, &pk->key); pk->key = nk; if (pk->hashed) pk->chash = h; ser_bump(t->serial); pk->stamp = st; pk->seen = st; BOTW_PKG_WB_SET(pk) g_pkg_reuploads++; if (dirtycheck()) pk->hash = full_hash(t->mem, t->L.size); BOTW_REUP_TRACKED(pk, t) UI_PACK_UPLOADED(pk, t) }
+            if (nt) { id<MTLTexture> old = pk->tex; pkg_views_drop(pk); pk->tex = nt; reup_retire(old, &pk->key); pk->key = nk; if (pk->hashed) pk->chash = h; ser_bump(t->serial); pk->stamp = st; pk->seen = st; BOTW_PKG_WB_SET(pk) g_pkg_reuploads++; if (dirtycheck()) pk->hash = full_hash(t->mem, t->L.size); BOTW_REUP_TRACKED(pk, t) UI_PACK_UPLOADED(pk, t) FOG_TP_UPLOADED(pk, t) }
             else { free(pk->edge); pk->edge = NULL; }   // TOTK (#90): the bytes kept belong to the upload that failed
             return (__bridge void *)pk->tex;
         }
@@ -6044,7 +6076,7 @@ static void *tex_mtl_p(const tex_t *ct) {
         if (!pk->tex) return NULL;
         /* TOTK (#90): seen = the upload's stamp, not "now": a write that faulted during the copy moved "now" on, and the
            now == seen shortcut above then called the texture clean without looking at its pages. */
-        pk->seen = pk->stamp; g_pkg_uploads++; if (dirtycheck()) pk->hash = full_hash(t->mem, t->L.size); UI_PACK_UPLOADED(pk, t)
+        pk->seen = pk->stamp; g_pkg_uploads++; if (dirtycheck()) pk->hash = full_hash(t->mem, t->L.size); UI_PACK_UPLOADED(pk, t) FOG_TP_UPLOADED(pk, t)
         serial_put(t->serial, pk);
         pk->owned = gpu_owned(t->serial);   // after it is in the table: a later mark finds it there (pkg_owned_locked)
         if ((pk->hashed = pkg_hashed(t))) { if (!pkg_hash_guarded(t, &pk->chash)) pk->chash = 0; pk->csub = g_sub_serial; }
@@ -6134,13 +6166,19 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long rss_mb) {
     if (memory_inventory_path()) { stor_memory_report(frame); memory_inventory_report(frame); }
     static unsigned long long last_rss, last_gpu, last_frame; static int lines; unsigned long long gpu = (unsigned long long)(g_dev.currentAllocatedSize >> 20);
     unsigned long long dr = rss_mb > last_rss ? rss_mb - last_rss : last_rss - rss_mb, dg = gpu > last_gpu ? gpu - last_gpu : last_gpu - gpu;
-    if (lines >= 400 || (lines && dr < 64 && dg < 64 && frame - last_frame < 3000)) return; lines++; last_rss = rss_mb; last_gpu = gpu; last_frame = frame;
+    /* local long-run diagnostics: also one line a minute (a 6 h session is about 400 lines), cap 1500 */
+    static time_t last_t; time_t now = time(NULL);
+    if (lines >= 1500 || (lines && dr < 64 && dg < 64 && frame - last_frame < 3000 && now - last_t < 60)) return; lines++; last_rss = rss_mb; last_gpu = gpu; last_frame = frame; last_t = now;
+    { char w[16]; MLOG("[clock] %s", wall_clock(w)); }
     pthread_mutex_lock(&g_deferred_mu); unsigned long nd = (unsigned long)g_deferred.count; pthread_mutex_unlock(&g_deferred_mu);
     pthread_mutex_lock(&g_res_mu); unsigned long nr = (unsigned long)g_res_objects.count; pthread_mutex_unlock(&g_res_mu);
     int live = 0, peak = 0, cap = 0; nvn_dirty_stat(&live, &peak, &cap);
     MLOG("内存 至帧 %llu：常驻 %llu MB，显卡已分配 %llu MB，延迟释放队列 %lu，驻留集 %lu 个，内存池 %d 个（峰值 %d / 跟踪表容量 %d），贴图重传累计 %llu 次", frame, rss_mb, gpu, nd, nr, live, peak, cap, (unsigned long long)g_pkg_reuploads);
     if (!memory_inventory_path()) stor_memory_report(frame);
     MLOG("已死序号纹理累计 %llu 张（替换前即为泄漏来源）", (unsigned long long)g_dead_put_total);
+#ifdef GAME_BOTW
+    { extern void botw_leak_log(void); @autoreleasepool { botw_leak_log(); } }
+#endif
     /* Exact-writeback snapshots are host allocations, absent from Metal's allocatedSize. Include them in the existing
        diagnostic so an iPhone run can attribute the cost of the larger terrain-normal snapshots (PR #188). */
     size_t snap_bytes = 0; unsigned snap_count = 0;
@@ -8248,7 +8286,7 @@ static NvShader *shader_load_mode(NSString *pc, int stage, int archive_compute) 
         int kind = [pc hasPrefix:@TOTK_HDR_COMPOSE_KEY] ? 1 : [pc hasPrefix:@TOTK_HDR_POST_KEY] ? 2 : 0;
         if (kind) {
             NSString *modified = kind == 1 ? totk_hdr_compose_source(full) : totk_hdr_post_source(full);
-            NSError *err = nil; id<MTLLibrary> hl = modified ? totk_msl_library(modified, &err) : nil;
+            NSError *err = nil; id<MTLLibrary> hl = modified ? HDR_TWIN_LIBRARY(modified, &err) : nil;
             id<MTLFunction> hf = hl ? [hl newFunctionWithName:j[@"entry"]] : nil;
             if (hf) { o->hdr_fn = hf; fn_note_src(hf, modified); o->hdr_compose = kind;
                 MLOG("[hdr] %s: HDR twin ready (%s)", o->key, kind == 1 ? "RenoDX-style scene + bloom tone map" : "HDR EASU ceiling removed"); }
@@ -9017,7 +9055,7 @@ static void *tex_by_id_p(int tid) {   // 调用方持 g_rmu | Caller holds g_rmu
     /* TOTK: the stored view is compared by pointer (cur, view_parent: no retain, no parentTexture message); a strong local
        was a retain + release each time a guest write or serial step sent a bound texture through here. */
     if (rp->view) {   // 序号表或客体内存有过变动：核基贴图是否被重传换新，换了则视图作废 | The serial table or guest memory has changed: check whether the base texture was re-uploaded and replaced; if so the view is invalidated
-        g_dead_by_id = 1; __unsafe_unretained id<MTLTexture> cur = tex_mtl(&rp->t); g_dead_by_id = 0; UI_PACK_BASE(rp, cur)   // held by the serial table / its NvPkg
+        g_dead_by_id = 1; __unsafe_unretained id<MTLTexture> cur = tex_mtl(&rp->t); g_dead_by_id = 0; UI_PACK_BASE(rp, cur) FOG_TP_BASE(rp, cur)   // held by the serial table / its NvPkg
         if (g_tex_prepare_split) return NULL;
         if ((cur || g_upstream_negative==1) && ((__bridge void *)cur == rp->view || (__bridge void *)cur == rp->view_parent)) { rp->view_ser = sg; rp->view_pkg = treg_kind(&rp->t); rp->view_dirty = rp->view_pkg == 2 || (rp->view_pkg == 1 && tex_check_once()) ? g_sub_serial : dg; return rp->view; }
         treg_clear_view_locked(tid);
@@ -9028,7 +9066,7 @@ static void *tex_by_id_p(int tid) {   // 调用方持 g_rmu | Caller holds g_rmu
     uint64_t dead_t0 = dead && dead_stat_on() ? clock_gettime_nsec_np(CLOCK_UPTIME_RAW) : 0, dead_made0 = g_dead_put_total;
     g_dead_by_id = 1; id<MTLTexture> base = tex_mtl(&rp->t); g_dead_by_id = 0;
     if (dead_t0 && g_dead_put_total != dead_made0) atomic_fetch_add_explicit(&g_dead_ns, clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - dead_t0, memory_order_relaxed);
-    UI_PACK_VIEW(rp, r, base)
+    UI_PACK_VIEW(rp, r, base) FOG_TP_VIEW(rp, r, base)
     if (!base) return NULL;
     v = base;
     MTLTextureSwizzleChannels vsw = MTLTextureSwizzleChannelsDefault;
@@ -9251,6 +9289,11 @@ static MTLSamplerDescriptor *samp_desc(samp_par p) {   // the game's sampler as 
                     d.mipFilter != MTLSamplerMipFilterNotMipmapped && repeats;
     if (aniso > 1 && material && d.maxAnisotropy < (NSUInteger)aniso) d.maxAnisotropy = (NSUInteger)aniso;
     if (material) d.lodBias = tup_mip_bias();   // TOTK_MFX_TEMPORAL_MIPBIAS (totk_taa.m): finer mip levels for a scene upscaled temporally; 0 unless set
+#ifdef GAME_BOTW
+    /* The game's own LOD bias (nvnSamplerBuilderSetLodBias), as nxnative passes it: Breath of the Wild sets -1 on its
+       LINEAR_MIPMAP_NEAREST samplers (699 of 207,401 in a Hateno run, 2026-10-31), the rest 0. Metal takes -16..15.99. */
+    { float b = d.lodBias + p.lod_bias; d.lodBias = b < -16.f ? -16.f : b > 15.99f ? 15.99f : b; }
+#endif
     if (p.cmp_mode) d.compareFunction = atomic_load(&g_shadow_cmp_off) ? MTLCompareFunctionAlways : (MTLCompareFunction)(p.cmp_func - 1);   // shadows off: dm_gfx_shadow_samplers_off
     d.borderColor = p.border[3] > 0.5f ? (p.border[0] > 0.5f ? MTLSamplerBorderColorOpaqueWhite : MTLSamplerBorderColorOpaqueBlack) : MTLSamplerBorderColorTransparentBlack;
     if (p.reduction > 2) die("sampler reduction filter %u unsupported", p.reduction);
@@ -11331,7 +11374,7 @@ static void *pso_get_p(NvProg *pr, MTLRenderPassDescriptor *unused) {
     /* Preserve the guest RGB-only destination alpha while rendering into its
      * host FP16 companion. Normalized factors also form the persistent PSO key,
      * so a cached RGBA blend pipeline cannot reintroduce the old UI tint. */
-    if(g_hdr_draw_native && !g_pso_lmap && k.cfmt[0]==MTLPixelFormatRGBA16Float && (k.blend_en&1)){
+    if(g_hdr_draw_native HDR_RGB_ONLY_DRAW && !g_pso_lmap && k.cfmt[0]==MTLPixelFormatRGBA16Float && (k.blend_en&1)){
         k.blend[0].src_rgb=hdr_shadow_rgb_factor(k.blend[0].src_rgb);
         k.blend[0].dst_rgb=hdr_shadow_rgb_factor(k.blend[0].dst_rgb);
     }
@@ -14291,7 +14334,7 @@ static int encode_args(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, in
             if (b->kind == NVN_RB_SBUFP && b->rw && u && u->addr) usnap_drop(u->addr, u->size ? u->size : 1);   // TOTK: the shader may write it: no stale uniform copy from here on
             uint64_t sgpu = !ren && b->kind == NVN_RB_SBUFP && !b->rw && u && u->addr && u->size && sbuf_snap_on() ? sbuf_snap_get(u) : 0;   // OOT: a small read-only storage buffer as of the encode: the GPU reads no live memory, so no read-fence mark either
             if (b->kind == NVN_RB_SBUFP && u && u->addr && !sgpu) gpu_read_input(u->addr, u->size, sh ? sh->key : NULL, b->rw ? 'w' : 's');   // OOT_RACE_CHECK / OOT_GPU_READ_FENCE (GPU writes do not fault and are not counted)
-            const usnap_t *usc = !ren && b->kind == NVN_RB_UBOP && u && u->addr && !usnap_skipped(u->size, 1) ? usnap_find(u->addr, u->size ? u->size : 1) : NULL;   // TOTK: compute uniforms as of the submit call
+            const usnap_t *usc = !ren && (b->kind == NVN_RB_UBOP || (b->kind == NVN_RB_SBUFP && !b->rw && totk_ssbo_snap_on())) && u && u->addr && !usnap_skipped(u->size, 1) ? usnap_find(u->addr, u->size ? u->size : 1) : NULL;   // TOTK: compute uniforms as of the submit call (1.4.3, local 0020: read-only storage buffers too)
             if (ren) { slots[aid] = ren; USE(dummy_buf(), MTLResourceUsageRead); }
             else if (usc) { slots[aid] = usc->gpu + (u->addr - usc->lo); USE(dummy_buf(), MTLResourceUsageRead); }
             else if (sgpu) { slots[aid] = sgpu; USE(dummy_buf(), MTLResourceUsageRead); }
@@ -18132,9 +18175,9 @@ static void scene_size_note(__unsafe_unretained NvShader *fs) {   // the compose
     if (ow != w || oh != h) MLOG("内部分辨率（合成采样的场景）：%ux%u", w, h);
 }
 #include "totk_finish.h"   // FXAA off and sharpening (the settings panel's effects page)
-#if defined(GAME_BOTW190) && !TARGET_OS_IPHONE   // Mac only: the iOS settings have no FXAA / sharpening rows (after PR #1637)
+#if defined(GAME_BOTW) && !TARGET_OS_IPHONE   // Mac only: the iOS settings have no FXAA / sharpening rows (after PR #1637)
 #define BOTW_FINISH 1
-#include "botw_finish.h"   // the same rows on Breath of the Wild 1.9.0, around its FXAA / upscale draw
+#include "botw_finish.h"   // the same rows on Breath of the Wild 1.9.0 and 1.6.0, around its FXAA / upscale draw (bd7ffdd4 in both)
 #endif
 #include "totk_hdr_render.h"
 static int mfxup_draw(NvProg *pr) {
@@ -24865,6 +24908,12 @@ void botw_gpu_copy_supersedes(const void *mbv, uint64_t mo, size_t n) {
    storage to the texture living there with the same layout: the pinned copy is re-keyed in place (dm_nvn_pin_rekey),
    so every recording holding it, and the owned / write-back bookkeeping by serial, see the live texture. */
 int botw_serial_noted(uint64_t serial);
+/* long-run log (local 0007): uses of a finalised serial that were not followed, by reason (0 no live texture at its storage,
+   1 the live texture is itself, 2 the live texture is finalised too, 3 the layout differs): such a use draws the old host
+   texture of the finalised serial, or a fresh upload of its stale pool bytes (a flicker candidate); plus the last example */
+static _Atomic uint64_t g_bfollow_miss[4], g_bfollow_done, g_bfollow_forgot;
+static struct { uint64_t serial; uint32_t w, h, fmt; int why; } g_bfollow_last;
+static void bfollow_miss(const tex_t *t, int why) { atomic_fetch_add(&g_bfollow_miss[why], 1); g_bfollow_last.serial = t->serial; g_bfollow_last.w = t->d.width; g_bfollow_last.h = t->d.height; g_bfollow_last.fmt = t->d.format; g_bfollow_last.why = why; }
 void botw_tex_follow(const void *tv) {
     tex_t *t = (tex_t *)tv;
     if (!t || !t->serial || !t->mem || !serial_is_dead(t->serial)) return;
@@ -24873,6 +24922,7 @@ void botw_tex_follow(const void *tv) {
     if (!have || live.serial == t->serial || serial_is_dead(live.serial)) {
         if (watched) MLOG("[tile] f%llu ser=%llu not followed: %s", (unsigned long long)atomic_load(&g_cur_frame), (unsigned long long)t->serial,
                           !have ? "no live texture at its storage" : live.serial == t->serial ? "the live texture is itself" : "the live texture is finalised too");
+        bfollow_miss(t, !have ? 0 : live.serial == t->serial ? 1 : 2);
         return;
     }
     if (live.L.size != t->L.size || live.d.format != t->d.format || live.d.width != t->d.width || live.d.height != t->d.height ||
@@ -24880,10 +24930,17 @@ void botw_tex_follow(const void *tv) {
         if (watched) MLOG("[tile] f%llu ser=%llu not followed: live ser=%llu %ux%ux%u lv%u nvnfmt=%#x target %d size %llu differs from %ux%ux%u lv%u nvnfmt=%#x target %d size %llu",
                           (unsigned long long)atomic_load(&g_cur_frame), (unsigned long long)t->serial, (unsigned long long)live.serial, live.d.width, live.d.height, live.d.depth, live.d.levels, live.d.format, live.d.target,
                           (unsigned long long)live.L.size, t->d.width, t->d.height, t->d.depth, t->d.levels, t->d.format, t->d.target, (unsigned long long)t->L.size);
+        bfollow_miss(t, 3);
         return;
     }
     uint64_t from = t->serial; int pinned = dm_nvn_pin_rekey(t, &live);
     if (!pinned) *t = live;
+    /* The re-keyed copy no longer names the finalised serial, so the pin sweep never reports it (it reports the live serial
+       when the copy goes): forget it here once no other copy names it, or its kept texture and residency entry stay for the
+       whole session (owner 2026-10-26: 946,000 kept serials, 18,500 resident objects and the GPU budget stop after 4.5 h). */
+    extern int dm_nvn_pin_has_serial(uint64_t serial);
+    if (pinned && !dm_nvn_pin_has_serial(from)) { mtl_dead_forget(&from, 1); atomic_fetch_add(&g_bfollow_forgot, 1); }
+    atomic_fetch_add(&g_bfollow_done, 1);
     static uint64_t n; if (n++ < 8 || n % 1000 == 0)
         MLOG("[tex-follow] %s ser=%llu -> %llu at %p (%ux%u nvnfmt=%#x; %llu so far)", pinned ? "recording copy" : "texture", (unsigned long long)from,
              (unsigned long long)live.serial, (void *)t->mem, t->d.width, t->d.height, t->d.format, (unsigned long long)n);
@@ -24965,6 +25022,38 @@ void botw_serial_note(uint64_t serial, const char *what) {
     int c = atomic_load(np);
     if (!what) { for (int i = 0; i < c; i++) if (seen[i] == serial) return; if (c < 64) { seen[c] = serial; atomic_store(np, c + 1); } return; }
     for (int i = 0; i < c; i++) if (seen[i] == serial) { MLOG("[tile] f%llu ser=%llu %s", (unsigned long long)atomic_load(&g_cur_frame), (unsigned long long)serial, what); return; }
+}
+/* Long-run log (local 0007, with TOTK_DEBUG_LOG): one [leak] line with each memory readout. Host textures that only finalised
+   serials hold (no live serial holds the same texture), counted once per texture: kept for a recording copy (g_bdead_kept)
+   or other; the kept set; follows of finalised serials (and how many of them freed the old serial) and the misses by reason
+   since the last line, with the last missed texture. (mtl_mem_stat lists the top residency sites after it.) */
+void botw_leak_log(void) {
+    static uint64_t last_miss[4], last_done;
+    NSHashTable *live = [NSHashTable hashTableWithOptions:NSPointerFunctionsOpaqueMemory | NSPointerFunctionsOpaquePersonality];
+    NSHashTable *dk = [NSHashTable hashTableWithOptions:NSPointerFunctionsOpaqueMemory | NSPointerFunctionsOpaquePersonality];
+    NSHashTable *dother = [NSHashTable hashTableWithOptions:NSPointerFunctionsOpaqueMemory | NSPointerFunctionsOpaquePersonality];
+    uint64_t n = 0, nd = 0, kn; uint64_t bk = 0, bo = 0;
+    pthread_mutex_lock(&g_smu);
+    for (int pass = 0; pass < 2; pass++)
+        for (uint32_t i = 0; i < g_by_serial.cap; i++) {
+            void *v = g_by_serial.vals[i]; if (!v) continue;
+            uint64_t k; memcpy(&k, g_by_serial.keys + (size_t)i * g_by_serial.klen, 8);
+            id o = (__bridge id)v; id<MTLTexture> t = [o isKindOfClass:[NvPkg class]] ? ((NvPkg *)o)->tex : [o conformsToProtocol:@protocol(MTLTexture)] ? (id<MTLTexture>)o : nil;
+            if (!t) continue;
+            id<MTLTexture> base = t.parentTexture ?: t; int dead = totk_serial_has(&g_dead_serial, k);
+            if (pass == 0) { n++; nd += dead; if (!dead) [live addObject:base]; continue; }
+            if (!dead || [live containsObject:base]) continue;
+            if (nvn_hm_get(&g_bdead_kept, &k)) { if (![dk containsObject:base]) { [dk addObject:base]; bk += base.allocatedSize; } }
+            else if (![dother containsObject:base] && ![dk containsObject:base]) { [dother addObject:base]; bo += base.allocatedSize; }
+        }
+    kn = g_bdead_kept.n;
+    pthread_mutex_unlock(&g_smu);
+    uint64_t m[4], done = atomic_load(&g_bfollow_done); for (int i = 0; i < 4; i++) { m[i] = atomic_load(&g_bfollow_miss[i]); }
+    MLOG("[leak] serial table %llu textures (%llu of finalised serials); held only by finalised serials: kept for recordings %lu textures %llu MB, other %lu textures %llu MB; kept set %llu; follows +%llu (freed %llu so far); missed follows +%llu/+%llu/+%llu/+%llu (no live / itself / live finalised / layout), last ser=%llu %ux%u nvnfmt=%#x why %d",
+         (unsigned long long)n, (unsigned long long)nd, (unsigned long)dk.count, (unsigned long long)(bk >> 20), (unsigned long)dother.count, (unsigned long long)(bo >> 20), (unsigned long long)kn,
+         (unsigned long long)(done - last_done), (unsigned long long)atomic_load(&g_bfollow_forgot), (unsigned long long)(m[0] - last_miss[0]), (unsigned long long)(m[1] - last_miss[1]),
+         (unsigned long long)(m[2] - last_miss[2]), (unsigned long long)(m[3] - last_miss[3]), (unsigned long long)g_bfollow_last.serial, g_bfollow_last.w, g_bfollow_last.h, g_bfollow_last.fmt, g_bfollow_last.why);
+    for (int i = 0; i < 4; i++) last_miss[i] = m[i]; last_done = done;
 }
 #endif
 #ifdef GAME_BOTW
@@ -25229,7 +25318,7 @@ void botw_late_drop(uintptr_t lo, uintptr_t hi) {
 /* Write-back staging (BOTW_WB_* in nvn_obj.h; docs/botw-v1.9.0-port.md). Serials rendered in this submission are noted on the submit
    thread; at the submission's end each small one (WB_STAGE_MAX) is copied into its stage buffer in the same command
    buffer, so the invalidate waits for that fence only and swizzles from the stage without a read-back blit. */
-#define WB_STAGE_MAX (256u << 10)   /* larger textures keep the read-back blit at the invalidate */
+#define WB_STAGE_MAX (1024u << 10)  /* larger textures keep the read-back blit at the invalidate */
 static uint64_t g_wb_sub[64]; static int g_wb_nsub;   /* submit thread: serials noted in this submission */
 static uint64_t g_wb_staged, g_wb_from_stage;
 void botw_wb_sub_note(uint64_t k) {
@@ -25710,6 +25799,12 @@ void runtime_shader_seed(const char *path, const char *list) { @autoreleasepool 
              (unsigned long long)kept, (unsigned long long)dropped);
     }
 }}
+#ifdef GAME_BOTW190
+#include "../../../../../botw/gfx/botw_fog_map.h"   // fog-of-war map (local build)
+#endif
 #if MNG_UI_PACK
 #include "ui_pack.h"   // sharp UI art (UI_PACK_* in nvn_obj.h)
+#endif
+#if !defined(GAME_BOTW) && !defined(GAME_NS2) && !TARGET_OS_IPHONE
+#include "totk_fog_gfx.h"   // TOTK 1.4.3 fog-of-war map (local mod; FOG_TP_* in nvn_obj.h)
 #endif

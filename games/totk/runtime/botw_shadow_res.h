@@ -1,4 +1,4 @@
-/* Breath of the Wild 1.9.0's sun shadow map at 2048 per cascade (TOTK_SHADOW_RES=2048 or the settings panel's
+/* Breath of the Wild 1.9.0's (and 1.6.0's) sun shadow map at 2048 per cascade (TOTK_SHADOW_RES=2048 or the settings panel's
    shadows.txt; Mac only, off by default), without the runtime, so tests/test_botw_shadow_res.c can check it.
    The sun's shadow is a set of cascades whose size the game's cascade controller picks from a five-level table it
    writes at its start (main+0x124ee70, the table at +0x44, one 16-bit size per level): 480, 720, 720, 896 and 2048.
@@ -20,9 +20,16 @@
 enum { SHADOW_FROM_NONE, SHADOW_FROM_ENV, SHADOW_FROM_FILE };
 
 /* The four moves as shipped: movz x8, #480 / movk x8, #720, lsl #16 / movk x8, #720, lsl #32 / movk x8, #896, lsl #48. */
+#ifdef GAME_BOTW160
+/* 1.6.0: the same four words, main+0x181d19c..0x181d1a8, inside the controller start (inlined in a larger function); the table store `stur x8, [x20, #0x44]` is at 0x181d1ac. */
+static const struct { uint32_t off, original; } shadow_res_site[SHADOW_RES_SITES] = {
+    {0x181d19cu, 0xd2803c08u}, {0x181d1a0u, 0xf2a05a08u}, {0x181d1a4u, 0xf2c05a08u}, {0x181d1a8u, 0xf2e07008u},
+};
+#else
 static const struct { uint32_t off, original; } shadow_res_site[SHADOW_RES_SITES] = {
     {0x124eef8u, 0xd2803c08u}, {0x124eefcu, 0xf2a05a08u}, {0x124ef00u, 0xf2c05a08u}, {0x124ef04u, 0xf2e07008u},
 };
+#endif
 
 /* The same move with 2048: movz for the first, movk for the others, each at its own 16-bit position. */
 static inline uint32_t shadow_res_word(unsigned i) {

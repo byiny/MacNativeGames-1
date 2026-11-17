@@ -4,7 +4,7 @@ static struct { uint64_t serial, frame; id<MTLTexture> texture; float ui_white,p
 static unsigned g_hdr_nswap;
 static __thread float t_hdr_present_white=1,t_hdr_present_peak=1;
 static int hdr_on(void) {
-#if TARGET_OS_OSX && !defined(GAME_BOTW)
+#if TARGET_OS_OSX
     return totk_hdr_available();
 #else
     return 0;
@@ -34,7 +34,7 @@ static void hdr_prepare_draw(NvProg *pr) {
     if(!hdr_shadow_enabled() || !pr || !pr->sh[1] || R.rt.n!=1 || !R.rt.color[0])return;
     NvShader *fs=pr->sh[1];
     id<MTLTexture> dst=tex_mtl(R.rt.color[0]);
-    if(!dst || dst.pixelFormat!=MTLPixelFormatRG11B10Float || dst.textureType!=MTLTextureType2D ||
+    if(!dst || HDR_BASE_BAD(dst.pixelFormat) || dst.textureType!=MTLTextureType2D ||
        dst.mipmapLevelCount!=1 || dst.sampleCount!=1 || dst.width<64 || dst.height<64)return;
     const view_t *v=&R.rt.cview[0];
     if(R.rt.has_cview[0] && ((v->set_levels && v->base_level) || (v->set_layers && v->min_layer)))return;
@@ -48,14 +48,14 @@ static void hdr_prepare_draw(NvProg *pr) {
         if(hdr_shadow_find((__bridge id<MTLTexture>)raw)){linked=YES;break;}
     }
     if(!origin && !linked)return;
-    if(hdr_shadow_make(dst))g_hdr_draw_native=1;
+    if(hdr_shadow_make(dst))g_hdr_draw_native=HDR_DRAW_NATIVE(dst);
 }
 /* Preserve the float canvas before the exact final copy writes to the 8-bit
  * sRGB swapchain. Never promote arbitrary guest textures or their CPU storage. */
 static void hdr_capture(NvProg *pr) {
     if(!hdr_on() || !atomic_load(&g_hdr_frame_enabled) || !pr || !pr->sh[0] || !pr->sh[1] || R.rt.n!=1 || !R.rt.color[0])return;
-    if(strncmp(pr->sh[1]->key,"dd3d1e0ebf73242845970b5655fac199a30f5acf747975c5e771caa49af8b12b-",65) ||
-       strncmp(pr->sh[0]->key,"1a40e5f5ff257e13293c01b8e293a619d2ae8cdcffd8e4083e04dd7f59fd2273-",65))return;
+    if(strncmp(pr->sh[1]->key,HDR_COPY_FS,65) ||
+       HDR_COPY_VS_BAD(pr))return;
     unsigned slot=8;pthread_mutex_lock(&g_hdr_mu);
     for(unsigned i=0;i<g_hdr_nswap;i++)if(g_hdr_swap[i].serial==R.rt.color[0]->serial)slot=i;
     pthread_mutex_unlock(&g_hdr_mu);if(slot==8)return;
