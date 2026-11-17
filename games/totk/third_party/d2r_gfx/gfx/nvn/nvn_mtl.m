@@ -183,8 +183,11 @@ static id<MTL4CommandAllocator> g_alloc4[ALLOC_MAX]; static int g_alloc_n, g_all
    segments of a submission). With 3 slots in fixed rotation the submit thread ran at most 3 upload batches ahead of the
    GPU and waited about 6 ms a frame for a slot while the GPU idled (BOTW 1.9.0, 2026-11-17: 50.5 fps; with 8 slots the
    wait was 0.0-0.2 ms and the same state ran at 54.5 fps). UP_SLOTS_MAX slots exist and up_slots() of them rotate: all 8
-   on BOTW by default. Other games keep 3 (TOTK 1.4.3 showed no gain from 8: it was GPU-bound with 3 and with 8). */
-#ifdef GAME_BOTW
+   on BOTW and TOTK 1.4.3 by default. TOTK 1.4.3 hits the same wait while it streams textures (owner log 2026-11-17: 8-10 ms
+   a frame for minutes, half of the long frames): its median frame stays GPU-bound, but each wait is a hitch of 30-50 ms
+   with the GPU idle; with 8 slots the owner-played A/B ring-to2 lost those hitches (61 -> 2). Other games keep 3. */
+#if defined(GAME_BOTW) || defined(TOTK_GAME_V143)
+#define UP_SLOTS_ROTATE 1
 #define UP_SLOTS_MAX 8
 static _Atomic int g_up_slots_n;   /* 0: not read yet (TOTK_BOTW_UP_SLOTS=3..8, flag up_slots <3..8>; default UP_SLOTS_MAX) */
 #else
@@ -1110,7 +1113,7 @@ void mtl_init(void) {
         g_present_cb[i] = [g_dev newCommandBuffer];
         if (!g_present_cb[i]) MDIE("建立出图 MTL4CommandBuffer[%d] 失败", i);
     }
-#ifdef GAME_BOTW
+#ifdef UP_SLOTS_ROTATE
     for (int i = 3; i < UP_SLOTS_MAX; i++) {
         MTL4CommandAllocatorDescriptor *ad = [MTL4CommandAllocatorDescriptor new]; NSError *ae = nil;
         ad.label = [NSString stringWithFormat:@"nvn-mtl upload allocator %d", i];
@@ -4190,7 +4193,7 @@ void dm_gfx_set_flag(const char *name, int v) {
     if (!strcmp(name,"pool_issue_stats")) { extern void nvn_pool_issue_statistics(uint64_t[3],int); uint64_t n[3]; nvn_pool_issue_statistics(n,v); MLOG("[pool-issue] stats=%d calls=%llu skipped=%llu registered=%llu",v!=0,n[0],n[1],n[2]); return; }
     if (!strcmp(name,"mesh_reuse_check")) { atomic_store(&g_mesh_reuse_check,v!=0); MLOG("[flag] mesh_reuse_check = %d",v!=0); return; }
     if (!strcmp(name,"mesh_trace")) { if(v>=0&&v<=4)atomic_store(&g_mesh_trace_frames,v); return; }
-#ifdef GAME_BOTW
+#ifdef UP_SLOTS_ROTATE
     if (!strcmp(name, "up_slots")) { if (v < 3 || v > UP_SLOTS_MAX) { MLOG("[flag] up_slots requires 3..%d", UP_SLOTS_MAX); return; } atomic_store(&g_up_slots_n, v); MLOG("[flag] up_slots = %d (next upload batch)", v); return; }
 #endif
     if (!strcmp(name, "chunk_first") || !strcmp(name, "chunk_draws")) {
@@ -5120,7 +5123,7 @@ static _Atomic uint64_t g_upload_gpu_ns;
 static id<MTL4CommandBuffer> g_up_cb;
 static id<MTL4ComputeCommandEncoder> g_up_ce;
 static _Atomic int g_up_alloc_busy[UP_SLOTS_MAX];
-#ifdef GAME_BOTW
+#ifdef UP_SLOTS_ROTATE
 static unsigned g_up_cur_slot;   /* the open batch's slot (submit thread): up_slots() can change between up_begin and up_flush */
 static unsigned up_slots(void) {
     int n = atomic_load(&g_up_slots_n);
@@ -5342,7 +5345,7 @@ static void up_flush(void) {
     }
     if (b) { m4_end(b); g_up_ce = nil; }
     id<MTL4CommandBuffer> cb = g_up_cb;
-#ifdef GAME_BOTW
+#ifdef UP_SLOTS_ROTATE
     unsigned slot = g_up_cur_slot;
 #else
     unsigned slot = (g_up_seq - 1) % 3;
@@ -5393,7 +5396,7 @@ void mtl_upload_wait_stats(uint64_t *n, uint64_t *ns) { *n = atomic_load(&g_up_s
 static void up_begin(void) {
     up_owner_check("up_begin");
     if (g_up_cb) return;
-#ifdef GAME_BOTW
+#ifdef UP_SLOTS_ROTATE
     unsigned slot = g_up_cur_slot = g_up_seq++ % up_slots();
 #else
     unsigned slot = g_up_seq++ % 3;
