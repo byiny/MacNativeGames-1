@@ -2,6 +2,8 @@
 
     prefix NAME           the installed folder of a library or tool (opus, libvpx, dav1d, ogg, vorbis, zstd, …)
     program NAME          the path of a program (zstd, spirv-cross, glslangValidator, xcodegen, dotnet, meson, ninja, cmake)
+    python NAME           isolated tool Python (ui-pack), with pinned, verified wheels
+    fonts                 the folder of the six open-source shared fonts (open_fonts.py), made the first time
     env NAME…             KEY=VALUE lines (OPUS_PREFIX=…, DOTNET_ROOT=…)
     path PROGRAM…         the folders of those programs joined with ':' (to put first on PATH)
     all                   make everything in pins.py (to fill a cache ahead of time)
@@ -15,7 +17,7 @@ if __package__ in (None, ''):                      # run as a folder (python3 to
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
     __package__ = 'tools.deps'
 
-from tools.deps import BUILD_TOOLS, PROGRAMS, DepsError, env, path, prefix, program  # noqa: E402
+from tools.deps import BUILD_TOOLS, PROGRAMS, DepsError, env, path, prefix, program, python_environment  # noqa: E402
 from tools.deps.pins import SOURCES  # noqa: E402
 
 
@@ -29,6 +31,11 @@ def main(argv):
             print(prefix(names[0]))
         elif command == 'program' and len(names) == 1:
             print(program(names[0]))
+        elif command == 'python' and len(names) == 1:
+            print(python_environment(names[0]))
+        elif command == 'fonts' and not names:
+            from tools.deps.open_fonts import open_fonts
+            print(open_fonts())
         elif command == 'env' and names:
             for key, value in env(*names).items():
                 print(f'{key}={value}')

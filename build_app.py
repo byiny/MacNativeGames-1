@@ -48,7 +48,7 @@ For iPhone/iPad: Xcode 26+ with iOS/Metal toolchains (XcodeGen, CMake and Ninja 
 Optional: Xcode's Metal toolchain (xcodebuild -downloadComponent MetalToolchain) compiles the startup shaders into the
 app, so moving or rebuilding it does not repeat that work at launch.
 """
-import argparse, concurrent.futures, glob, hashlib, itertools, json, os, platform, plistlib, shutil, struct, subprocess, sys, threading, time
+import argparse, concurrent.futures, ctypes, errno, glob, hashlib, itertools, json, os, platform, plistlib, shutil, struct, subprocess, sys, threading, time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent
@@ -310,6 +310,12 @@ def _bfttf_valid(path):
 
 
 # ---- prerequisites ----
+def sdk_major(version):
+    """26 for '26.0' (xcrun --show-sdk-version); 0 when it says nothing readable."""
+    head = version.split('.')[0]
+    return int(head) if head.isdigit() else 0
+
+
 def prerequisites(args):
     if platform.system() != 'Darwin' or platform.machine() != 'arm64':
         raise BuildError('needs a Mac with Apple silicon')
@@ -318,6 +324,14 @@ def prerequisites(args):
         raise BuildError(f'needs macOS 26 or later (Metal 4); this is macOS {platform.mac_ver()[0]}')
     if subprocess.run(['xcrun', '--find', 'clang'], capture_output=True).returncode:
         raise BuildError('the Xcode command line tools are missing: xcode-select --install')
+    # Metal 4 and MetalFX frame interpolation come with the macOS 26 SDK: an older Xcode on macOS 26 passes the checks
+    # here and the build stops minutes later at "cannot find protocol declaration for 'MTL4CommandBuffer'" (#2250)
+    sdk = subprocess.run(['xcrun', '--show-sdk-version'], capture_output=True, text=True).stdout.strip()
+    if sdk_major(sdk) < 26:
+        raise BuildError(f'the developer tools use the macOS {sdk or "?"} SDK, which has no Metal 4; the build needs the macOS 26 '
+                         'SDK or later. Update Xcode from the App Store, or use the command line tools: sudo xcode-select -s '
+                         '/Library/Developer/CommandLineTools (if they are old too: sudo rm -rf /Library/Developer/CommandLineTools '
+                         '&& xcode-select --install). xcode-select -p and xcrun --show-sdk-version show what is used')
     # SPIRV-Cross is C++: without the SDK's libc++ headers the build stops much later at "'string' file not found" (#41)
     cxx = subprocess.run(['xcrun', 'clang++', '-std=c++11', '-x', 'c++', '-fsyntax-only', '-'], input='#include <string>\n',
                          capture_output=True, text=True)
@@ -1249,7 +1263,7 @@ def build_device_translator(tree, logs):
     background instead of skipping its draws until the Mac fills it in."""
     prebuilt = [tree / 'prebuilt/ios-arm64' / name for name in ('libtotk_xlate.a', 'libtotk_xlate_bootstrap.o')]
     for lib in prebuilt:
-        want = (lib.parent / (lib.name + '.sha256')).read_text().strip()
+        want = (lib.parent / (lib.name + '.sha256')).read_text().split()[0]
         if not lib.is_file() or sha256(lib) != want:
             raise BuildError(f'{lib}: not the file this repository ships (its SHA-256 differs from {lib.name}.sha256); '
                              f'check it out again, or rebuild both with games/totk/tools/totk_xlate/publish_ios_lib.sh')
@@ -1275,7 +1289,7 @@ def build_device_translator(tree, logs):
 def check_translator(tree):
     """The shader translation service: a native program in this repository (no .NET needed to build or to play)."""
     translator = tree / 'prebuilt/macos-arm64/totk_xlate'
-    want = (translator.parent / 'totk_xlate.sha256').read_text().strip()
+    want = (translator.parent / 'totk_xlate.sha256').read_text().split()[0]
     if not translator.is_file() or sha256(translator) != want:
         raise BuildError(f'{translator}: not the shader translator this repository ships (its SHA-256 differs from '
                          f'totk_xlate.sha256); check it out again, or rebuild it with games/totk/tools/totk_xlate/publish_native.sh')
@@ -1594,7 +1608,7 @@ def data_bundle(tree, version, logs, *, bundle_id=BUNDLE_ID, display_version=Non
         say(f'4/4 app: signing the game data once (a minute or two; later builds reuse it): {why}')
         clone(image, tmp / 'Contents/Resources/romfs.bin')
         (tmp / 'Contents/Info.plist').write_bytes(info)
-        run(['codesign', '--force', '--sign', '-', tmp], logs / f'sign-data-{version}.log')
+        run(['codesign', '--force', '--sign', '-', tmp], logs / f'sign-data-{version}.log')   # nested: not the app
         # Checked once here, where the 16 GB are hashed anyway; an app carrying this bundle checks only its own seal (which
         # records this bundle's signature), not --deep (55 s on each packaging, 2026-10-21).
         run(['codesign', '--verify', '--strict', tmp], logs / f'verify-data-{version}.log')
@@ -1767,15 +1781,23 @@ def keep_game_data(new, old, *, verify=app_seal_valid, _moves=None):
     image = 'Contents/Resources/romfs.bin'
     swapped, start = [], len(_moves.done)
     helpers = new / 'Contents/Helpers'
-    for bundle in sorted([*helpers.glob('GameData-*.bundle'), *helpers.glob('ShaderData-*.bundle')]):
+    for bundle in sorted([*helpers.glob('GameData-*.bundle'), *helpers.glob('ShaderData-*.bundle'), *helpers.glob('Pipelines-*.bundle')]):
         # ShaderData (shader_bundle) the same way: 117,000 files moved instead of cloned, sealed and deleted (2026-11-03);
-        # in update_runtime.py's new app it is only its signature (Info.plist, _CodeSignature), what the app's seal records
+        # in update_runtime.py's new app it is only its signature (Info.plist, _CodeSignature), what the app's seal records.
+        # Pipelines: Ocarina of Time's pipeline archive (games/oot/build.py pipeline_bundle, 6.8 GB), the same way (2026-11-16)
         before = old / 'Contents/Helpers' / bundle.name
         if not all((before / rel).is_file() and (before / rel).read_bytes() == (bundle / rel).read_bytes()
                    for rel in ('Contents/_CodeSignature/CodeResources', 'Contents/Info.plist')):
             continue
-        if bundle.name.startswith('GameData-') and (not (before / image).is_file() or (before / image).stat().st_size != (bundle / image).stat().st_size):
-            continue
+        if bundle.name.startswith('GameData-'):
+            if bundle.name in ('GameData-ss.bundle', 'GameData-worldend.bundle'):
+                # SS and Worldend store verified directory trees, whose complete file hashes are
+                # sealed in files.json (ss_bundle.signed_bundle), rather than romfs.bin.
+                manifest = 'Contents/Resources/files.json'
+                if not (before/manifest).is_file() or (before/manifest).read_bytes() != (bundle/manifest).read_bytes():
+                    continue
+            elif not (before / image).is_file() or (before / image).stat().st_size != (bundle / image).stat().st_size:
+                continue
         fresh = new.with_name(f'{new.name}.{bundle.name}.fresh')   # outside the app: anything extra in it fails the seal
         if fresh.exists():
             remove_tree(fresh)
@@ -1791,9 +1813,9 @@ def keep_game_data(new, old, *, verify=app_seal_valid, _moves=None):
         _moves.restore(start)
         swapped = []
     _moves.discard.extend(fresh for _, fresh in swapped)
-    for bundle in helpers.glob('ShaderData-*.bundle'):   # update_runtime.py's signature-only bundle must have been replaced
+    for bundle in [*helpers.glob('ShaderData-*.bundle'), *helpers.glob('Pipelines-*.bundle')]:   # a signature-only bundle must have been replaced
         if not (bundle / 'Contents/Resources').is_dir():
-            raise BuildError(f'{bundle.name}: the installed app\'s shader data could not be moved into the new app; the installed app is unchanged')
+            raise BuildError(f'{bundle.name}: the installed app\'s {"pipeline archive" if bundle.name.startswith("Pipelines-") else "shader data"} could not be moved into the new app; the installed app is unchanged')
     return any(bundle.name.startswith('GameData-') for bundle, _ in swapped)
 
 
@@ -1934,7 +1956,7 @@ def seal_shader_bundle(bundle, seed, libs, version, logs, bundle_id):
     (tmp / 'Contents/Info.plist').write_bytes(plistlib.dumps(dict(
         CFBundleIdentifier=f'{bundle_id}.shaders.{version}', CFBundleName='Startup shaders', CFBundlePackageType='BNDL',
         CFBundleShortVersionString=VERSIONS[version]['display_version'], CFBundleVersion='1')))
-    run(['codesign', '--force', '--sign', '-', tmp], logs / f'sign-shaders-{version}.log')
+    run(['codesign', '--force', '--sign', '-', tmp], logs / f'sign-shaders-{version}.log')   # nested: not the app
     run(['codesign', '--verify', '--strict', tmp], logs / f'verify-shaders-{version}.log')
     if bundle.exists():
         shutil.rmtree(bundle)
@@ -1949,22 +1971,118 @@ def app_shader_bundle(app, version):
 
 
 def clone_app_except(src, dst, skip):
-    """src cloned to dst as copy_tree does, but for `skip` (a folder inside src), which becomes a link to src's: what
-    update_runtime.py assembles beside the installed app, with the installed shader data read through the link (the
-    probe, the pipeline tool) instead of 117,000 files cloned (31 s) and deleted again."""
+    """src cloned to dst as copy_tree does, but for `skip` (a folder inside src, or several), which becomes a link to
+    src's: what update_runtime.py assembles beside the installed app, with the installed shader data and pipeline archive
+    read through the link (the probe, the pipeline tool) instead of 117,000 files cloned (31 s) and deleted again."""
+    skips = (skip,) if isinstance(skip, (str, os.PathLike)) else tuple(skip)
     dst.mkdir(parents=True)
     for child in src.iterdir():
         target = dst / child.name
-        if child == skip:
+        if child in skips:
             target.symlink_to(child.resolve())
         elif child.is_symlink():
             target.symlink_to(os.readlink(child))
-        elif child.is_dir() and skip.is_relative_to(child):
-            clone_app_except(child, target, skip)
+        elif child.is_dir() and any(s.is_relative_to(child) for s in skips):
+            clone_app_except(child, target, skips)
         elif child.is_dir():
             copy_tree(child, target)
         else:
             clone(child, target)
+
+
+def app_pipeline_bundle(app, version):
+    """The app's Pipelines bundle (pipeline_bundle), or None for an app made before it (build/pipelines in its Resources)."""
+    bundle = Path(app) / f'Contents/Helpers/Pipelines-{version}.bundle'
+    return bundle if (bundle / 'Contents/Resources/pipelines').is_dir() and not bundle.is_symlink() else None
+
+
+HELPER_SIGNATURE = ('Contents/_CodeSignature/CodeResources', 'Contents/Info.plist')
+
+
+def pipeline_files_stamp(folder):
+    """What an app's pipeline archive is (pipeline_bundle): each pipelines-* file's name and size, an archive file also by
+    its modification time (mac_pipeline_files clones it, keeping the time of the file the tool wrote, so an archive the
+    tool did not write again keeps its stamp), the small index files by their bytes (written on every packaging)."""
+    h = hashlib.sha256()
+    for p in sorted(p for p in Path(folder).iterdir() if p.is_file() and p.name.startswith('pipelines-')):
+        st = p.stat()
+        h.update(f'{p.name} {st.st_size} {st.st_mtime_ns if p.suffix == ".metalarchive" else sha256(p)}\n'.encode())
+    return h.hexdigest()
+
+
+def pipeline_bundle(files, bundle, bundle_id, logs):
+    """The Mac's pipeline archive (mac_pipelines; the files mac_pipeline_files wrote into `files`) as a signed bundle of its
+    own at `bundle` in the work folder, like the shader data (shader_bundle), signed again only when an archive file
+    changed. In the app's Resources it was sealed on every update: Ocarina of Time's 6.8 GB took 59 of its 69 s of
+    signing and 10.5 s of every seal check, Tears of the Kingdom's 2.3 GB 25 s (2026-11-16,
+    scratch/runs/2026-11/express-speed). The app reads it through build/pipelines (link_pipelines)."""
+    stamp = bundle.with_name(bundle.name + '.json')
+    want = {'format': 1, 'files': pipeline_files_stamp(files)}
+    try:
+        have = json.loads(stamp.read_text()) if (bundle / 'Contents/_CodeSignature/CodeResources').is_file() else None
+    except (OSError, ValueError):
+        have = None
+    if have == want:
+        return bundle
+    say('   the pipeline archive bundle is signed again (' + ('none in this work folder' if have is None else 'an archive file changed') + ')')
+    tmp = bundle.with_name(bundle.name + f'.partial-{os.getpid()}')
+    if tmp.exists():
+        remove_tree(tmp)
+    dest = tmp / 'Contents/Resources/pipelines'
+    dest.mkdir(parents=True)
+    for p in sorted(Path(files).iterdir()):
+        if p.is_file() and p.name.startswith('pipelines-'):
+            clone(p, dest / p.name)
+    import plistlib
+    (tmp / 'Contents/Info.plist').write_bytes(plistlib.dumps(dict(
+        CFBundleIdentifier=bundle_id, CFBundleName='Pipelines', CFBundlePackageType='BNDL',
+        CFBundleShortVersionString='1', CFBundleVersion='1')))
+    run(['codesign', '--force', '--sign', '-', tmp], logs / 'sign-pipelines.log')   # nested: not the app
+    run(['codesign', '--verify', '--strict', tmp], logs / 'verify-pipelines.log')
+    stamp.unlink(missing_ok=True)
+    if bundle.exists():
+        remove_tree(bundle)
+    tmp.rename(bundle)
+    stamp.write_text(json.dumps(want) + '\n')
+    return bundle
+
+
+def place_helper(bundle, app, installed):
+    """A signed helper bundle (shader data, pipelines) in the new app's Contents/Helpers. When the installed app
+    (`installed`, or None) carries the same one (the same signature and Info.plist), only its signature goes in and
+    install_app moves the installed bundle in (keep_game_data), as update_runtime.py does for the shader data
+    (shader_signature_only); else the whole bundle is cloned. Whatever was at its place (a link clone_app_except left, an
+    older copy) is replaced. Returns whether only the signature went in."""
+    target = Path(app) / 'Contents/Helpers' / bundle.name
+    before = Path(installed) / 'Contents/Helpers' / bundle.name if installed else None
+    same = before is not None and not before.is_symlink() and all(
+        (before / rel).is_file() and (before / rel).read_bytes() == (bundle / rel).read_bytes() for rel in HELPER_SIGNATURE)
+    if target.is_symlink():
+        target.unlink()
+    elif target.exists():
+        remove_tree(target)
+    if same:
+        shader_signature_only(app, bundle)
+    else:
+        copy_tree(bundle, target)
+    return same
+
+
+def link_pipelines(app, res, name):
+    """build/pipelines: a link to the app's Pipelines bundle (relative: the app moves), where the game reads its archive
+    (totk_pipeline_archive.h par_load_prebuilt, exe_rel("pipelines")). An older app's own folder goes out of the app and
+    is deleted later, as link_shader_data does."""
+    link = res / 'build/pipelines'
+    link.parent.mkdir(parents=True, exist_ok=True)
+    if link.is_symlink() or link.is_file():
+        link.unlink()
+    elif link.is_dir():
+        aside = app.with_name(f'{app.name}.pipelines.old')
+        if aside.exists():
+            remove_tree(aside)
+        link.rename(aside)
+        remove_in_background(aside)
+    link.symlink_to(os.path.relpath(app / 'Contents/Helpers' / name / 'Contents/Resources/pipelines', link.parent))
 
 
 def shader_signature_only(app, installed):
@@ -2008,6 +2126,61 @@ def place_seed(tree, app, res, version, logs, *, game='totk', bundle_id=BUNDLE_I
     place_shader_bundle(shader_bundle(tree, version, logs, game=game, bundle_id=bundle_id), app, res)
 
 
+_LIBPROC = None
+
+
+def _libproc():
+    global _LIBPROC
+    if _LIBPROC is None:
+        lib = ctypes.CDLL('/usr/lib/libproc.dylib', use_errno=True)
+        lib.proc_listallpids.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        lib.proc_pidpath.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+        _LIBPROC = lib
+    return _LIBPROC
+
+
+def running_executables():
+    """(pid, executable path) of the processes this user can see. Not through ps: /bin/ps is setuid and cannot run under
+    this machine's storage guard (2026-11-15: "Operation not permitted: 'ps'"); games/oot/scripts/dev/game_slot.py reads
+    processes the same way. A failed listing raises, so a query error is never taken for "no game running"."""
+    lib = _libproc()
+    n = lib.proc_listallpids(None, 0)
+    if n <= 0:
+        raise OSError(ctypes.get_errno(), 'cannot list processes')
+    cap = n + 64
+    pids = (ctypes.c_int * cap)()
+    n = lib.proc_listallpids(pids, ctypes.sizeof(pids))
+    if n <= 0:
+        raise OSError(ctypes.get_errno(), 'cannot list processes')
+    found, path = [], ctypes.create_string_buffer(4096)
+    for pid in pids[:min(n, cap)]:
+        if pid > 0 and lib.proc_pidpath(pid, path, 4096) > 0:
+            found.append((pid, path.value.decode(errors='replace')))
+    return found
+
+
+def process_args(pid):
+    """A process's command line (its arguments joined by spaces, as ps -o args prints them), or None when it has exited.
+    sysctl KERN_PROCARGS2: an int argc, the executable path, padding zeros, then argv. Any other failure raises."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    mib = (ctypes.c_int * 3)(1, 49, pid)   # CTL_KERN, KERN_PROCARGS2
+    size = ctypes.c_size_t(0)
+    for buf in (None, True):
+        if buf:
+            buf = ctypes.create_string_buffer(size.value)
+        if libc.sysctl(mib, 3, buf, ctypes.byref(size), None, 0) != 0:
+            error = ctypes.get_errno()
+            if error in (errno.ESRCH, errno.EINVAL):
+                return None   # gone (EINVAL is what the kernel answers for a pid that has exited)
+            raise OSError(error, f'cannot read the arguments of process {pid}')
+    raw = buf.raw[:size.value]
+    argc, rest = int.from_bytes(raw[:4], 'little'), raw[4:]
+    start = rest.find(b'\0')
+    while 0 <= start < len(rest) and rest[start] == 0:
+        start += 1
+    return ' '.join(a.decode(errors='replace') for a in rest[start:].split(b'\0')[:argc])
+
+
 def wait_until_closed(out, prefix=''):
     """Preparing/signing a replacement is safe while playing; replacing the resources of an active game is not. Wait
     without closing the player."""
@@ -2015,19 +2188,14 @@ def wait_until_closed(out, prefix=''):
     old_binaries = [b for b in old_binaries if b.is_file()]   # the game runs as the app's executable (Contents/MacOS)
     notified = 0
     while old_binaries:
-        processes = subprocess.run(['ps', '-axo', 'pid=,comm='], capture_output=True, text=True, check=True).stdout.splitlines()
         binaries = {str(b.resolve()) for b in old_binaries}
         running = False
-        for process in processes:
-            fields = process.strip().split(maxsplit=1)
-            if len(fields) != 2 or fields[1] not in binaries:
+        for pid, binary in running_executables():
+            if binary not in binaries:
                 continue
-            pid, binary = fields
-            args = subprocess.run(['ps', '-ww', '-p', pid, '-o', 'args='], capture_output=True, text=True)
-            if args.returncode == 1 and not args.stdout.strip():
-                continue   # the process exited between the two snapshots
-            args.check_returncode()
-            command = args.stdout.strip()
+            command = process_args(pid)
+            if command is None:
+                continue   # the process exited between the two queries
             options = command[len(binary) + 1:].split() if command.startswith(binary + ' ') else []
             # The update window of an app built before 13 November 2026 (the settings panel's Update page, removed
             # since: updates go through MNG Launcher) uses the game's executable and waits for this installer.
@@ -2103,6 +2271,10 @@ def recorded_work_folder(app, name):
 def source_commit():
     """The short hash of the commit this checkout is on (user 2026-10-25: the HUD shows it, to tell which commit an app
     was built from; uncommitted changes are not shown), or '' outside a git checkout."""
+    # GitHub Release launchers use a verified source snapshot, with no .git directory.
+    marker = REPO / '.mng-source-commit'
+    if marker.is_file():
+        return marker.read_text().strip()[:7]
     result = subprocess.run(['git', '-C', REPO, 'rev-parse', '--short=7', 'HEAD'], capture_output=True, text=True)
     return result.stdout.strip() if result.returncode == 0 else ''
 
@@ -2153,7 +2325,7 @@ def step_app(tree, out, logs, *, version="v0", game='totk', game_data='app', gam
     # after the checks above: signing it is slow
     place_game_data(tree, res, version)
     place_runtime(tree, tmp, version, logs, game=game)
-    mac_pipelines(tree, res, version, logs)   # before the seal: the files go into the app (build/pipelines)
+    mac_pipelines(tree, res, version, logs, installed=out if out.exists() else None)   # before the seal: the Pipelines bundle (build/pipelines)
     if game_data == 'library':
         folder = library_game_data(game, version, game_data_folder)
         say(f'4/4 app: the game data goes to {folder}, not into the app (put there once; later builds reuse it)')
@@ -2200,13 +2372,26 @@ def mac_pipeline_files(made, seed, arch, chain):
     seed.mkdir(parents=True, exist_ok=True)
     for old in seed.glob('pipelines-*'):
         old.unlink()
+    # Each key belongs to one file: the one the tool itself takes (totk_pipeline_archive_publish.h par_pub_scan: the key
+    # lists oldest first by modification time, then by name; a later file wins a key both list). A pipeline written again
+    # (par_stale) stays listed in its old file, which keeps its other keys; until 2026-11-15 the index listed such a key
+    # twice, the old file first by name, and the game takes a key's first row (par_load_prebuilt): it used the stale
+    # pipeline, which Metal refused (14 of a quick App's 124 mesh pipelines compiled again at every start).
+    batches = sorted((p.with_suffix('.keys') for p in made.glob('*.metalarchive') if p.with_suffix('.keys').is_file()),
+                     key=lambda k: (k.stat().st_mtime, k.stem))
+    owner = {}
+    for keys in batches:
+        for key in keys.read_text().split('\n'):
+            if key:
+                owner[key] = keys.stem
     index = []
-    for archive in sorted(made.glob('*.metalarchive')):
-        keys = archive.with_suffix('.keys')
-        if not keys.is_file():
-            continue
-        clone(archive, seed / f'pipelines-{arch}-{archive.stem}.metalarchive')
-        index += [f'{key}\t{archive.stem}' for key in keys.read_text().split('\n') if key]
+    for keys in batches:
+        mine = [key for key in keys.read_text().split('\n') if key and owner.get(key) == keys.stem]
+        if not mine:
+            continue   # every key it lists was written again later: the App does not carry it
+        mine = list(dict.fromkeys(mine))
+        clone(keys.with_suffix('.metalarchive'), seed / f'pipelines-{arch}-{keys.stem}.metalarchive')
+        index += [f'{key}\t{keys.stem}' for key in mine]
     if not index:
         return 0
     # #2070: the compute shaders this GPU's Metal compiler built only with their float adds lowered (nvn_float_rmw.h): the
@@ -2222,7 +2407,7 @@ def mac_pipeline_files(made, seed, arch, chain):
     return len(index)
 
 
-def mac_pipelines(tree, res, version, logs):
+def mac_pipelines(tree, res, version, logs, installed=None):
     """The Mac's pipeline archive, made while packaging (user 2026-10-29: "mac的 管线 预热 和iPhone 一样 放在打包阶段做 不在app里做了"):
     the game binary's pipeline-archive mode (TOTK_PIPELINE_ARCHIVE_HOST=1) makes every pipeline of the warm-up lists from
     the libraries the game itself loads (the app's shader-libs) on this Mac's GPU, so the first start takes them from the
@@ -2277,7 +2462,23 @@ def mac_pipelines(tree, res, version, logs):
     if not arch or not chain:
         say(f'   no GPU architecture or chain in the report, the first start fills it instead (see {logs / "mac-pipelines.log"})')
         return
-    n = mac_pipeline_files(work / 'cache/pipelines', build / 'pipelines', arch, chain)
+    # Into the work folder, then the app as a signed bundle of its own (pipeline_bundle), read through build/pipelines
+    # (link_pipelines): unchanged, it goes in as its signature and the installed app's bundle is moved in (place_helper,
+    # install_app). `installed`: the app being replaced (update_runtime.py, shader_update.py, a rebuild over it), or None.
+    files = work / 'files'
+    n = mac_pipeline_files(work / 'cache/pipelines', files, arch, chain)
+    app = res.parents[2]
+    if not n:   # no archive: none in the app either, as before (its build/pipelines held no pipelines-* then)
+        for old in (app / 'Contents/Helpers').glob('Pipelines-*.bundle'):
+            old.unlink() if old.is_symlink() else remove_tree(old)
+        if (build / 'pipelines').is_symlink():
+            (build / 'pipelines').unlink()
+    else:
+        bundle = pipeline_bundle(files, tree / f'build/pipeline-bundles/Pipelines-{version}.bundle',
+                                 f'org.macnativegames.pipelines.{version}', logs)
+        kept = place_helper(bundle, app, installed)
+        link_pipelines(app, res, bundle.name)
+        say('   pipeline archive: ' + ('unchanged, the installed app\'s bundle is moved in' if kept else 'its bundle goes into the app'))
     say(f"   {n:,} pipelines for {arch} in {time.time() - t0:.0f} s ({report.get('failed', 0)} failed); "
         "another Mac's GPU fills its own on the first start")
 
@@ -2501,6 +2702,32 @@ def record_ns2_device_build(tree, out, g, args):
     out.with_name(out.stem + '-build-record.json').write_text(json.dumps(record, indent=2) + '\n')
 
 
+def ns2_shared_fonts(fonts, shared_fonts=None, make=None):
+    """The six shared fonts of a Switch 2 game's work folder (a dump holds none): the given folder (--shared-fonts), else
+    the valid ones already there, else the open-source stand-ins of tools/deps/open_fonts.py (make stands in for it in the
+    tests), as Ocarina of Time does (games/oot/build.py prepare_fonts; user 2026-11-16: "一样处理"). In this Mac's 18 Bananza
+    and 4 Pokopia game logs the game never called nn::pl's font functions (games/totk/runtime/shared_font.c loads them at
+    the first call and logs "shared fonts loaded"). Returns which fonts it used."""
+    if shared_fonts:
+        copy_shared_fonts(shared_fonts, fonts)
+        used = f'the given folder {shared_fonts}'
+    elif fonts_valid(fonts):
+        used = f'kept in the work folder ({fonts})'
+    else:
+        if make is None:
+            from tools.deps.open_fonts import open_fonts as make
+        made = Path(make())
+        validate_fonts(made)
+        if fonts.exists():
+            shutil.rmtree(fonts)
+        shutil.copytree(made, fonts)
+        used = (f'none given: open-source Noto fonts (SIL OFL 1.1) from {made}; --shared-fonts <the shared-fonts folder of '
+                'a Tears of the Kingdom or Breath of the Wild build> uses those instead')
+    validate_fonts(fonts)
+    say(f'shared fonts: {used}')
+    return used
+
+
 def main_ns2(args, dump):
     """A Mac app of a Switch 2 game from its dump folder (no keys: the dump holds the decrypted ExeFS and RomFS)."""
     if args.platform == 'visionos':
@@ -2531,13 +2758,7 @@ def main_ns2(args, dump):
     t0 = time.time()
     tree = prepare_work(work, py, logs)
     say(f'{app_name} {VERSIONS[v]["display_version"]} from {dump}; work folder {work} ({why})')
-    fonts = tree / 'extracted/firmware/shared-fonts'
-    if not fonts_valid(fonts):
-        if not shared_fonts:
-            raise BuildError('a Switch 2 dump holds no system shared fonts: pass --shared-fonts <a folder of the six .bfttf files '
-                             'a Tears of the Kingdom or Breath of the Wild build extracted (TOTK_build/totk/extracted/firmware/shared-fonts)>')
-        copy_shared_fonts(shared_fonts, fonts)
-    validate_fonts(fonts)
+    ns2_shared_fonts(tree / 'extracted/firmware/shared-fonts', shared_fonts)
     step_code_ns2(tree, dump, g, env, logs, app=out if out.suffix == '.app' else None)
     if v == 'dkb':
         for size in ('2560x1440', '3840x2160'):
@@ -2857,7 +3078,7 @@ def step_shaders_botw(tree, botw, logs, *, version='botw160', shader_list=None):
         say('3/4 shaders: building SPIRV-Cross with clang')
         build_spirv_cross(tree, logs)
     translator = tree / 'prebuilt/macos-arm64/totk_xlate'
-    want = (translator.parent / 'totk_xlate.sha256').read_text().strip()
+    want = (translator.parent / 'totk_xlate.sha256').read_text().split()[0]
     if not translator.is_file() or sha256(translator) != want:
         raise BuildError(f'{translator}: not the shader translator this repository ships (its SHA-256 differs from '
                          f'totk_xlate.sha256); check it out again, or rebuild it with games/totk/tools/totk_xlate/publish_native.sh')

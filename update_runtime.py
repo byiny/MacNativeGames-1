@@ -44,6 +44,42 @@ import build_app
 from build_app import APPS, VERSIONS, BuildError, clone, run, say, sha256
 
 
+def standalone_game(app):
+    try:
+        bundle = plistlib.loads((Path(app)/'Contents/Info.plist').read_bytes()).get('CFBundleIdentifier')
+        return {'org.macnativegames.dread': 'dread', 'org.macnativegames.worldend': 'worldend', 'org.macnativegames.tmnt.private': 'tmnt',
+                'org.macnativegames.acnh': 'acnh', 'org.macnativegames.eow': 'eow'}.get(bundle)
+    except (OSError, ValueError):
+        return None
+
+
+def standalone_module(game):
+    import importlib.util
+    folder = build_app.REPO/f'games/{game}'
+    scripts = folder/'scripts'
+    if str(scripts) not in sys.path: sys.path.insert(0, str(scripts))
+    file = folder/'build.py' if game in ('dread', 'acnh', 'eow') else scripts/f'{game}_update.py'
+    name = f'mng_update_{game}'
+    spec = importlib.util.spec_from_file_location(name, file)
+    module = importlib.util.module_from_spec(spec); sys.modules[name] = module; spec.loader.exec_module(module)
+    return module
+
+
+def skyward():
+    folder = build_app.REPO/'games/ss/scripts'
+    if str(folder) not in sys.path:
+        sys.path.insert(0, str(folder))
+    import ss_update
+    return ss_update
+
+
+def skyward_app(app):
+    try:
+        return plistlib.loads((app/'Contents/Info.plist').read_bytes()).get('CFBundleIdentifier') == 'org.macnativegames.ss'
+    except (OSError, ValueError):
+        return False
+
+
 def ocarina_app(app):
     try:
         return plistlib.loads((app / 'Contents/Info.plist').read_bytes()).get('CFBundleExecutable') == 'OcarinaOfTime'
@@ -348,7 +384,8 @@ def restore_replaced(app, replaced):
     helpers = app / 'Contents/Helpers'
     seal = app / 'Contents/_CodeSignature/CodeResources'
     sealed = seal.read_bytes() if seal.is_file() else b''
-    for bundle in sorted([*(failed / 'Contents/Helpers').glob('GameData-*.bundle'), *(failed / 'Contents/Helpers').glob('ShaderData-*.bundle')]):
+    for bundle in sorted([*(failed / 'Contents/Helpers').glob('GameData-*.bundle'), *(failed / 'Contents/Helpers').glob('ShaderData-*.bundle'),
+                          *(failed / 'Contents/Helpers').glob('Pipelines-*.bundle')]):
         # the bundles the restored app's seal names (an app made before the shader data bundle names none of those)
         if not (helpers / bundle.name).exists() and f'Helpers/{bundle.name}'.encode() in sealed:
             helpers.mkdir(parents=True, exist_ok=True)
@@ -459,14 +496,15 @@ def replace_native_5k(res, action, made, version='v143'):
             build_app.copy_tree(folder, target)
 
 
-def oot_update_blocker(folder):
+def oot_update_blocker(folder, app=None):
     """Why Ocarina of Time's update cannot run with this work folder ('' when it can): games/oot/build.py update_blocker,
-    the checks its update_runtime makes before it touches anything."""
+    the checks its update_runtime makes before it touches anything, for the shaders the App carries (shader_mode: a
+    quick App's update keeps only the title's)."""
     import importlib.util
     spec = importlib.util.spec_from_file_location('oot_build_plan', build_app.REPO / 'games/oot/build.py')
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module.update_blocker(folder)
+    return module.update_blocker(folder, module.shader_mode(app) if app is not None else 'full')
 
 
 def plan(app, work=None):
@@ -486,12 +524,33 @@ def plan(app, work=None):
         return result('full', f'{app.name} is not a Mac app (no readable Contents/Info.plist)')
     def work_folder(name):
         return (Path(work).expanduser().resolve(), 'given') if work else build_app.recorded_work_folder(app, name)
+    game = standalone_game(app)
+    if game:
+        folder, why = (Path(work).expanduser().resolve(), 'given') if work else build_app.default_work(app, game)
+        module = standalone_module(game)
+        if game == 'dread':
+            from package_dread import blocker
+            problem = blocker(app, folder)
+            version = info.get('MNGDreadVersion', 'v210')
+        elif game in ('acnh', 'eow'):   # games/<game>/build.py: the work folder's prepared game data, fonts and Python
+            problem = module.blocker(app, folder)
+            version = {'1.2.1': 'v458752', '3.0.1': 'v2097152', '3.0.3': 'v2228224', '1.1.0': 'v196608'}.get(info.get('CFBundleShortVersionString'), 'v0')
+        else:
+            problem = module.blocker(app)
+            version = 'v0'
+        return result('full' if problem else 'express', problem or 'verified game and shader inputs match',
+                      game=game, version=version, display_version=info.get('CFBundleShortVersionString'), work=str(folder), work_why=why)
+    if info.get('CFBundleIdentifier') == 'org.macnativegames.ss':
+        folder, why = (Path(work).expanduser().resolve(), 'given') if work else build_app.default_work(app, 'ss')
+        problem = skyward().blocker(app)
+        return result('full' if problem else 'express', problem or 'SS: verified rewrite and shader translation inputs match',
+                      game='ss', version='v65536', display_version='1.0.1', work=str(folder), work_why=why)
     if ocarina_app(app):
         try:
             folder, why = work_folder('OcarinaOfTime_build')
         except BuildError as e:
             return result('error', str(e), game='oot')
-        blocker = oot_update_blocker(folder)   # the checks its update makes before it touches anything
+        blocker = oot_update_blocker(folder, app)   # the checks its update makes before it touches anything
         if blocker:
             return result('full', f'Ocarina of Time: {blocker}', game='oot', work=str(folder), work_why=why)
         return result('express', 'Ocarina of Time: its shaders are of this repository\'s translation chain and its modules this repository\'s rewrites',
@@ -565,6 +624,28 @@ def main(argv):
         print(json.dumps(plan(args.app, args.work), ensure_ascii=False))
         return
     app = args.app.expanduser().resolve()
+    game = standalone_game(app)
+    if game:
+        if args.seed or args.vr or args.native_5k is not None:
+            raise BuildError(f'{game}: these options require a full build')
+        work, why = (args.work.expanduser().resolve(), 'given with --work') if args.work else build_app.default_work(app, game)
+        say(f'work folder {work} ({why})')
+        module = standalone_module(game)
+        try:
+            return module.update(app, work)
+        except Exception as error:
+            if isinstance(error, ValueError) or (game == 'dread' and isinstance(error, module.BuildError)):
+                raise BuildError(str(error)) from error
+            raise
+    if skyward_app(app):
+        if args.seed or args.vr or args.native_5k is not None:
+            raise BuildError('Skyward Sword HD: these options are not supported; use a full build for new shaders')
+        work, why = (args.work.expanduser().resolve(), 'given with --work') if args.work else build_app.default_work(app, 'ss')
+        say(f'work folder {work} ({why})')
+        try:
+            return skyward().update(app, work)
+        except ValueError as e:
+            raise BuildError(str(e)) from e
     if ocarina_app(app):
         if args.seed or args.native_5k:
             raise BuildError('Ocarina of Time: --seed and --native-5k are not supported; run build_app.py for new shaders')
@@ -625,8 +706,10 @@ def main(argv):
         build_app.remove_tree(tmp)
     bundle_id = plistlib.loads((app / 'Contents/Info.plist').read_bytes()).get('CFBundleIdentifier') or APPS[game][1]
     shaders = None if args.seed else build_app.app_shader_bundle(app, version)
-    if shaders:   # its shader data stays where it is: read through a link now, moved into the new app at the end
-        build_app.clone_app_except(app, tmp, shaders)
+    pipes = build_app.app_pipeline_bundle(app, version)   # its pipeline archive (mac_pipelines places it again below)
+    skips = [b for b in (shaders, pipes) if b]
+    if skips:   # its shader data and pipeline archive stay where they are: read through links now, moved in at the end
+        build_app.clone_app_except(app, tmp, skips)
     else:
         build_app.copy_tree(app, tmp)   # one APFS clone of the whole app
     try:
@@ -651,9 +734,11 @@ def main(argv):
         build_app.place_runtime(tree, tmp, version, logs, game=game, lists=lists, prompt_app=app)
         record_commit(tmp, work, native_5k=preference)
         probe_runtime(tree, tmp, version, logs)
-        build_app.mac_pipelines(tree, new_res, version, logs)   # the new binary's pipeline keys, as a build makes them
+        build_app.mac_pipelines(tree, new_res, version, logs, installed=app)   # the new binary's pipeline keys, as a build makes them
         if shaders:
             build_app.shader_signature_only(tmp, shaders)
+        if pipes and (tmp / 'Contents/Helpers' / pipes.name).is_symlink():   # the tool made none this time: the installed one stays
+            build_app.shader_signature_only(tmp, pipes)
         t = time.time(); build_app.sign_app(tmp, logs); say(f'   signed ({time.time() - t:.0f} s)')
         build_app.wait_until_closed(app)
         t = time.time()

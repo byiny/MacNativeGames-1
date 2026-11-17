@@ -29,9 +29,13 @@ class Refused(Exception):
     pass
 
 
-def express_plan(app, python=sys.executable, work=None):
-    """update_runtime.py --plan for an installed app (tools/builder_jobs/installed.py asks the same)."""
+def express_plan(app, python=sys.executable, work=None, quick=False):
+    """update_runtime.py --plan for an installed app (tools/builder_jobs/installed.py asks the same). quick: asked for a
+    快速启动, whose update makes only the title's shaders again, so a new translator or chain needs no full build for it
+    (games/oot/build.py update_blocker 'title')."""
     from tools.builder_jobs.installed import plan
+    if quick:
+        return plan(app, python, work, env={**os.environ, 'OOT_SHADERS': 'title'})
     return plan(app, python, work) if work else plan(app, python)
 
 
@@ -42,6 +46,17 @@ def same_version(plan, update_plan):
         return False
     if plan['game'] == 'oot':   # one version is built (131072), checked by the build itself
         return True
+    if plan['game'] in ('worldend', 'tmnt'):
+        return update_plan.get('version') == 'v0' and not plan.get('update')
+    if plan['game'] == 'dread':
+        expected = 327680 if update_plan.get('version') == 'v210' else 0 if update_plan.get('version') == 'v100' else None
+        return expected is not None and (plan.get('update_version') if plan.get('update') else 0) == expected
+    if plan['game'] == 'ss':
+        return update_plan.get('version') == 'v65536' and plan.get('update_version') == 65536
+    if plan['game'] == 'eow':   # one version is built (1.1.0)
+        return plan.get('update_version') == 196608
+    if plan['game'] == 'acnh':   # update_runtime.plan: 'v<update version>' of the app
+        return plan.get('update') is not None and update_plan.get('version') == f'v{plan.get("update_version")}'
     app_version = repo.build_app().VERSIONS.get(update_plan.get('version') or '', {}).get('version')
     dropped = plan.get('update_version') if plan.get('update') else 0
     return dropped is not None and app_version is not None and str(app_version) == str(dropped)
@@ -69,7 +84,7 @@ def command(request, python=sys.executable):
     if request.get('update'):
         app = Path(request['update']).expanduser()
         given = request.get('work')
-        up = express_plan(app, python, given)
+        up = express_plan(app, python, given, quick=bool(request.get('quick')))   # 快速启动 from a card: the same quick build
         if up['kind'] == 'full':
             raise Refused(t(f'this app needs a full build: {up["reason"]}. Drop its game files in step 1',
                             f'这个 App 要完整打包：{up["reason"]}。请在第一步拖入它的游戏文件'))
@@ -90,23 +105,24 @@ def command(request, python=sys.executable):
     work_root = (request.get('work_root') or '').strip()
     work = b.default_work(out, plan['game'])[0] if out.is_dir() or not work_root else Path(work_root).expanduser() / plan['game']
     if out.is_dir():
-        up = express_plan(out, python)
+        up = express_plan(out, python, quick=bool(request.get('quick')))
         if up['kind'] in ('express', 'fast') and same_version(plan, up):
             return (repo.UPDATE_RUNTIME, [str(out)] + (['--seed'] if up['kind'] == 'fast' else []), Path(up['work']), out,
                     up['kind'], plan['game'])
     argv = [plan['base']]
-    if plan.get('keys') and plan['game'] in ('totk', 'botw'):
+    if plan.get('keys') and plan['game'] in ('totk', 'botw', 'ss', 'dread', 'worldend', 'tmnt', 'acnh', 'eow'):
         argv += ['-k', plan['keys']]
     if plan.get('update'):
         argv += ['--update', plan['update']]
     for dlc in plan.get('dlc') or []:
         argv += ['--dlc', dlc]
-    if plan.get('firmware'):
+    if plan.get('firmware') and plan['game'] not in ('ss', 'worldend', 'tmnt'):
         argv += ['--firmware', plan['firmware']]
-    elif plan.get('fonts'):
+    elif plan.get('fonts') and plan['game'] not in ('ss', 'worldend', 'tmnt'):
         argv += ['--shared-fonts', plan['fonts']]
     argv += ['--work', str(work), '-o', str(out)]
-    return repo.BUILD_APP, argv, work, out, 'full', plan['game']
+    script = repo.REPO/f'games/{plan["game"]}/build.py' if plan['game'] in ('ss', 'dread', 'worldend', 'tmnt', 'acnh', 'eow') else repo.BUILD_APP
+    return script, argv, work, out, 'full', plan['game']
 
 
 class Steps:
@@ -149,8 +165,24 @@ class Steps:
         return None
 
 
+QUICK_GAMES = {'oot'}   # games whose build can carry only the title's shaders (games/oot/build.py shader_mode 'title')
+
+
+def job_env(request, game):
+    """The build's environment: this one's, and for a quick build (request quick: MNG Launcher's 快速启动, user 2026-11-13:
+    "就带上 菜单的 着色器就行") OOT_SHADERS=title, so the app carries only the title's shaders; its card then offers
+    补全着色器 (a shaders request), which makes it a full app."""
+    env = dict(os.environ)
+    if request.get('quick'):
+        if game not in QUICK_GAMES:
+            raise Refused(t('a quick start is only for Ocarina of Time so far', '快速启动目前只支持时之笛'))
+        env['OOT_SHADERS'] = 'title'
+    return env
+
+
 def run(request, emit, history_dir, python=sys.executable, script=None, record=None):
     chosen, argv, work, out, kind, game = command(request, python)
+    env = job_env(request, game)
     if record is not None:   # the shared record names the job for a window that did not start it (shared.py)
         shared.describe(record, game=game, app=str(out), kind=kind)
     home = Path(os.environ.get('MNG_HOME') or Path.home())
@@ -162,16 +194,18 @@ def run(request, emit, history_dir, python=sys.executable, script=None, record=N
             at = argv.index('--work')
             argv = argv[:at] + extra + argv[at:]
     # each kind of update has its own measured history: an express update takes minutes, a full build much longer
-    record = history.record_path(history_dir, game, 'macos' if kind == 'full' else f'macos-{kind}')
+    record = history.record_path(history_dir, game, ('macos-quick' if request.get('quick') else
+                                                      'macos' if kind == 'full' else f'macos-{kind}'))
     estimator = history.Estimator(history.load(record))
     start = time.time()
     LOGS.mkdir(parents=True, exist_ok=True)
     keep = LOGS / f'builder-app-{game}-{time.strftime("%Y%m%d-%H%M%S")}.log'
     script = script or chosen
+    # steps_last: how many steps the same kind of build took on this Mac last time (the window says "N steps last time")
     emit('plan', game=game, app=str(out), work=str(work), log=str(keep), measured=estimator.last is not None,
-         command=[str(script), *argv], kind=kind)
+         command=[str(script), *argv], kind=kind, steps_last=len(estimator.last) if estimator.last else None)
     proc = subprocess.Popen([python, '-u', str(script), *argv], cwd=repo.REPO, stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT, text=True, errors='replace', start_new_session=True)
+                            stderr=subprocess.STDOUT, text=True, errors='replace', start_new_session=True, env=env)
     cancelled = threading.Event()
 
     def cancel(*_):
@@ -211,11 +245,12 @@ def run(request, emit, history_dir, python=sys.executable, script=None, record=N
             if now - last >= 1:
                 last = now
                 since = now - seen[-1][1] if seen else 0
-                fraction, left, measured = estimator.update(state['step'], since, state['stage'])
                 counted = steps.count(state['step']) if state['step'] else None
+                fraction, left, measured, step_left = estimator.update(state['step'], since, state['stage'], counted)
                 emit('progress', fraction=round(fraction, 4), left=None if left is None else round(left),
                      elapsed=round(now - start), measured=measured,
-                     step_done=counted and counted[0], step_total=counted and counted[1])
+                     step_done=counted and counted[0], step_total=counted and counted[1],
+                     step_left=None if step_left is None else round(step_left))
             time.sleep(0.25)
     ticker = threading.Thread(target=tick, daemon=True)
     ticker.start()

@@ -8,8 +8,10 @@ struct HomePage: View {
     @EnvironmentObject var model: Model
     @State private var selected: String?
     @State private var defaulted = false   // the first built game was chosen once, when the page first showed
+    @State private var shelf = ScrollPosition(idType: String.self)
+    @State private var inView = 0...(HomePage.games.count - 1)   // the cards fully in the row's view, by their place in games
 
-    static let games = ["oot", "totk", "botw", "dkb", "pkp"]
+    static let games = ["oot", "totk", "botw", "eow", "acnh", "dkb", "pkp"]
 
     /// The first built game, in the cards' order, is open when the page shows (user 2026-11-12: "启动 app 默认选中第一个游戏").
     private func chooseFirst() {
@@ -17,6 +19,25 @@ struct HomePage: View {
         guard let first = Self.games.first(where: { g in model.installed.contains { $0.game == g } }) else { return }
         selected = first
         defaulted = true
+    }
+
+    private func shelfArrow(_ symbol: String, to game: String, _ anchor: UnitPoint) -> some View {
+        Button { withAnimation { shelf.scrollTo(id: game, anchor: anchor) } } label: {
+            Image(systemName: symbol).font(.title3.weight(.bold)).foregroundStyle(.black)
+                .frame(width: 40, height: 40).background(.white.opacity(0.9), in: Circle()).shadow(radius: 4)
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 8)
+    }
+
+    /// Whose job a box at the bottom shows (its own line says what the job is doing): the updated app's game, else
+    /// its file name (an app another program updates may not be in the list); a build's game from the Build page.
+    private var jobGame: String {
+        if let running = model.updating {
+            return model.installed.first { $0.app == running }?.game.map(T.gameName)
+                ?? (running as NSString).lastPathComponent
+        }
+        return model.plan?.game.map(T.gameName) ?? ""
     }
 
     var body: some View {
@@ -28,8 +49,13 @@ struct HomePage: View {
                         Text("MNG Launcher").font(.largeTitle.weight(.bold))
                         Text(T.homeSubtitle).foregroundStyle(.secondary)
                     }
+                    Spacer()
+                    // the terminal with an AI helper (TerminalTab.swift; user 2026-11-13)
+                    Button { model.page = "terminal" } label: { Label(T.terminal, systemImage: "terminal") }
                 }
-                ScrollView(.horizontal, showsIndicators: false) {
+                // A mouse wheel scrolls the page, not this row: past a narrow window's edge the cards are reached by
+                // the scroll bar or the arrows, one card a click
+                ScrollView(.horizontal) {
                     HStack(spacing: 14) {
                         ForEach(Self.games, id: \.self) { game in
                             let app = model.installed.first { $0.game == game }
@@ -40,7 +66,22 @@ struct HomePage: View {
                             }
                         }
                     }
+                    .scrollTargetLayout()
                     .padding(.vertical, 4)
+                }
+                .scrollPosition($shelf)
+                .scrollTargetBehavior(.viewAligned)
+                .onScrollTargetVisibilityChange(idType: String.self, threshold: 0.9) { shown in
+                    let at = shown.compactMap { Self.games.firstIndex(of: $0) }
+                    inView = (at.min() ?? 0)...(at.max() ?? Self.games.count - 1)
+                }
+                .overlay(alignment: .leading) {
+                    if inView.lowerBound > 0 { shelfArrow("chevron.left", to: Self.games[inView.lowerBound - 1], .leading) }
+                }
+                .overlay(alignment: .trailing) {
+                    if inView.upperBound < Self.games.count - 1 {
+                        shelfArrow("chevron.right", to: Self.games[inView.upperBound + 1], .trailing)
+                    }
                 }
                 if let error = model.installedError {
                     Label(T.appsScanFailed(error), systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
@@ -48,9 +89,20 @@ struct HomePage: View {
                 }
                 let shown = selected.flatMap { g in model.installed.first(where: { $0.game == g }) }
                 if let app = shown { GameActions(app: app).id(app.app) }
-                // an update running for another game, or one another program started: its progress shows here too
-                if let running = model.updating, running != shown?.app {
-                    GroupBox { ActionSection(updateOnly: true).frame(maxWidth: .infinity, alignment: .leading).padding(6) }
+                // an update running for another game, or one another program started: its progress shows here too, until
+                // it ends well or is cancelled (the game opened, or the player chose so); a failure stays, with its log
+                if let running = model.updating, running != shown?.app, model.phase != .done, model.phase != .cancelled {
+                    GroupBox {
+                        VStack(alignment: .leading, spacing: 10) { Text(jobGame).font(.title3.weight(.semibold)); ActionSection(updateOnly: true) }
+                            .frame(maxWidth: .infinity, alignment: .leading).padding(6)
+                    }
+                }
+                // a build from the Build page: after 返回 its progress and its Cancel show here too (else greyed buttons, no word why)
+                if model.updating == nil, model.jobRunning {
+                    GroupBox {
+                        VStack(alignment: .leading, spacing: 10) { Text(jobGame).font(.title3.weight(.semibold)); ActionSection() }
+                            .frame(maxWidth: .infinity, alignment: .leading).padding(6)
+                    }
                 }
             }
             .padding(24)
@@ -135,6 +187,37 @@ struct GameActions: View {
     @State private var shaderLine = ""          // the Check shaders result, in words (tools/builder_jobs/shaders.py)
     @State private var shaderUpdate = false     // the newest list adds something: the Update shaders button shows
     @State private var checkingShaders = false
+    @State private var saver: MemorySaver?   // 开启省内存模式 (tools/builder_jobs/memory_saver.py), read when the card shows
+    @State private var diagnostics: MemorySaver?   // 诊断模式 (the same module, its 'diagnostics' switch)
+    @State private var saverNote = ""
+
+    /// A card switch's state (memory_saver.py state): the game reads its file at its next start.
+    struct MemorySaver: Decodable { let available: Bool; let on: Bool; let file: String; let unknown_word: String? }
+
+    /// The switches, as the game will read them at its next start (their files next to its controls.txt).
+    private func loadSaver() async {
+        do {
+            saver = try await TabClient.decode(MemorySaver.self, "storage", "memory_saver", app: app.app)
+            diagnostics = try await TabClient.decode(MemorySaver.self, "storage", "diagnostics", app: app.app)
+            saverNote = ""
+        } catch { saverNote = error.localizedDescription }
+    }
+    private func setSaver(_ on: Bool) {
+        Task {
+            do {
+                saver = try await TabClient.decode(MemorySaver.self, "storage", "set_memory_saver", app: app.app, args: ["on": on])
+                saverNote = T.memorySaverNext
+            } catch { saverNote = error.localizedDescription; await loadSaver() }
+        }
+    }
+    private func setDiagnostics(_ on: Bool) {
+        Task {
+            do {
+                diagnostics = try await TabClient.decode(MemorySaver.self, "storage", "set_diagnostics", app: app.app, args: ["on": on])
+                saverNote = T.memorySaverNext
+            } catch { saverNote = error.localizedDescription; await loadSaver() }
+        }
+    }
 
     /// Tears of the Kingdom and Breath of the Wild start through the Settings page's Play (tab_settings.play): the choices
     /// only Play passes (the 16x ground) go with it, and interpolation waits for the GPU check. The others open as apps.
@@ -176,9 +259,25 @@ struct GameActions: View {
                                 .padding(.horizontal, 18).padding(.vertical, 8)
                         }
                         .buttonStyle(.borderedProminent).tint(.green).controlSize(.large)
-                        .disabled(starting || model.updating == app.app)
+                        .disabled(starting || (model.jobRunning && model.updating == app.app))
                         if !startStatus.isEmpty {
                             Text(startStatus).font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.trailing)
+                                .frame(maxWidth: 260, alignment: .trailing)
+                        }
+                        // under the start, any time, game running or not: it counts from the game's next start (user 2026-11-16)
+                        if let saver, saver.available {
+                            Toggle(T.memorySaver, isOn: Binding(get: { saver.on }, set: { setSaver($0) }))
+                                .help(T.memorySaverHelp)
+                            if let w = saver.unknown_word { Text(T.memorySaverUnknown(w)).font(.caption).foregroundStyle(.orange) }
+                        }
+                        // user 2026-11-16: "诊断模式 也改成 CheckBox"; not in the players' download (user 2026-11-17: "正式下载版
+                        // 也去掉 诊断模式"), except while it is still on from an earlier Launcher, so it can be turned off
+                        if let diagnostics, diagnostics.available, !Paths.isRelease || diagnostics.on {
+                            Toggle(T.diagnostics, isOn: Binding(get: { diagnostics.on }, set: { setDiagnostics($0) }))
+                                .help(T.diagnosticsHelp)
+                        }
+                        if !saverNote.isEmpty {
+                            Text(saverNote).font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.trailing)
                                 .frame(maxWidth: 260, alignment: .trailing)
                         }
                     }
@@ -194,6 +293,12 @@ struct GameActions: View {
                         .buttonStyle(.borderedProminent).disabled(busy)
                 default:
                     EmptyView()   // the reason above says why it cannot be updated now
+                }
+                if app.shaders == "title" {   // a quick app: the rest of its shaders, made while it is not played (user 2026-11-13)
+                    HStack(alignment: .firstTextBaseline) {
+                        Button(T.fillShaders) { model.updateShaders(app) }.buttonStyle(.borderedProminent).disabled(busy)
+                        Text(T.quickApp).font(.callout).foregroundStyle(.secondary)
+                    }
                 }
                 if Model.shaderGames.contains(app.game ?? "") {   // only the shaders and pipelines, from the newest list (user 2026-11-13)
                     HStack(alignment: .firstTextBaseline) {
@@ -214,6 +319,10 @@ struct GameActions: View {
                             Button(label) { section = section == id ? nil : id }
                                 .buttonStyle(.bordered).tint(section == id ? .accentColor : nil)
                         }
+                        if Model.quickGames.contains(app.game ?? "") {   // 快速启动, after the game's pages (user 2026-11-15)
+                            Button(T.quickStart) { model.quickStart(app) }.buttonStyle(.bordered).help(T.quickStartHelp)
+                                .disabled(model.phase == .building || model.phase == .cancelling)
+                        }
                     }
                     if let section {
                         Divider().padding(.vertical, 4)
@@ -230,6 +339,7 @@ struct GameActions: View {
             struct Probe: Decodable { let gpu: String }
             gpu = (try? await TabClient.decode(Probe.self, "settings", "probe", app: app.app).gpu) ?? "unknown"
         }
+        .task(id: app.app) { await loadSaver() }   // the backend says which games have the switch (memory_saver.GAMES)
     }
 
     private func start() {
