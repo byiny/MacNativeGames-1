@@ -176,7 +176,11 @@ void fps_overlay_text(const fps_overlay_info *info, char *text, size_t n) {
     else res = info->big == 3 ? "  5K" : info->big == 2 ? "  4K" : "";   // upstream's native 4K / 5K labels (no "2K": the size above says it)
     snprintf(text, n, "FPS %s%s  %s%s%s%s", fps, gen, ss, sc, info->mfx ? TOTK_UI("  MetalFX已开启", "  MetalFX on") : "", res);
 #else
-    snprintf(text, n, "FPS %s%s  %s%s%s%s", fps, gen, ss, sc, info->mfx ? TOTK_UI("  MetalFX已开启", "  MetalFX on") : "", info->big == 3 ? "  5K" : info->big == 2 ? "  4K" : info->big ? "  2K" : "");
+    // Local patch 0041 (owner 2026-11-17): "2K" only at 2560x1440; a larger output of TOTK_OUTPUT_RES=screen says "screen".
+    const char *e = getenv("TOTK_OUTPUT_RES");
+    const char *big = info->big == 3 ? "  5K" : info->big == 2 ? "  4K" : !info->big ? "" :
+                      info->screen_w == 2560 && info->screen_h == 1440 ? "  2K" : e && !strcmp(e, "screen") ? "  screen" : "";
+    snprintf(text, n, "FPS %s%s  %s%s%s%s", fps, gen, ss, sc, info->mfx ? TOTK_UI("  MetalFX已开启", "  MetalFX on") : "", big);
 #endif
 }
 
