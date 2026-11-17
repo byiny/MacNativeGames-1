@@ -91,3 +91,31 @@ int nvn_deswizzle(const nvn_texdesc *d, unsigned level, unsigned layer, const vo
 int nvn_swizzle(const nvn_texdesc *d, unsigned level, unsigned layer, const void *src, size_t src_pitch, void *dst) {
     return move(d, level, layer, (uint8_t *)dst, (uint8_t *)src, src_pitch, 0);
 }
+
+/* WriteTexels into a mirrored texture used to decode the whole level, patch the region and encode the whole level again:
+   TOTK 1.4.3 writes a 5120x5120 BC texture (13 MB level 0) in 724x88 strips, ~7 ms each (owner play 2026-11-17). */
+int nvn_swizzle_region(const nvn_texdesc *d, unsigned level, unsigned layer, uint32_t x_bytes, uint32_t y, uint32_t z,
+                       uint32_t w_bytes, uint32_t h, const void *src, size_t src_pitch, void *dst) {
+    uint32_t row_bytes, rows, slices, bpb; uint64_t base; unsigned th, td;
+    if (nvn_tex_is_linear(d) || nvn_deswizzle_geom(d, level, layer, &row_bytes, &rows, &slices, &base, &th, &td, &bpb)) return -1;
+    if (!w_bytes || !h || x_bytes > row_bytes || w_bytes > row_bytes - x_bytes || y > rows || h > rows - y || z >= slices || src_pitch < w_bytes) return -1;
+    uint8_t *bl = (uint8_t *)dst + base;
+    const uint8_t *s = src;
+    for (uint32_t j = 0; j < h; j++, s += src_pitch)
+        for (uint32_t x = x_bytes, e = x_bytes + w_bytes; x < e;) {   /* 16-byte pieces are contiguous inside a GOB */
+            uint32_t n = 16 - x % 16; if (n > e - x) n = e - x;
+            memcpy(bl + nvn_bl_offset(x, y + j, z, row_bytes, rows, th, td), s + (x - x_bytes), n);
+            x += n;
+        }
+    return 0;
+}
+int nvn_swizzle_region_span(const nvn_texdesc *d, unsigned level, unsigned layer, uint32_t y, uint32_t z, uint32_t h, uint64_t *lo, uint64_t *hi) {
+    uint32_t row_bytes, rows, slices, bpb; uint64_t base; unsigned th, td;
+    if (nvn_tex_is_linear(d) || nvn_deswizzle_geom(d, level, layer, &row_bytes, &rows, &slices, &base, &th, &td, &bpb)) return -1;
+    if (!h || y > rows || h > rows - y || z >= slices) return -1;
+    uint32_t bh = 8u << th, bd = 1u << td;
+    uint64_t gobs_x = (row_bytes + 63) / 64, blocks_y = (rows + bh - 1) / bh, brow = gobs_x * 512ull * (bh / 8) * bd, plane = brow * blocks_y;
+    *lo = base + (z / bd) * plane + (y / bh) * brow;
+    *hi = base + (z / bd) * plane + ((y + h - 1) / bh + 1) * brow;
+    return 0;
+}

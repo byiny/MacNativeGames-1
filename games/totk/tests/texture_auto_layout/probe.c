@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 typedef struct { unsigned format,width,height,levels,h; uint64_t size; } Case;
 static const Case cases[] = {
     {0x25,40,1,6,0,4608},
@@ -96,6 +97,42 @@ int main(void) {
                     (unsigned long long)l.size,(unsigned long long)l.layer_size,(unsigned long long)off1,l.align,l.tileH,l.tileD,
                     (unsigned long long)c->size,(unsigned long long)c->layer,(unsigned long long)c->off1,c->align,c->th,c->td);return 1;}
     }
-    puts("PASS: 40 original-SDK layout goldens, 15 original-driver shapes, shrine BC3 block addresses, explicit-layout override.");
+    {   /* nvn_swizzle_region == whole-level decode, patch, encode; it writes only inside nvn_swizzle_region_span */
+        static const struct { int target, format; unsigned w, h, depth, levels; } rs[] = {
+            {1,0x49,1280,1280,1,7}, {1,0x25,300,77,1,4}, {4,0x42,96,96,3,3}, {2,0x25,64,48,20,3}, {1,0x48,160,160,1,8}};
+        uint32_t seed = 12345; unsigned regions = 0;
+        for (unsigned i = 0; i < sizeof rs / sizeof rs[0]; i++) {
+            nvn_texdesc d = {.target = rs[i].target, .format = rs[i].format, .samples = 1, .width = rs[i].w, .height = rs[i].h, .depth = rs[i].depth, .levels = rs[i].levels};
+            nvn_texlayout l; nvn_tex_layout(&d, &l);
+            uint8_t *a = malloc(l.size), *b = malloc(l.size), *lin = NULL, *src = malloc(1 << 20);
+            for (uint64_t k = 0; k < l.size; k++) a[k] = b[k] = (uint8_t)(k * 131 + 7);
+            for (unsigned round = 0; round < 40; round++) {
+                unsigned level = round % d.levels, layer = 0, z = 0;
+                uint32_t rb, rows, slices, bpb; uint64_t base; unsigned th, td;
+                if (d.target == 4) layer = round % rs[i].depth;
+                if (nvn_deswizzle_geom(&d, level, layer, &rb, &rows, &slices, &base, &th, &td, &bpb)) { fprintf(stderr, "case %u level %u layer %u: no geometry\n", i, level, layer); return 1; }
+                if (d.target == 2) z = round % slices;
+                seed = seed * 1103515245 + 12345; uint32_t bx = (seed >> 8) % (rb / bpb), bw = 1 + (seed >> 20) % (rb / bpb - bx);
+                seed = seed * 1103515245 + 12345; uint32_t y = (seed >> 8) % rows, h = 1 + (seed >> 20) % (rows - y);
+                uint32_t xb = bx * bpb, wb = bw * bpb;
+                if ((uint64_t)wb * h > (1 << 20)) h = (1 << 20) / wb;
+                for (uint32_t k = 0; k < wb * h; k++) src[k] = (uint8_t)(seed + k * 17);
+                size_t lp = rb; lin = realloc(lin, (size_t)lp * rows * slices);
+                check(!nvn_deswizzle(&d, level, layer, a, lin, lp), "region probe decode");
+                for (uint32_t j = 0; j < h; j++) memcpy(lin + ((size_t)z * rows + y + j) * lp + xb, src + (size_t)j * wb, wb);
+                check(!nvn_swizzle(&d, level, layer, lin, lp, a), "region probe encode");
+                uint8_t *before = malloc(l.size); memcpy(before, b, l.size);
+                check(!nvn_swizzle_region(&d, level, layer, xb, y, z, wb, h, src, wb, b), "region write");
+                check(!memcmp(a, b, l.size), "region write equals the whole-level path");
+                uint64_t lo, hi; check(!nvn_swizzle_region_span(&d, level, layer, y, z, h, &lo, &hi) && hi <= l.size, "region span");
+                for (uint64_t k = 0; k < l.size; k++) if (before[k] != b[k] && (k < lo || k >= hi)) { fprintf(stderr, "case %u round %u: byte %llu written outside [%llu,%llu)\n", i, round, (unsigned long long)k, (unsigned long long)lo, (unsigned long long)hi); return 1; }
+                free(before); regions++;
+            }
+            check(nvn_swizzle_region(&d, 0, 0, 0, 0, 0, 16, 1u << 30, src, 16, b) == -1, "region outside the level is refused");
+            free(a); free(b); free(lin); free(src);
+        }
+        printf("region writes: %u checked\n", regions);
+    }
+    puts("PASS: 40 original-SDK layout goldens, 15 original-driver shapes, shrine BC3 block addresses, explicit-layout override, region writes.");
     return 0;
 }

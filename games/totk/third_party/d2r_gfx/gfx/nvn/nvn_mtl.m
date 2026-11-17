@@ -170,6 +170,9 @@ extern void runtime_boot_status(const char *,const char *) __attribute__((weak_i
 static id<MTLDevice> g_dev;
 static NSMutableArray *g_l3_gpu_leaks;
 static int g_nvn_deswz_gpu;
+#if !defined(GAME_BOTW)
+static _Atomic int g_wt_region = 1;   // WriteTexels into a mirrored texture writes only its region (texels_write_region); flag wt_region 0 / 1, TOTK_WT_REGION=0 off
+#endif
 static id<MTLCommandQueue> g_q;
 static id<MTL4CommandQueue> g_q4;
 static dispatch_queue_t g_feedback_q;
@@ -4193,6 +4196,9 @@ void dm_gfx_set_flag(const char *name, int v) {
     if (!strcmp(name,"pool_issue_stats")) { extern void nvn_pool_issue_statistics(uint64_t[3],int); uint64_t n[3]; nvn_pool_issue_statistics(n,v); MLOG("[pool-issue] stats=%d calls=%llu skipped=%llu registered=%llu",v!=0,n[0],n[1],n[2]); return; }
     if (!strcmp(name,"mesh_reuse_check")) { atomic_store(&g_mesh_reuse_check,v!=0); MLOG("[flag] mesh_reuse_check = %d",v!=0); return; }
     if (!strcmp(name,"mesh_trace")) { if(v>=0&&v<=4)atomic_store(&g_mesh_trace_frames,v); return; }
+#if !defined(GAME_BOTW)
+    if (!strcmp(name, "wt_region")) { atomic_store(&g_wt_region, v != 0); MLOG("[flag] wt_region = %d", v != 0); return; }
+#endif
 #ifdef UP_SLOTS_ROTATE
     if (!strcmp(name, "up_slots")) { if (v < 3 || v > UP_SLOTS_MAX) { MLOG("[flag] up_slots requires 3..%d", UP_SLOTS_MAX); return; } atomic_store(&g_up_slots_n, v); MLOG("[flag] up_slots = %d (next upload batch)", v); return; }
 #endif
@@ -19909,6 +19915,37 @@ void mtl_read_texels(const tex_t *t, unsigned level, unsigned layer0, const NVNc
     readback_buffer_put(buf);
     }
 }
+#if !defined(GAME_BOTW)
+/* TOTK 1.4.3 (owner play 2026-11-17): the game rewrites a 5120x5120 BC texture (17 MB with its levels) in WriteTexels
+   strips of 724x88 or 1024x64 texels, about 60 of them in a burst every minute or so. Each strip decoded the whole level
+   into a linear copy, patched it and encoded the whole level back (~7 ms on the calling thread, inside the replay
+   section, so the next submit waited for it too), and unprotected every page of the texture: 195 of the 951 long frames
+   of that play log, 5.3 s of their excess. Only the strip's bytes are written now (nvn_swizzle_region, the same
+   addressing), and only the block rows they lie in are prepared for the host write. 1: written; 0: not handled here
+   (linear storage, a rectangle the helper refuses), nothing written; -2: the memory faulted (the write is skipped, as in
+   the whole-level path). */
+static int texels_write_region(const tex_t *t, unsigned level, unsigned layer0, const NVNcopyRegion *r, const uint8_t *src, size_t row, size_t img,
+                               size_t x0, size_t y0, size_t wb, size_t hb, int nz, int is3d) {
+    static int env = -1; if (env < 0) { const char *e = getenv("TOTK_WT_REGION"); env = !(e && !strcmp(e, "0")); if (!env) atomic_store(&g_wt_region, 0); }
+    if (!atomic_load_explicit(&g_wt_region, memory_order_relaxed) || nvn_tex_is_linear(&t->d) || x0 > UINT32_MAX || y0 > UINT32_MAX || wb > UINT32_MAX || hb > UINT32_MAX) return 0;
+    for (int z = 0; z < nz; z++) {   // every slice first: nothing is written unless all of them fit
+        uint64_t lo, hi;
+        if (nvn_swizzle_region_span(&t->d, level, is3d ? 0 : layer0 + r->zoffset + z, (uint32_t)y0, is3d ? (uint32_t)(r->zoffset + z) : 0, (uint32_t)hb, &lo, &hi) || hi > t->L.size) return 0;
+    }
+    for (int z = 0; z < nz; z++) {
+        unsigned layer = is3d ? 0 : layer0 + r->zoffset + z; uint32_t zz = is3d ? (uint32_t)(r->zoffset + z) : 0; uint64_t lo, hi;
+        nvn_swizzle_region_span(&t->d, level, layer, (uint32_t)y0, zz, (uint32_t)hb, &lo, &hi);
+        dm_guest_write_prepare(t->mem + lo, (size_t)(hi - lo));
+        sigjmp_buf jb, *prev = runtime_fault_guard;
+        if (sigsetjmp(jb, 1)) { runtime_fault_guard = prev; guarded_read_fault("WriteTexels 写回排布", t->mem + lo, (size_t)(hi - lo)); return -2; }
+        runtime_fault_guard = &jb;
+        int rc = nvn_swizzle_region(&t->d, level, layer, (uint32_t)x0, (uint32_t)y0, zz, (uint32_t)wb, (uint32_t)hb, src + (size_t)z * img, row, t->mem);
+        runtime_fault_guard = prev;
+        if (rc) die("WriteTexels: region write refused after its span was accepted");
+    }
+    return 1;
+}
+#endif
 // TOTK: CPU texture write (WriteTexels), mirroring mtl_read_texels: packaged textures update pool memory in
 // block-linear layout (dirty tracking re-uploads it); other textures are written into the MTLTexture by blit.
 void mtl_write_texels(const tex_t *t, unsigned level, unsigned layer0, const NVNcopyRegion *r, const uint8_t *src, size_t row, size_t img) {
@@ -19922,6 +19959,10 @@ void mtl_write_texels(const tex_t *t, unsigned level, unsigned layer0, const NVN
     if ((uint32_t)(r->xoffset + r->width) > lw || (uint32_t)(r->yoffset + r->height) > lh || (is3d && (uint32_t)(r->zoffset + nz) > lz)) die("WriteTexels: region outside level %u", level);
     TILELOG(t, "WriteTexels lv%u xy=%d,%d %dx%d owned %d mirrored %d flags=%#x pbh=%d tileH=%u size=%llu", level, r->xoffset, r->yoffset, r->width, r->height, gpu_owned(t->serial), tex_mirrored(t), t->d.flags, t->d.pkg_block_h, t->L.tileH, (unsigned long long)t->L.size);
     if (tex_mirrored(t)) {
+#if !defined(GAME_BOTW)
+        int rc = texels_write_region(t, level, layer0, r, src, row, img, x0, y0, wb, hb, nz, is3d);
+        if (rc) { if (gpu_owned(t->serial)) goto metal; return; }   // as below: a GPU-rendered texture takes the write too
+#endif
         dm_guest_write_prepare(t->mem, t->L.size);
         if (!texels_gpu_region(t,level,layer0,r,(void *)src,row,img,0)) {
             size_t lp = (size_t)((lw + bw - 1) / bw) * bpb, lr = (lh + bh - 1) / bh;
@@ -19944,6 +19985,9 @@ void mtl_write_texels(const tex_t *t, unsigned level, unsigned layer0, const NVN
            write goes into the MTLTexture as well (below); the pool bytes stay in step for texture objects created later. */
         if (!gpu_owned(t->serial)) return;
     }
+#if !defined(GAME_BOTW)
+metal:;
+#endif
     uint32_t upf; int ubpp;
     if (tex_astc(t)) {   // TOTK: BC1 stored as ASTC 4x4: transcode the written blocks on the CPU
         id<MTLTexture> mt = tex_mtl(t);
