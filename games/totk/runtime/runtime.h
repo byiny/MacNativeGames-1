@@ -281,6 +281,12 @@ void runtime_dsu_settings(RuntimeDSUSettings *out);   /* main queue; environment
 void runtime_dsu_status(RuntimeDSUStatus *out);       /* main queue; passive snapshot */
 int runtime_dsu_apply(const RuntimeDSUSettings *settings); /* 0 applied and saved, -1 invalid, -2 environment locked */
 void runtime_feedback_motion_source_changed(void);   /* switch between DSU and native motion without changing rumble */
+int runtime_motion_controller_live(void);   /* a controller with motion is attached now */
+int runtime_tilt_active(void);   /* runtime/gamepad.m: tilt mode (LB + LT, runtime/gyro_tilt.h) owns the sticks */
+int runtime_tilt_speed(void);          /* the settings panel's tilt rows: 60, 90, 180 or 360 degrees a second, saved in tilt.txt */
+void runtime_tilt_speed_set(int speed);
+int runtime_tilt_invert(void);         /* the stick axes reversed: TILT_INVERT_* bits (runtime/gyro_tilt.h), 0 none */
+void runtime_tilt_invert_set(int invert);
 void runtime_motion_phone(int on);  /* the iPhone's own sensor feeds the six-axis device (1) / stops (0) */
 void runtime_motion_mouse(int on);  /* mouse mode (key 7) takes the sensor over (1) / gives it back to the controller (0) */
 void runtime_motion_feed_mouse(const double acc_g[3], const double gyro_rad_s[3], uint64_t now_ns);   /* already in the reference frame */

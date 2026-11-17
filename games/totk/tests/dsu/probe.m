@@ -16,6 +16,8 @@ void runtime_motion_live(int on) { motionLive = on; }
 void runtime_motion_deadzone_default(double v) { assert(v == 0); }
 int runtime_motion_axes(const char *axes) { (void)axes; return 0; }
 void runtime_motion_mouse(int on) { (void)on; }
+int runtime_motion_controller_live(void) { return 0; }   /* tilt mode's gate (runtime/gamepad.m) */
+int runtime_motion_read(RuntimeMotionState *out, int max) { (void)out; (void)max; return 0; }   /* tilt mode reads the pose shown */
 void runtime_motion_feed_mouse(const double a[3], const double g[3], uint64_t t) { (void)a; (void)g; (void)t; }
 void runtime_feedback_attach(GCController *c) { (void)c; }
 void runtime_feedback_detach(GCController *c) { (void)c; }
