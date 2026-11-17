@@ -714,6 +714,9 @@ def main():
         notes += more
         popup, more = tca.popup_letters(archive[slice(*members[tca.POPUP])], art[2], args.style)
         notes += more
+        if version == 'v143':   # the popup's places: checked on 1.4.3's layout only
+            popup, more = tca.popup_places(popup, art[2])
+            notes += more
         for note in notes:
             print(f'note: {note}')
     else:

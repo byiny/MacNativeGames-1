@@ -599,6 +599,133 @@ def popup_letters(blyt, controls, style):
     return bytes(out), notes
 
 
+# ---- the action popup places (1.4.3) ----
+# DoCommand_00 has one part per lit button under N_InOut_00/N_MainButton_00: N_<A|B|X|Y>_00 (and N_L_00). Each draws the
+# diamond in the Switch's places (A right, B bottom, X top, Y left): a backing P_Base* open at the lit place, the three other
+# letters T_<letter>_0<n>, and the lit button N_Btn* (key, window, name; N_CompanionBtnA_00 and the hold copy N_BtnA_01 too).
+# The name glows from pictures P_Capture* of a capture pane N_Capture* (CaptureOn); the rush and hold copies sit outside the
+# button. The animations move none of these (only N_MainButton_00 and N_SubButton_00), so static places hold. popup_places
+# puts each Switch button's letter and lit button at the Xbox place of the controller button that drives it (A bottom, B
+# right, X left, Y top; PlayStation Cross Circle Square Triangle the same), as BOTW's diamond (make_botw_button_icons.py).
+# A button moved to or from the left takes Y's mirror image: x negated under the button and the capture pane, the window's
+# scale -1, the texts' origin and alignment left <-> right.
+POPUP_PART = re.compile(r'N_([ABXY])_00')
+POPUP_PLACE = {'a': 'bottom', 'b': 'right', 'x': 'left', 'y': 'top'}
+POPUP_HOME = {'a': 'right', 'b': 'bottom', 'x': 'top', 'y': 'left'}
+POPUP_BUTTON = {'right': (39.0, 0.0), 'bottom': (0.0, -39.0), 'top': (0.0, 39.0), 'left': (-39.0, 0.0)}
+POPUP_LETTER_AT = {'right': (39.0, 1.0), 'bottom': (2.0, -39.0), 'top': (1.0, 39.0), 'left': (-38.0, 0.0)}
+POPUP_BASE = {'right': ('Nt_KeyBtnSubBaseAL_00^s', 1.0, 0.0), 'bottom': ('Nt_KeyBtnSubBaseBL_00^s', 1.0, 0.0),
+              'top': ('Nt_KeyBtnSubBaseBL_00^s', -1.0, 180.0), 'left': ('Nt_KeyBtnSubBaseAL_00^s', 1.0, 180.0)}
+
+
+def popup_place_plan(controls):
+    """{Switch slot: its place in the popup}, by the face button that drives it; a slot no face button drives keeps its own."""
+    return {s: POPUP_PLACE.get(controls.get(s), POPUP_HOME[s]) for s in 'abxy'}
+
+
+def _flyt(blyt):
+    """(panes [(magic, offset, name, parent index)], txl1 names, mat1 offset) of a BFLYT."""
+    k, panes, stack, txl, mat = struct.unpack_from('<H', blyt, 6)[0], [], [-1], [], None
+    for _ in range(struct.unpack_from('<H', blyt, 0x10)[0]):
+        magic, size = bytes(blyt[k:k + 4]), struct.unpack_from('<I', blyt, k + 4)[0]
+        if magic in (b'pan1', b'pic1', b'txt1', b'wnd1', b'prt1', b'bnd1'):
+            panes.append((magic.decode(), k, bytes(blyt[k + 12:k + 36]).split(b'\0')[0].decode(), stack[-1]))
+        elif magic == b'pas1':
+            stack.append(len(panes) - 1)
+        elif magic == b'pae1':
+            stack.pop()
+        elif magic == b'txl1':
+            txl = [bytes(blyt[k + 12 + struct.unpack_from('<I', blyt, k + 12 + 4 * i)[0]:]).split(b'\0')[0].decode()
+                   for i in range(struct.unpack_from('<H', blyt, k + 8)[0])]
+        elif magic == b'mat1':
+            mat = k
+        k += size
+    return panes, txl, mat
+
+
+def popup_places(blyt, controls):
+    """(the 1.4.3 DoCommand_00 bytes, same length, with each Switch button's letter and lit button at the Xbox place of the
+    controller button that drives it; notes). A layout of another shape, or two buttons on one place, keeps the Switch places."""
+    places = popup_place_plan(controls)
+    if len(set(places.values())) != 4:
+        return bytes(blyt), ['action popup: two Switch buttons would share a place; the Switch places stay']
+    if places == POPUP_HOME:
+        return bytes(blyt), []
+
+    def keep(why):
+        return bytes(blyt), [f'action popup places: {why}; the Switch places stay']
+    try:
+        panes, txl, mat = _flyt(blyt)
+    except (struct.error, IndexError, UnicodeDecodeError):
+        return keep('the layout is cut short or malformed')
+    if mat is None or any(POPUP_BASE[p][0] not in txl for p in POPUP_BASE):
+        return keep('no mat1, or no diamond textures')
+    out = bytearray(blyt)
+    xy = lambda i: struct.unpack_from('<2f', blyt, panes[i][1] + 0x2c)  # noqa: E731
+    put = lambda i, x, y: struct.pack_into('<2f', out, panes[i][1] + 0x2c, x, y)  # noqa: E731
+
+    def ancestors(i):
+        while (i := panes[i][3]) != -1:
+            yield i
+
+    def flip(i):     # mirror pane i in its parent: x negated, a window's scale x negated, a text's origin and alignment swapped
+        magic, k = panes[i][:2]
+        struct.pack_into('<f', out, k + 0x2c, -struct.unpack_from('<f', out, k + 0x2c)[0])
+        if magic == 'wnd1':
+            struct.pack_into('<f', out, k + 0x44, -struct.unpack_from('<f', out, k + 0x44)[0])
+        if magic == 'txt1':
+            for at in (k + 9, k + 0x5c):
+                out[at] = out[at] & ~3 | {1: 2, 2: 1}.get(out[at] & 3, out[at] & 3)
+    parts = {POPUP_PART.fullmatch(name).group(1).lower(): i for i, (_, _, name, _) in enumerate(panes) if POPUP_PART.fullmatch(name)}
+    if sorted(parts) != list('abxy'):
+        return keep(f'parts {sorted(parts)}, not a b x y')
+    letters = 0
+    for s, root in parts.items():
+        home, slot = POPUP_HOME[s], places[s]
+        mirror = (home == 'left') != (slot == 'left')
+        under = [i for i in range(len(panes)) if root in ancestors(i)]
+        S = s.upper()
+        buttons = [i for i in under if re.fullmatch(rf'N_(Companion)?Btn{S}_\d\d', panes[i][2])]
+        if not buttons or any(xy(i) != POPUP_BUTTON[home] for i in buttons):
+            return keep(f'the buttons of N_{S}_00 are not at the Switch place')
+        for i in buttons:
+            put(i, *POPUP_BUTTON[slot])
+        for i in under:
+            m = POPUP_LETTER.fullmatch(panes[i][2])
+            if m and panes[i][0] == 'txt1':
+                letter = m.group(1).lower()
+                if letter == s or xy(i) != POPUP_LETTER_AT[POPUP_HOME[letter]]:
+                    return keep(f'{panes[i][2]} is not at its Switch place')
+                put(i, *POPUP_LETTER_AT[places[letter]]); letters += 1
+        bases = [i for i in under if re.fullmatch(rf'P_Base{S}_\d\d', panes[i][2])]
+        if not bases:
+            return keep(f'N_{S}_00 has no backing')
+        for i in bases:
+            k = panes[i][1]; entry = mat + struct.unpack_from('<I', blyt, mat + 12 + 4 * struct.unpack_from('<H', blyt, k + 0x64)[0])[0]
+            texture, scale, turn = POPUP_BASE[home]
+            if blyt[entry + 0x1c] & 3 != 1 or txl[struct.unpack_from('<H', blyt, entry + 0x2c)[0]] != texture or \
+                    (struct.unpack_from('<f', blyt, k + 0x44)[0], struct.unpack_from('<f', blyt, k + 0x40)[0]) != (scale, turn):
+                return keep(f'{panes[i][2]} is not the backing open at the Switch place')
+            texture, scale, turn = POPUP_BASE[slot]
+            struct.pack_into('<H', out, entry + 0x2c, txl.index(texture))
+            struct.pack_into('<f', out, k + 0x40, turn); struct.pack_into('<f', out, k + 0x44, scale)
+        hx, hy = POPUP_BUTTON[home]; sx, sy = POPUP_BUTTON[slot]
+        for i in under:     # the rush and hold copies of the name: same offset from the button (mirrored)
+            if re.fullmatch(rf'P_Capture{S}_\d\d', panes[i][2]) and not any(b in ancestors(i) for b in buttons):
+                px = sum(xy(a)[0] for a in ancestors(i) if root in ancestors(a)); py = sum(xy(a)[1] for a in ancestors(i) if root in ancestors(a))
+                x, y = xy(i); ox, oy = px + x - hx, py + y - hy
+                put(i, sx + (-ox if mirror else ox) - px, sy + oy - py)
+        if mirror:
+            captures = [i for i in under if panes[i][2] == f'N_Capture{S}_00']
+            for i in under:
+                if any(a in buttons or a in captures for a in ancestors(i)):
+                    flip(i)
+    if letters != 15:
+        return keep(f'{letters} letter panes, not 15')
+    assert len(out) == len(blyt)
+    return bytes(out), []
+
+
 def popup_messages(msbt, controls, style):
     """(the Mals/<language> LayoutMsg/DoCommand_00.msbt bytes, same length, with the 15 letter texts T_<A|B|X|Y>_0<0-3> rewritten; notes).
     The game fills each text pane of the popup from this message (label = pane name), so the pane letters of popup_letters are not enough."""

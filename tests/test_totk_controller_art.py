@@ -66,6 +66,89 @@ def popup_blob(names):
     return bytes(blob)
 
 
+TEXTURES = ['Nt_KeyBtnSubBaseAL_00^s', 'Nt_KeyBtnSubBaseBL_00^s']
+PLACE_AT = {'right': (39.0, 0.0), 'bottom': (0.0, -39.0), 'top': (0.0, 39.0), 'left': (-39.0, 0.0)}
+LETTER_AT = {'right': (39.0, 1.0), 'bottom': (2.0, -39.0), 'top': (1.0, 39.0), 'left': (-38.0, 0.0)}
+SWITCH_AT = {'A': 'right', 'B': 'bottom', 'X': 'top', 'Y': 'left'}
+BACKING = {'right': (0, 1.0, 0.0), 'bottom': (1, 1.0, 0.0), 'top': (1, -1.0, 180.0), 'left': (0, 1.0, 180.0)}
+PARTS = {'A': ['T_B_00', 'T_X_00', 'T_Y_00'], 'B': ['T_A_01', 'T_X_01', 'T_Y_01'], 'X': ['T_A_02', 'T_B_02', 'T_Y_02'],
+         'Y': ['T_A_03', 'T_B_03', 'T_X_03']}
+
+
+def doc_blob():
+    """A DoCommand_00 stand-in with 1.4.3's shape: txl1 with the two backing textures, one mat1 entry per backing, and the
+    parts N_<A|B|X|Y>_00 (backing, three letters, lit button with name picture, window and text, rush copy of the name; A has
+    a hold copy N_StopA_00 too) in the Switch's places, Y mirrored. Returns (blob, {pane name: offset})."""
+    sections, panes, mats = [], {}, []
+
+    def pane(magic, name, xy=(0.0, 0.0), turn=0.0, scale=1.0, origin=0, text=None, material=0):
+        b = bytearray(172); b[0:4] = magic; struct.pack_into('<I', b, 4, 172); b[9] = origin; b[12:12 + len(name)] = name.encode()
+        struct.pack_into('<2f', b, 0x2c, *xy); struct.pack_into('<f', b, 0x40, turn); struct.pack_into('<2f', b, 0x44, scale, 1.0)
+        if magic == b'txt1':
+            b[0x5c] = origin; struct.pack_into('<HH', b, 0x54, 4, 4); struct.pack_into('<I', b, 0x64, 168)
+            b[168:170] = (text or 'x').encode('utf-16-le')
+        if magic == b'pic1':
+            struct.pack_into('<H', b, 0x64, material)
+        sections.append((name, bytes(b)))
+
+    def nest(magic):
+        sections.append((None, magic + struct.pack('<I', 8)))
+
+    def backing(name, place):
+        texture, scale, turn = BACKING[place]; mats.append(texture); pane(b'pic1', name, turn=turn, scale=scale, material=len(mats) - 1)
+
+    def button(name, s):
+        place = SWITCH_AT[s]; left = place == 'left'
+        pane(b'pan1', name, PLACE_AT[place]); nest(b'pas1')
+        pane(b'pic1', f'P_Capture{s}_0{len(name) % 7}', (-90.0 if left else 90.0, 6.0))
+        pane(b'wnd1', f'W_Base{s}_{name[-2:]}', (50.0 if left else -50.0, 0.0), scale=-1.0 if left else 1.0)
+        pane(b'txt1', f'T_Guide{s}_{name[-2:]}', (-34.0 if left else 32.0, 0.0), origin=2 if left else 1, text='G')
+        nest(b'pae1')
+    pane(b'pan1', 'RootPane'); nest(b'pas1')
+    for s, letters in PARTS.items():
+        place = SWITCH_AT[s]
+        pane(b'pan1', f'N_{s}_00'); nest(b'pas1')
+        pane(b'pan1', f'N_Capture{s}_00', (-117.0, 330.0)); nest(b'pas1')
+        pane(b'txt1', f'T_CaptureGuide{s}_00', (56.0 if place == 'left' else -58.0, 0.0), origin=2 if place == 'left' else 1, text='G')
+        nest(b'pae1')
+        pane(b'pan1', f'N_Loop{s}_00'); nest(b'pas1')
+        backing(f'P_Base{s}_00', place)
+        for name in letters:
+            pane(b'txt1', name, LETTER_AT[SWITCH_AT[name[2]]], text=name[2])
+        button(f'N_Btn{s}_00', s)
+        nest(b'pae1')
+        if s == 'A':
+            pane(b'pan1', 'N_StopA_00'); nest(b'pas1')
+            backing('P_BaseA_01', 'right')
+            for name in ('T_B_01', 'T_X_02', 'T_Y_03'):
+                pane(b'txt1', name, LETTER_AT[SWITCH_AT[name[2]]], text=name[2])
+            button('N_BtnA_01', 'A')
+            nest(b'pae1')
+            pane(b'pan1', 'N_HoldA_00'); nest(b'pas1'); pane(b'pan1', 'N_LoopA_03', (100.0, 0.0)); nest(b'pas1')
+            pane(b'pic1', 'P_CaptureA_05', (29.0, 6.0)); nest(b'pae1'); nest(b'pae1')
+        x, y = PLACE_AT[place]
+        pane(b'pan1', f'N_Rush{s}_00'); nest(b'pas1'); pane(b'pan1', f'N_Loop{s}_01'); nest(b'pas1')
+        pane(b'pic1', f'P_Capture{s}_01', (x + (-90.0 if place == 'left' else 90.0), y + 6.0)); nest(b'pae1'); nest(b'pae1')
+        nest(b'pae1')
+    nest(b'pae1')
+    names = b''.join(t.encode() + b'\0' for t in TEXTURES)
+    txl = bytearray(b'txl1' + bytes(4) + struct.pack('<HH', 2, 0) + struct.pack('<2I', 8, 8 + len(TEXTURES[0]) + 1) + names)
+    txl += bytes(-len(txl) % 4); struct.pack_into('<I', txl, 4, len(txl))
+    mat = bytearray(b'mat1' + bytes(4) + struct.pack('<HH', len(mats), 0)); head = len(mat) + 4 * len(mats)
+    mat += b''.join(struct.pack('<I', head + 0x30 * i) for i in range(len(mats)))
+    for i, texture in enumerate(mats):
+        entry = bytearray(0x30); entry[0:5] = b'mat%02d' % i; entry[0x1c] = 0x15; struct.pack_into('<H', entry, 0x2c, texture)
+        mat += entry
+    struct.pack_into('<I', mat, 4, len(mat))
+    blob = bytearray(0x14); struct.pack_into('<H', blob, 6, 0x14); struct.pack_into('<H', blob, 0x10, 2 + len(sections))
+    blob += txl + mat
+    for name, body in sections:
+        if name:
+            panes[name] = len(blob)
+        blob += body
+    return bytes(blob), panes
+
+
 def text_at(msbt, index):
     """Where text `index` of a msbt_blob sits (read with its section sizes, not with the code under test)."""
     lbl = 0x20 + 16; txt = (lbl + struct.unpack_from('<I', msbt, 0x24)[0] + 15) & ~15
@@ -292,6 +375,52 @@ class Tilted(unittest.TestCase):
         self.assertEqual(out, few)
         self.assertEqual(len(notes), 1)
 
+    def test_popup_places(self):
+        blob, at = doc_blob()
+        xy = lambda b, name: struct.unpack_from('<2f', b, at[name] + 0x2c)  # noqa: E731
+        def backing(b, name):   # (A or B: the backing's texture, scale x, turn)
+            m = b.index(b'mat1'); entry = m + struct.unpack_from('<I', b, m + 12 + 4 * struct.unpack_from('<H', b, at[name] + 0x64)[0])[0]
+            return (TEXTURES[struct.unpack_from('<H', b, entry + 0x2c)[0]][16], struct.unpack_from('<f', b, at[name] + 0x44)[0],
+                    struct.unpack_from('<f', b, at[name] + 0x40)[0])
+        out, notes = tca.popup_places(blob, pl.prompt_controls('', 'position'))   # Xbox by position: already the Xbox places
+        self.assertEqual((out, notes), (blob, []))
+        # the owner's layout: Switch A by Y (top), B by B (right), X by A (bottom), Y by X (left)
+        out, notes = tca.popup_places(blob, pl.prompt_controls(OWNER, 'position'))
+        self.assertEqual((len(out), notes), (len(blob), []))
+        place = {'A': 'top', 'B': 'right', 'X': 'bottom', 'Y': 'left'}
+        for s in 'ABXY':
+            self.assertEqual(xy(out, f'N_Btn{s}_00'), PLACE_AT[place[s]], s)
+            self.assertEqual(backing(out, f'P_Base{s}_00'), ('A' if place[s] in ('right', 'left') else 'B',
+                             *{'right': (1.0, 0.0), 'bottom': (1.0, 0.0), 'top': (-1.0, 180.0), 'left': (1.0, 180.0)}[place[s]]), s)
+            for name in PARTS[s]:
+                self.assertEqual(xy(out, name), LETTER_AT[place[name[2]]], name)
+            x, y = PLACE_AT[place[s]]   # the rush copy keeps its offset from the button
+            self.assertEqual(xy(out, f'P_Capture{s}_01'), (x + (-90.0 if s == 'Y' else 90.0), y + 6.0), s)
+        self.assertEqual((xy(out, 'N_BtnA_01'), xy(out, 'T_X_02'), backing(out, 'P_BaseA_01')), ((0.0, 39.0), (2.0, -39.0), ('B', -1.0, 180.0)))
+        self.assertEqual(xy(out, 'P_CaptureA_05'), (-10.0, 45.0))    # hold copy under N_LoopA_03 at x 100: (90, 6) from the button
+        self.assertEqual((xy(out, 'W_BaseA_00'), out[at['T_GuideA_00'] + 9]), ((-50.0, 0.0), 1))   # not mirrored
+        # Switch A by X (left): A takes Y's mirror image, and Y (by A, bottom) leaves it
+        out, notes = tca.popup_places(blob, pl.prompt_controls('west = a\nnorth = b\neast = x\nsouth = y\n', 'position'))
+        self.assertEqual(notes, [])
+        self.assertEqual((xy(out, 'N_BtnA_00'), xy(out, 'P_CaptureA_01'), xy(out, 'P_CaptureA_05')), ((-39.0, 0.0), (-129.0, 6.0), (-229.0, 6.0)))
+        self.assertEqual((xy(out, 'W_BaseA_00'), struct.unpack_from('<f', out, at['W_BaseA_00'] + 0x44)[0]), ((50.0, 0.0), -1.0))
+        for name in ('T_GuideA_00', 'T_CaptureGuideA_00'):
+            self.assertEqual((out[at[name] + 9], out[at[name] + 0x5c], xy(out, name)[0] > 0), (2, 2, name == 'T_CaptureGuideA_00'), name)
+        self.assertEqual((xy(out, 'N_BtnY_00'), xy(out, 'W_BaseY_00'), out[at['T_GuideY_00'] + 9]), ((0.0, -39.0), (-50.0, 0.0), 1))
+        self.assertEqual(backing(out, 'P_BaseA_00'), ('A', 1.0, 180.0))
+
+    def test_popup_places_of_the_wrong_shape_stay(self):
+        blob, at = doc_blob()
+        controls = pl.prompt_controls(OWNER, 'position')
+        moved = bytearray(blob); struct.pack_into('<f', moved, at['T_Y_01'] + 0x2c, 5.0)
+        renamed = bytearray(blob); renamed[at['N_X_00'] + 12:at['N_X_00'] + 18] = b'N_Q_00'
+        for what, bad in (('a letter off its place', moved), ('a missing part', renamed)):
+            out, notes = tca.popup_places(bytes(bad), controls)
+            self.assertEqual(out, bytes(bad), what)
+            self.assertTrue(len(notes) == 1 and notes[0].endswith('; the Switch places stay'), (what, notes))
+        out, notes = tca.popup_places(blob, {'a': 'a', 'b': 'a', 'x': 'x', 'y': 'y'})
+        self.assertEqual((out, len(notes)), (blob, 1))
+
     def test_popup_messages(self):
         controls = pl.prompt_controls('', 'position')
         names = LETTER_PANES + ['T_Plus_00', 'T_Other_00']
@@ -372,7 +501,7 @@ class Tilted(unittest.TestCase):
 class Tool(unittest.TestCase):
     def test_the_tool_calls_redraw_pictures(self):
         source = (ROOT / 'games/totk/scripts/make_button_icons.py').read_text()
-        for name in ('redraw_pictures', 'redraw_tilted', 'dpad_masks', 'popup_letters', 'popup_messages'):
+        for name in ('redraw_pictures', 'redraw_tilted', 'dpad_masks', 'popup_letters', 'popup_places', 'popup_messages'):
             self.assertIn(name, source)
 
 
