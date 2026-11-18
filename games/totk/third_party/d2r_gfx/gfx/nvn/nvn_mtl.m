@@ -173,6 +173,7 @@ static int g_nvn_deswz_gpu;
 #if !defined(GAME_BOTW)
 static _Atomic int g_wt_region = 1;   // WriteTexels into a mirrored texture writes only its region (texels_write_region); flag wt_region 0 / 1, TOTK_WT_REGION=0 off
 static _Atomic int g_wt_inplace = 1;   // ... and blits that region into the texture's current Metal copy instead of a whole re-upload (texels_write_inplace); flag wt_inplace 0 / 1, TOTK_WT_INPLACE=0 off
+static _Atomic int g_sa_memo = 1;   // sync-ahead scans start only at a draw that needs work and skip a variant they already looked up for that program (sync_ahead_rest); flag sa_memo 0 / 1, TOTK_SA_MEMO=0 off
 #endif
 static id<MTLCommandQueue> g_q;
 static id<MTL4CommandQueue> g_q4;
@@ -4200,6 +4201,7 @@ void dm_gfx_set_flag(const char *name, int v) {
 #if !defined(GAME_BOTW)
     if (!strcmp(name, "wt_region")) { atomic_store(&g_wt_region, v != 0); MLOG("[flag] wt_region = %d", v != 0); return; }
     if (!strcmp(name, "wt_inplace")) { atomic_store(&g_wt_inplace, v != 0); MLOG("[flag] wt_inplace = %d", v != 0); return; }
+    if (!strcmp(name, "sa_memo")) { atomic_store(&g_sa_memo, v != 0); MLOG("[flag] sa_memo = %d", v != 0); return; }
 #endif
 #ifdef UP_SLOTS_ROTATE
     if (!strcmp(name, "up_slots")) { if (v < 3 || v > UP_SLOTS_MAX) { MLOG("[flag] up_slots requires 3..%d", UP_SLOTS_MAX); return; } atomic_store(&g_up_slots_n, v); MLOG("[flag] up_slots = %d (next upload batch)", v); return; }
@@ -7593,6 +7595,7 @@ static int sh_has_src(NvShader *s) { return s && (s->src || s->src_path); }
     void *ar_sh[6]; uint8_t ar_n, ar_st[32], ar_reg[32], ar_img[32];   // ar_*: draw_att_reads' sampled texture / image slots of sh[] (valid while sh[] is the same; ar_n 255 = more than 32, scan the bindings)
     int missing, miss_has[6]; uint64_t miss_sig[6]; int exp_skip;
     int keeps; uint64_t miss_gen;
+    NSMutableSet<NSNumber *> *ahead[6]; uint64_t ahead_gen;   // signatures per stage whose variant a sync-ahead scan already looked up (sync_ahead_rest), valid while g_plib_purges is ahead_gen
     int geo; NvProg *geo_ras, *geo_lean_ras; void *geo_ras_reader; NSMutableDictionary<NSNumber *, NSArray *> *geo_cache; } @end   // geo_lean_ras: the vertex + fragment of a lean geometry draw; geo_cache: {capture variant, kernel, reader, lean kernel or NSNull} by bind signature and input topology (nvn_geometry_rt.inc geo_prep)   // geo: a geometry stage (ctl / code / key [2] set) run as compute; geo_ras: the reader + fragment program its output is drawn with (for the reader geo_ras_reader)   // TOTK (iOS, Mac async shaders): missing = stages whose variant is not translated yet; miss_sig: signature whose variant is missing (prog_fit); exp_skip: TOTK_EXP_SKIP_FS decision (0 unknown, 1 keep, 2 skip); keeps: a stage stores to memory or streams out (sph_keeps_memory), its draws are never skipped; miss_gen: totk_rt_ready_gen() when a stage was last found missing
 @implementation NvProg @end
 /* TOTK_EXP_SKIP_FS=<fragment key prefix>[,<prefix>...] (measurement only, 2026-10-16): drop every draw whose fragment shader key
@@ -8389,7 +8392,7 @@ static int plib_on(void) {
 }
 static NSMutableDictionary<NSString *, id> *g_plib;   // variant key -> NSNull while it compiles, its NvShader once compiled (a failed one is removed)
 static pthread_mutex_t g_plib_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_plib_cv = PTHREAD_COND_INITIALIZER;
-static uint64_t g_plib_kicked, g_plib_taken, g_plib_waits;
+static uint64_t g_plib_kicked, g_plib_taken, g_plib_waits, g_plib_purges;
 static _Atomic uint64_t g_plib_wait_ns;   // statistics line of pso_predict_rest
 static int g_plib_probe; static NSString *g_plib_probe_key; static int g_plib_probe_stage;   // probe-gfx: record the request instead of compiling
 static void plib_kick(NSString *pc, int stage) {   // submission thread
@@ -8399,6 +8402,7 @@ static void plib_kick(NSString *pc, int stage) {   // submission thread
     if (!g_plib) g_plib = [NSMutableDictionary dictionary];
     if (g_plib.count >= 4096) {   // compiled ones no draw took (another program's draw loaded the shader first): forget them
         for (NSString *k in g_plib.allKeys) if (g_plib[k] != NSNull.null) [g_plib removeObjectForKey:k];
+        g_plib_purges++;   // the sync-ahead memo (NvProg ahead) is forgotten too
     }
     int fresh = !g_plib[pc]; if (fresh) g_plib[pc] = NSNull.null;
     pthread_mutex_unlock(&g_plib_mu);
@@ -8519,6 +8523,7 @@ static int g_prog_prefetch;   // prog_get called by shader_predict_rest: every s
 static int prog_timing_on(void); static void prog_timing(const char *what, const prog_t *p, unsigned i, int st, const char *key);   // TOTK_PROG_TIMING (below)
 static void shader_predict_maybe(void);
 static void sync_ahead_maybe(void);
+static int sa_due(void); static int sa_ready_prog(const prog_t *p); static int sa_ready_stage(NSString *key, NSDictionary *ans); static void sa_trigger(const prog_t *p, NvProg *pr);
 // The shader key: SHA-256 of the control section and the code, in hex (prog_get; prediction of unseen programs).
 static void shader_key_of(const uint8_t *control, const void *code, uint32_t length, char key[65]) {
     uint8_t md[32];CC_SHA256_CTX ctx;CC_SHA256_Init(&ctx);ctl_key_update(&ctx,control);
@@ -8539,7 +8544,7 @@ static void *prog_get_p(const prog_t *cp) {   // 只在提交线程调用 | Call
     __unsafe_unretained NvProg *have = p->serial ? (__bridge NvProg *)serial_ptr(p->serial) : nil;
     if (have) { lp = p; lser = p->serial; lgen = gen; lpr = have; return (__bridge void *)have; }
     shmap_load();
-    if (g_prog_for_draw) { shader_predict_maybe(); sync_ahead_maybe(); }   // a program met for the first time: the rest of the submission may bring more
+    if (g_prog_for_draw) { shader_predict_maybe(); if (!sa_ready_prog(p)) { sa_trigger(p, nil); sync_ahead_maybe(); } }   // a program met for the first time: the rest of the submission may bring more
     NvProg *o = [NvProg new];
     for (unsigned i = 0; i < p->nstage; i++) {   // a stage that stores or streams out keeps every draw of the program
         if (!p->sd[i].control || !p->sd[i].data) MDIE("null TOTK shader binary");
@@ -9771,9 +9776,10 @@ static int prog_fit(NvProg *pr) {
         int may_skip = v ? 0 : draw_may_skip(pr); uint64_t gen = totk_rt_ready_gen();
         if (!v && pr->miss_has[st] && sg == pr->miss_sig[st] && (!async_shaders() || (may_skip && gen == pr->miss_gen))) return -1;
         if (!v) {
-            shader_predict_maybe(); sync_ahead_maybe();
+            NSDictionary *ans = sa_due() ? rt_answers(st) : nil;   // sync shaders, memo on: the answers serve the scan check and the lookup
+            shader_predict_maybe(); if (!(ans && sa_ready_stage(pr->key[st], ans))) { sa_trigger(NULL, pr); sync_ahead_maybe(); }
             uint64_t f0 = async_fresh();
-            NSString *variant = totk_rt_variant(pr->key[st], st, pr->ctl[st], pr->code[st], rt_answers(st), nil, may_skip);
+            NSString *variant = totk_rt_variant(pr->key[st], st, pr->ctl[st], pr->code[st], ans ?: rt_answers(st), nil, may_skip);
             if (!may_skip) async_why(pr, f0);
             if (!variant) { pr->miss_sig[st] = sg; pr->miss_has[st] = 1; pr->miss_gen = gen; return -1; }   // iOS: this signature's variant is not translated yet; Mac (async shaders): translating in the background
             if (pr->miss_has[st] && sg == pr->miss_sig[st]) pr->miss_has[st] = 0;
@@ -14899,39 +14905,100 @@ static void shader_predict_maybe(void) {
    pipeline miss of this submission then runs one pipeline prediction scan without its usual 64 keys / 2 ms limit
    (g_pp_wide), which finds those libraries and starts every pipeline in the background. Translation itself stays one
    at a time (the translator service, as before). A scan that ends on its command limit runs again at the next miss,
-   up to 4 per submission. TOTK_SYNC_AHEAD=0 turns it off; TOTK_SYNC_AHEAD_SCAN (16384 commands). */
+   up to 4 per submission. TOTK_SYNC_AHEAD=0 turns it off; TOTK_SYNC_AHEAD_SCAN (16384 commands).
+   A variant is looked up once per program and signature (NvProg ahead), and a new program once per submission: the scans
+   looked up every later draw again, until that draw put the variant in pr->alt. In play (owner run 2026-11-18, warm
+   cache) 200 scans made 63,000 lookups, all cache hits, 0 libraries: about 2 s of submit-thread CPU (rt_answers and the
+   index walk, about 30 us each), up to 75 ms in one frame. The draw still looks its variant up itself, as before.
+   A scan also starts only at a draw that needs work: a variant the index lacks, or a library not loaded yet
+   (sa_ready_stage, sa_ready_prog). With all known, a scan walked the rest of the submission (about 1.3 ms) for nothing; a
+   later draw of the submission that needs work still starts one, and that scan looks up its own draw's variants first
+   (sa_trigger), so their library compiles beside the others instead of alone after the scan (Codex review 2026-11-18).
+   Not for BOTW; flag sa_memo 0 / 1, TOTK_SA_MEMO=0 off. */
+#if defined(GAME_BOTW)
+static int sa_memo_on(void) { return 0; }
+#else
+static int sa_memo_on(void) { return atomic_load_explicit(&g_sa_memo, memory_order_relaxed); }
+#endif
 static int sync_ahead_on(void) {
     static int v = -1;
     if (v < 0) {
         const char *e = getenv("TOTK_SYNC_AHEAD"); v = (!e || atoi(e)) && plib_on();
+#if !defined(GAME_BOTW)
+        const char *m = getenv("TOTK_SA_MEMO"); if (m && !atoi(m)) atomic_store(&g_sa_memo, 0);
+#endif
         MLOG("[sync-ahead] %s", v ? "on: a submission's new shaders are translated ahead, their libraries and pipelines compiled side by side" : "off");
     }
     return v;
 }
 static uint64_t g_sa_mark; static int g_sa_n, g_sa_more;
-static uint64_t g_sa_scans, g_sa_variants, g_sa_libs, g_sa_ns, g_sa_xl_ns, g_sa_wait_ns;
+static uint64_t g_sa_scans, g_sa_variants, g_sa_libs, g_sa_ns, g_sa_xl_ns, g_sa_wait_ns, g_sa_repeats;
+static uint64_t g_sa_ready_skips;   // scans not started: the draw's variants and libraries were all known (sa_ready_*)
+static uint64_t g_sa_seen_sub; static NSMutableSet<NSNumber *> *g_sa_seen;   // new programs (by serial) the scans of submission g_sa_seen_sub looked up
 // One stage of a later draw: translate its variant (as prog_get / prog_fit would at the draw) and start its library.
-static void sync_ahead_stage(NSString *key, int st, const uint8_t *control, const uint8_t *code, NSArray *local, NSMutableArray<NSString *> *libs) {
+// Returns 1 when the variant is known (translated now or before).
+static int sync_ahead_stage(NSString *key, int st, const uint8_t *control, const uint8_t *code, NSArray *local, NSMutableArray<NSString *> *libs) {
     uint64_t t0 = bp_now();
     NSString *v = totk_rt_variant(key, st, control, code, rt_answers(st), local, 0);
     g_sa_xl_ns += bp_now() - t0;
-    if (!v) return;
+    if (!v) return 0;
     g_sa_variants++;
     NSString *pc = [v stringByAppendingString:@"_b"];
-    if (g_shcache[pc] || plib_take(pc, 0)) return;
+    if (g_shcache[pc] || plib_take(pc, 0)) return 1;
     plib_kick(pc, st);
     pthread_mutex_lock(&g_plib_mu); int started = g_plib[pc] == NSNull.null; pthread_mutex_unlock(&g_plib_mu);
     if (started) { [libs addObject:pc]; g_sa_libs++; }
+    return 1;
 }
+// A known program's stages whose variant for the current state it has not drawn with (prog_fit): looked up ahead.
+static void sa_scan_known(NvProg *pr, NSMutableArray<NSString *> *libs, int memo) {
+    for (int st = 0; st < 5; st++) {
+        if (st == 2 || !pr->sh[st] || !pr->key[st]) continue;
+        uint64_t sg = stage_sig(st); NSNumber *sgn = @(sg);
+        if (sg == pr->sig[st] || pr->alt[st][sgn]) continue;
+        if (memo && pr->ahead_gen != g_plib_purges) { for (int k = 0; k < 6; k++) [pr->ahead[k] removeAllObjects]; pr->ahead_gen = g_plib_purges; }   // libraries compiled ahead were forgotten (plib_kick)
+        if (memo && [pr->ahead[st] containsObject:sgn]) { g_sa_repeats++; continue; }
+        if (sync_ahead_stage(pr->key[st], st, pr->ctl[st], pr->code[st], nil, libs) && memo) {
+            if (!pr->ahead[st]) pr->ahead[st] = [NSMutableSet set];
+            [pr->ahead[st] addObject:sgn];
+        }
+    }
+}
+// A program met for the first time (prog_get): each stage's variant looked up ahead, once per scan (seen) and with the memo once per submission.
+static void sa_scan_new(const prog_t *p, NSMutableArray<NSString *> *libs, NSMutableSet<NSNumber *> *seen, int memo) {
+    if (p->serial && [seen containsObject:@(p->serial)]) return;
+    if (p->serial) [seen addObject:@(p->serial)];
+    if (memo && p->serial) {   // looked up by an earlier scan of this submission
+        if ([g_sa_seen containsObject:@(p->serial)]) { g_sa_repeats++; return; }
+        [g_sa_seen addObject:@(p->serial)];
+    }
+    for (unsigned i = 0; i < p->nstage && i < 6; i++) {
+        const uint8_t *control = p->sd[i].control, *code = (const uint8_t *)(uintptr_t)p->sd[i].data;
+        if (!control || !code) break;
+        uint32_t length = ctl_code_len(control); int st = ctl_stage(control, code);
+        if (!length || length > 16 * 1024 * 1024) break;
+        if (st != 0 && st != 1 && st != 5 && !(nvn2_ctl(control) && (st == 3 || st == 4))) continue;   // geometry and the rest: as prog_get, at the draw
+        char key[65]; shader_key_of(control, code, length, key);
+        sync_ahead_stage(@(key), st, control, code, rt_local(control, st), libs);
+    }
+}
+static const prog_t *g_sa_trig_p; static __unsafe_unretained NvProg *g_sa_trig_pr;   // the draw that starts the scan (memo on): its own variants are looked up first
 static void sync_ahead_rest(void) {
     static int max_ops = -1;
     if (max_ops < 0) { const char *e = getenv("TOTK_SYNC_AHEAD_SCAN"); max_ops = e ? atoi(e) : 16384; if (max_ops < 1) max_ops = 1; }
     static typeof(S) Ssave; memcpy(&Ssave, &S, sizeof S); typeof(R) Rsave = R;
     int pso_dirty = g_pso_dirty, dss_dirty = g_dss_dirty, for_draw = g_prog_for_draw; g_prog_for_draw = 0;
     fz_cursor cur = {.p = g_exec_next};
-    uint64_t started = bp_now(), xl0 = g_sa_xl_ns, var0 = g_sa_variants; int guard = 0, stop = 0;
+    uint64_t started = bp_now(), xl0 = g_sa_xl_ns, var0 = g_sa_variants, rep0 = g_sa_repeats; int guard = 0, stop = 0;
     NSMutableArray<NSString *> *libs = [NSMutableArray array];
     NSMutableSet<NSNumber *> *seen = [NSMutableSet set];   // new programs of this scan (by serial), translated once
+    int memo = sa_memo_on();
+    static uint64_t seen_purges;   // a purge of the libraries compiled ahead (plib_kick) forgets the new programs looked up too
+    if (memo && (!g_sa_seen || g_sa_seen_sub != g_sub_serial || seen_purges != g_plib_purges)) { g_sa_seen = [NSMutableSet set]; g_sa_seen_sub = g_sub_serial; seen_purges = g_plib_purges; }
+    // the draw that starts the scan needs work (sa_ready_*): its library compiles beside the rest instead of alone after the scan
+    if (memo && g_sa_trig_pr) sa_scan_known(g_sa_trig_pr, libs, memo);
+    else if (memo && g_sa_trig_p) sa_scan_new(g_sa_trig_p, libs, [NSMutableSet set], 0);   // not marked seen: a later draw of it with other bindings is looked up as before
+    g_sa_trig_p = NULL; g_sa_trig_pr = nil;
     for (; ; guard++) {
         if (guard >= max_ops) { stop = 1; break; }
         const uint8_t *q; op_hdr hq; const void *aq;
@@ -14944,32 +15011,17 @@ static void sync_ahead_rest(void) {
             NvProg *pr = p->serial ? (__bridge NvProg *)serial_ptr(p->serial) : nil;
             if (pr) {   // a known program: a binding variant it has not drawn with (prog_fit)
                 if (pr->missing || dispatch) continue;
-                for (int st = 0; st < 5; st++) {
-                    if (st == 2 || !pr->sh[st] || !pr->key[st]) continue;
-                    uint64_t sg = stage_sig(st);
-                    if (sg == pr->sig[st] || pr->alt[st][@(sg)]) continue;
-                    sync_ahead_stage(pr->key[st], st, pr->ctl[st], pr->code[st], nil, libs);
-                }
+                sa_scan_known(pr, libs, memo);
                 continue;
             }
-            if (p->serial && [seen containsObject:@(p->serial)]) continue;
-            if (p->serial) [seen addObject:@(p->serial)];
-            for (unsigned i = 0; i < p->nstage && i < 6; i++) {   // a program met for the first time (prog_get)
-                const uint8_t *control = p->sd[i].control, *code = (const uint8_t *)(uintptr_t)p->sd[i].data;
-                if (!control || !code) break;
-                uint32_t length = ctl_code_len(control); int st = ctl_stage(control, code);
-                if (!length || length > 16 * 1024 * 1024) break;
-                if (st != 0 && st != 1 && st != 5 && !(nvn2_ctl(control) && (st == 3 || st == 4))) continue;   // geometry and the rest: as prog_get, at the draw
-                char key[65]; shader_key_of(control, code, length, key);
-                sync_ahead_stage(@(key), st, control, code, rt_local(control, st), libs);
-            }
+            sa_scan_new(p, libs, seen, memo);
             continue;
         }
         if (hq.op == OP_CLEAR_COLOR || hq.op == OP_CLEAR_DS || hq.op == OP_RENDER_COND) continue;
         state_op(hq.op, aq);
     }
     memcpy(&S, &Ssave, sizeof S); R = Rsave; args_dirty_all(); g_pso_dirty = pso_dirty; g_dss_dirty = dss_dirty; g_prog_for_draw = for_draw;
-    g_sa_more = stop && g_sa_variants > var0;
+    g_sa_more = stop && (g_sa_variants > var0 || g_sa_repeats > rep0);   // a repeat skipped counts as before, so the scans run as often
     uint64_t w0 = bp_now();
     if (libs.count) {   // the libraries compile side by side; every draw of this submission needs them
         pthread_mutex_lock(&g_plib_mu);
@@ -14979,17 +15031,53 @@ static void sync_ahead_rest(void) {
     }
     g_sa_wait_ns += bp_now() - w0;
     g_sa_scans++; g_sa_ns += bp_now() - started;
-    if (g_sa_variants > var0 && (g_sa_scans <= 20 || g_sa_scans % 50 == 0))
-        MLOG("[sync-ahead] scan %llu (%d commands%s): %llu variants translated ahead in %.1f ms, %lu libraries compiled side by side, waited %.1f ms for them; in all %llu scans, %llu variants, %llu libraries, %.1f ms (translation %.1f, waiting %.1f)",
+    if ((g_sa_variants > var0 || g_sa_repeats > rep0) && (g_sa_scans <= 20 || g_sa_scans % 50 == 0))
+        MLOG("[sync-ahead] scan %llu (%d commands%s): %llu variants translated ahead in %.1f ms (%llu repeats skipped), %lu libraries compiled side by side, waited %.1f ms for them; in all %llu scans, %llu variants (%llu repeats skipped), %llu libraries, %.1f ms (translation %.1f, waiting %.1f); %llu scans not started (all known)",
              (unsigned long long)g_sa_scans, guard, stop ? ", limit" : "", (unsigned long long)(g_sa_variants - var0), (g_sa_xl_ns - xl0) / 1e6,
-             (unsigned long)libs.count, (bp_now() - w0) / 1e6, (unsigned long long)g_sa_scans, (unsigned long long)g_sa_variants,
-             (unsigned long long)g_sa_libs, g_sa_ns / 1e6, g_sa_xl_ns / 1e6, g_sa_wait_ns / 1e6);
+             (unsigned long long)(g_sa_repeats - rep0), (unsigned long)libs.count, (bp_now() - w0) / 1e6, (unsigned long long)g_sa_scans,
+             (unsigned long long)g_sa_variants, (unsigned long long)g_sa_repeats, (unsigned long long)g_sa_libs, g_sa_ns / 1e6, g_sa_xl_ns / 1e6, g_sa_wait_ns / 1e6, (unsigned long long)g_sa_ready_skips);
 }
 static void sync_ahead_maybe(void) {
+    const prog_t *tp = g_sa_trig_p; NvProg *tpr = g_sa_trig_pr; g_sa_trig_p = NULL; g_sa_trig_pr = nil;
     if (async_shaders() || !g_exec_next || !sync_ahead_on()) return;
     if (g_sa_mark != g_sub_serial) { g_sa_mark = g_sub_serial; g_sa_n = 0; g_sa_more = 1; }
     if (!g_sa_more || g_sa_n >= 4) return;
+    g_sa_trig_p = tp; g_sa_trig_pr = tpr;
     g_sa_n++; sync_ahead_rest();
+}
+// The next scan starts with this draw's own variants (memo on; sync_ahead_rest clears it, and sync_ahead_maybe when no scan runs).
+static void sa_trigger(const prog_t *p, NvProg *pr) { if (sa_memo_on()) { g_sa_trig_p = p; g_sa_trig_pr = pr; } }
+// sync_ahead_maybe would scan now (memo on)
+static int sa_due(void) {
+    if (!sa_memo_on() || async_shaders() || !g_exec_next || !sync_ahead_on()) return 0;
+    return g_sa_mark != g_sub_serial || (g_sa_more && g_sa_n < 4);
+}
+// This stage's variant for these answers is in the index and its library is loaded or compiled ahead: nothing to translate or compile.
+static int sa_variant_ready(NSString *key, NSDictionary *ans) {
+    NSString *v = totk_rt_variant_cached(key, ans); if (!v) return 0;   // nil too while the index lock is held elsewhere: scan
+    NSString *pc = [v stringByAppendingString:@"_b"];
+    if (g_shcache[pc]) return 1;
+    pthread_mutex_lock(&g_plib_mu); id l = g_plib[pc]; pthread_mutex_unlock(&g_plib_mu);
+    return l && l != NSNull.null;
+}
+// 1 when a scan is due but the draw needs no work (its variant is ready): the scan is not started.
+static int sa_ready_stage(NSString *key, NSDictionary *ans) {
+    if (!sa_due() || !sa_variant_ready(key, ans)) return 0;
+    g_sa_ready_skips++; return 1;
+}
+// The same for a program met for the first time: every stage the scan would translate (sync_ahead_rest) is ready.
+static int sa_ready_prog(const prog_t *p) {
+    if (!sa_due()) return 0;
+    for (unsigned i = 0; i < p->nstage && i < 6; i++) {
+        const uint8_t *control = p->sd[i].control, *code = (const uint8_t *)(uintptr_t)p->sd[i].data;
+        if (!control || !code) return 0;
+        uint32_t length = ctl_code_len(control); int st = ctl_stage(control, code);
+        if (!length || length > 16 * 1024 * 1024) return 0;
+        if (st != 0 && st != 1 && st != 5 && !(nvn2_ctl(control) && (st == 3 || st == 4))) continue;
+        char key[65]; shader_key_of(control, code, length, key);
+        if (!sa_variant_ready(@(key), rt_answers(st))) return 0;
+    }
+    g_sa_ready_skips++; return 1;
 }
 static int rt_same(const p_set_rt *a, const p_set_rt *b);
 /* The formats a pass of these targets has with every plane attached (pso_predict_rest): colours, depth, stencil, samples.
