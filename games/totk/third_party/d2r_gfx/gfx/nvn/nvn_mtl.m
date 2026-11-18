@@ -174,6 +174,7 @@ static int g_nvn_deswz_gpu;
 static _Atomic int g_wt_region = 1;   // WriteTexels into a mirrored texture writes only its region (texels_write_region); flag wt_region 0 / 1, TOTK_WT_REGION=0 off
 static _Atomic int g_wt_inplace = 1;   // ... and blits that region into the texture's current Metal copy instead of a whole re-upload (texels_write_inplace); flag wt_inplace 0 / 1, TOTK_WT_INPLACE=0 off
 static _Atomic int g_sa_memo = 1;   // sync-ahead scans start only at a draw that needs work and skip a variant they already looked up for that program (sync_ahead_rest); flag sa_memo 0 / 1, TOTK_SA_MEMO=0 off
+static _Atomic int g_prompt_blit = 1;   // the prompt copy of the font atlas is built in the upload batch's staging and blitted into a private texture, not written with replaceRegion (prompt_stage); flag prompt_blit 0 / 1, TOTK_PROMPT_BLIT=0 off
 #endif
 static id<MTLCommandQueue> g_q;
 static id<MTL4CommandQueue> g_q4;
@@ -3828,10 +3829,18 @@ static void *tex_mtl_p(const tex_t *ct);
 #if !defined(GAME_BOTW) && !defined(GAME_NS2) && !TARGET_OS_IPHONE   /* only TotK on the Mac has the prompt hook (1.4.3 turns it on; this file is shared by its versions, so no version macro); other games and iOS skip this lookup */
 #define TOTK_PROMPT_ICONS_ON 1
 static void prompt_resident(id<MTLResource> resource) { res_add(resource); }
+static uint8_t *prompt_stage(size_t bytes);
+static id<MTLTexture> prompt_upload(MTLPixelFormat format, unsigned width, unsigned height);
 static void *prompt_texture(const tex_t *t) {
     __unsafe_unretained id<MTLTexture> original = (__bridge id<MTLTexture>)tex_mtl_p(t);
     if (!t || t->d.format != NVN_FORMAT_R8) return (__bridge void *)original;
-    return (__bridge void *)totk_prompt_texture(t, original, prompt_resident, defer_obj_release);
+    static int env = -1; if (env < 0) { const char *e = getenv("TOTK_PROMPT_BLIT"); env = !(e && !strcmp(e, "0")); if (!env) atomic_store(&g_prompt_blit, 0); }
+    int blit = atomic_load_explicit(&g_prompt_blit, memory_order_relaxed);
+    totk_prompt_set_upload(blit ? prompt_stage : NULL, blit ? prompt_upload : NULL);
+    __unsafe_unretained id<MTLTexture> shown = totk_prompt_texture(t, original, prompt_resident, defer_obj_release);
+    static uint64_t logged; uint64_t n, ns; totk_prompt_stats(&n, &ns);
+    if (n != logged && (n <= 4 || n % 50 == 0)) { logged = n; MLOG("[prompt] prompt copies built: %llu in %.1f ms (%s)", (unsigned long long)n, ns / 1e6, blit ? "staged and blitted" : "replaceRegion"); }
+    return (__bridge void *)shown;
 }
 #define tex_mtl(t) ((__bridge id<MTLTexture>)prompt_texture(t))
 #else
@@ -4202,6 +4211,8 @@ void dm_gfx_set_flag(const char *name, int v) {
     if (!strcmp(name, "wt_region")) { atomic_store(&g_wt_region, v != 0); MLOG("[flag] wt_region = %d", v != 0); return; }
     if (!strcmp(name, "wt_inplace")) { atomic_store(&g_wt_inplace, v != 0); MLOG("[flag] wt_inplace = %d", v != 0); return; }
     if (!strcmp(name, "sa_memo")) { atomic_store(&g_sa_memo, v != 0); MLOG("[flag] sa_memo = %d", v != 0); return; }
+    if (!strcmp(name, "msl_loaded")) { totk_rt_msl_loaded_set(v); MLOG("[flag] msl_loaded = %d", v != 0); return; }
+    if (!strcmp(name, "prompt_blit")) { atomic_store(&g_prompt_blit, v != 0); MLOG("[flag] prompt_blit = %d", v != 0); return; }
 #endif
 #ifdef UP_SLOTS_ROTATE
     if (!strcmp(name, "up_slots")) { if (v < 3 || v > UP_SLOTS_MAX) { MLOG("[flag] up_slots requires 3..%d", UP_SLOTS_MAX); return; } atomic_store(&g_up_slots_n, v); MLOG("[flag] up_slots = %d (next upload batch)", v); return; }
@@ -4211,7 +4222,6 @@ void dm_gfx_set_flag(const char *name, int v) {
         atomic_store(!strcmp(name, "chunk_first") ? &g_chunk_first_request : &g_chunk_size_request, v);
         MLOG("[flag] %s = %d (next submission)", name, v); return;
     }
-    if (!strcmp(name, "msl_loaded")) { totk_rt_msl_loaded_set(v); MLOG("[flag] msl_loaded = %d", v != 0); return; }
     if (!strcmp(name, "usnap_index")) { atomic_store(&g_usnap_index_on, v != 0); MLOG("[flag] usnap_index = %d", v != 0); return; }
     if (!strcmp(name, "usnap_index_check")) { atomic_store(&g_usnap_index_check, v != 0); MLOG("[flag] usnap_index_check = %d", v != 0); return; }
     if (!strcmp(name, "vertex_streams")) { atomic_store(&g_vertex_streams_on, v != 0); MLOG("[flag] vertex_streams = %d", v != 0); return; }
@@ -5380,6 +5390,9 @@ static void up_flush(void) {
             (unsigned long long)memory.destinations,(unsigned long long)memory.resident,memory.pending,f.error.description.UTF8String);
         if (f.error || fake_lost) {
             os_unfair_lock_lock(&g_up_lost_lk); if (!g_up_lost) g_up_lost = [NSHashTable weakObjectsHashTable]; for (id d in dsts) [g_up_lost addObject:d]; int n = (int)g_up_lost.allObjects.count; atomic_store(&g_up_lost_n, n); os_unfair_lock_unlock(&g_up_lost_lk);
+#if TOTK_PROMPT_ICONS_ON
+            totk_prompt_invalidate();   // a prompt copy blitted in this batch (prompt_upload) has no content: built again at its next use
+#endif
             ser_bump(0);   // 让各贴图号的视图缓存走一次慢路（缓存命中时不会经过 tex_mtl，看不到这份记录） | Make the view cache of every texture ID take the slow path once (on a cache hit tex_mtl is not passed through and this record is not seen)
             MLOG("%s上传命令缓冲被丢：这一批 %lu 张贴图记为内容未写，下次取用时重传（待重传共 %d 张）", fake_lost ? "DM_TEST_UP_LOST：" : "", (unsigned long)dsts.count, n);
         }
@@ -5990,6 +6003,54 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, reup_key *key
     if (!g_cb) up_flush();
     return mt;
 }
+#if TOTK_PROMPT_ICONS_ON
+/* TOTK (2026-11-18, owner: "constant and random fps drop with gpu load drop"): the prompt copy of the font atlas
+   (totk_prompt_icons.m) goes up like a CPU-path texture. The game re-uploads the 8 MB atlas whenever it adds glyphs, and
+   the copy was built again each time on the submit thread: 8 MB of new zeroed memory, the atlas rows, the prompt glyphs,
+   a new shared texture and replaceRegion, which converts the 8 MB to the GPU's layout on the CPU (7 ms of the 10.5 ms a
+   rebuild took; 44 of 161 long submit frames of owner play, run owner-ss1). Here the copy is built in the upload batch's
+   staging (the pooled block when the copy fits one) and a blit puts it into a private texture, so the GPU converts it. prompt_stage gives
+   the memory, prompt_upload makes the texture from the bytes staged last (width 0: none; it closes the batch as
+   pkg_upload_ does). Flag prompt_blit 0 / 1, TOTK_PROMPT_BLIT=0 off: replaceRegion as before. */
+static id<MTLBuffer> g_prompt_stg; static size_t g_prompt_stg_off;   // submit thread
+static uint8_t *prompt_stage(size_t bytes) {
+    if (!bytes) return NULL;
+    up_begin();
+    size_t sneed = (bytes + 255u) & ~(size_t)255u;
+    up_cpu_reserve(sneed);
+    if (sneed <= UP_SBLOCK_SIZE) {   // the pooled shared staging, as in pkg_upload_
+        if (!g_up_sblock || g_up_sblock_off + sneed > g_up_sblock_size) {
+            if (g_up_sblock && !g_up_sblock_pooled) [g_up_keep addObject:g_up_sblock];
+            int pi = up_pool_take(g_up_spool, g_up_spool_busy, &g_up_spool_n, UP_SPOOL_USE, &g_up_batch_spool, UP_SBLOCK_SIZE, MTLResourceStorageModeShared);
+            if (pi >= 0) { g_up_sblock = g_up_spool[pi]; g_up_sblock_pooled = 1; }
+            else { g_up_sblock = [g_dev newBufferWithLength:UP_SBLOCK_SIZE options:MTLResourceStorageModeShared]; if (!g_up_sblock) MDIE("shared upload staging"); res_add(g_up_sblock); g_up_sblock_pooled = 0; }
+            g_up_sblock_off = 0; g_up_sblock_size = UP_SBLOCK_SIZE;
+        }
+        g_prompt_stg = g_up_sblock; g_prompt_stg_off = g_up_sblock_off; g_up_sblock_off += sneed;
+    } else {
+        g_prompt_stg = [g_dev newBufferWithLength:sneed options:MTLResourceStorageModeShared];
+        if (!g_prompt_stg) MDIE("shared upload staging %#zx", sneed);
+        res_add(g_prompt_stg); [g_up_keep addObject:g_prompt_stg]; g_prompt_stg_off = 0;
+    }
+    return (uint8_t *)g_prompt_stg.contents + g_prompt_stg_off;
+}
+static id<MTLTexture> prompt_upload(MTLPixelFormat format, unsigned width, unsigned height) {
+    id<MTLTexture> made = nil;
+    if (width && height && g_prompt_stg) {
+        MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format width:width height:height mipmapped:NO];
+        d.storageMode = MTLStorageModePrivate;
+        d.usage = MTLTextureUsageShaderRead | MTLTextureUsagePixelFormatView;
+        made = [g_dev newTextureWithDescriptor:d];
+        if (made) {
+            res_add(made); [g_up_texs addObject:made];
+            up_blit_add(g_prompt_stg, g_prompt_stg_off, width, (size_t)width * height, MTLSizeMake(width, height, 1), made, 0, 0);
+        }
+    }
+    g_prompt_stg = nil;
+    if (!g_cb) up_flush();
+    return made;
+}
+#endif
 // TOTK: which textures mirror their pool memory into the MTLTexture (upload at first use, re-upload on dirty pages).
 // D2R only had packaged textures (SetPackagedTextureLayout); TOTK's materials use the default block-linear layout
 // (GetStorageSize/SetStorage) in CPU-cached pools with no layout call, and were created as empty GPU textures before.
@@ -8331,6 +8392,9 @@ static NvShader *shader_load_mode(NSString *pc, int stage, int archive_compute) 
     }
     if (o->rf.has_c1) c1_store(o, full);
     if (o->ssao_slot && o->c1buf) ssao_put(o);   // TOTK_SSAO: before any draw can read the slot
+#if !defined(GAME_BOTW)
+    if (rt && full.length >= 64) totk_rt_variant_loaded(pc);   // its first use reads no source again (totk_shader_rt.m g_msl_loaded)
+#endif
     return o;
 }
 
@@ -8392,9 +8456,6 @@ static int plib_on(void) {
 #endif
 }
 static NSMutableDictionary<NSString *, id> *g_plib;   // variant key -> NSNull while it compiles, its NvShader once compiled (a failed one is removed)
-#if !defined(GAME_BOTW)
-    if (rt && full.length >= 64) totk_rt_variant_loaded(pc);   // its first use reads no source again (totk_shader_rt.m g_msl_loaded)
-#endif
 static pthread_mutex_t g_plib_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_plib_cv = PTHREAD_COND_INITIALIZER;
 static uint64_t g_plib_kicked, g_plib_taken, g_plib_waits, g_plib_purges;
 static _Atomic uint64_t g_plib_wait_ns;   // statistics line of pso_predict_rest
