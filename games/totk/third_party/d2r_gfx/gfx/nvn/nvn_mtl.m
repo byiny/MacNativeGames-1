@@ -172,6 +172,7 @@ static NSMutableArray *g_l3_gpu_leaks;
 static int g_nvn_deswz_gpu;
 #if !defined(GAME_BOTW)
 static _Atomic int g_wt_region = 1;   // WriteTexels into a mirrored texture writes only its region (texels_write_region); flag wt_region 0 / 1, TOTK_WT_REGION=0 off
+static _Atomic int g_wt_inplace = 1;   // ... and blits that region into the texture's current Metal copy instead of a whole re-upload (texels_write_inplace); flag wt_inplace 0 / 1, TOTK_WT_INPLACE=0 off
 #endif
 static id<MTLCommandQueue> g_q;
 static id<MTL4CommandQueue> g_q4;
@@ -4198,6 +4199,7 @@ void dm_gfx_set_flag(const char *name, int v) {
     if (!strcmp(name,"mesh_trace")) { if(v>=0&&v<=4)atomic_store(&g_mesh_trace_frames,v); return; }
 #if !defined(GAME_BOTW)
     if (!strcmp(name, "wt_region")) { atomic_store(&g_wt_region, v != 0); MLOG("[flag] wt_region = %d", v != 0); return; }
+    if (!strcmp(name, "wt_inplace")) { atomic_store(&g_wt_inplace, v != 0); MLOG("[flag] wt_inplace = %d", v != 0); return; }
 #endif
 #ifdef UP_SLOTS_ROTATE
     if (!strcmp(name, "up_slots")) { if (v < 3 || v > UP_SLOTS_MAX) { MLOG("[flag] up_slots requires 3..%d", UP_SLOTS_MAX); return; } atomic_store(&g_up_slots_n, v); MLOG("[flag] up_slots = %d (next upload batch)", v); return; }
@@ -5158,6 +5160,7 @@ typedef struct {
     MTLSize size;
     __unsafe_unretained id<MTLTexture> dst;   // 由 g_up_texs 强引用到冲刷编码完 | Strongly referenced by g_up_texs until the flush is encoded
     NSUInteger slice, level;
+    MTLOrigin org;   // TOTK: the destination origin (a WriteTexels region, texels_write_inplace); 0 for whole-level uploads
 } up_blit;
 static up_blit *g_up_blits; static int g_nup_blits, g_up_blitcap;
 // 无 BC 时 BC1–5 在 GPU 上解压（A16 日志：CPU 解排布 + CPU 解压单帧 300 ms 以上）：GPU 解排布把压缩块写进暂存区，冲刷时过了屏障
@@ -5341,7 +5344,7 @@ static void up_flush(void) {
     }
     for (int i = 0; b && i < g_nup_blits; i++) {
         up_blit *x = &g_up_blits[i];
-        enc_b_copy_buffer_texture(b, x->src, x->off, x->row, x->image, x->size, x->dst, x->slice, x->level, MTLOriginMake(0, 0, 0));
+        enc_b_copy_buffer_texture(b, x->src, x->off, x->row, x->image, x->size, x->dst, x->slice, x->level, x->org);
     }
     if (b && g_nup_decs) {   // 无 BC 的 GPU 解压（见 up_dec）：参数块里的偏移相对暂存块起点 | GPU decompression without BC (see up_dec): offsets in the parameter block are relative to the start of the staging block
         [b setArgumentTable:g_up_ct]; [b setComputePipelineState:bcd_pso()];
@@ -5550,7 +5553,7 @@ static void up_blit_add(id<MTLBuffer> src, size_t off, size_t row, size_t image,
         g_up_blitcap = g_up_blitcap ? g_up_blitcap * 2 : 256;
         g_up_blits = realloc(g_up_blits, g_up_blitcap * sizeof *g_up_blits);
     }
-    g_up_blits[g_nup_blits++] = (up_blit){src, off, row, image, size, dst, slice, level};
+    g_up_blits[g_nup_blits++] = (up_blit){src, off, row, image, size, dst, slice, level, MTLOriginMake(0, 0, 0)};
 }
 
 /* TOTK: small mirrored textures (<= PKG_HASH_MAX bytes) are checked by a content hash once per submission instead of by
@@ -5579,7 +5582,8 @@ static int pkg_hash_guarded(const tex_t *t, uint64_t *h) {   // 1 hashed, 0 the 
    is. The glyph cache's last page holds the glyph records the font code flags as used on every frame, so the whole 8 MB
    texture was uploaded again on every frame. When only those shared pages were written since the stamp, the texture's
    bytes in them are compared with the ones the upload started from: equal means clean, and the two pages are protected
-   again under a new stamp. The bytes are kept only for a texture that showed this once (edge_want): no memory for others. */
+   again under a new stamp. The bytes are kept only for a texture that showed this once (edge_want), and in TOTK for one of
+   1 MB or more (texels_write_inplace). */
 static void pkg_edges(const tex_t *t, uintptr_t *h, uintptr_t *tl) {   // own pages [h, tl); the shared parts are [mem, h) and [tl, end)
     static uintptr_t pg; if (!pg) pg = (uintptr_t)getpagesize();
     uintptr_t a = (uintptr_t)t->mem, e = a + t->L.size; *h = (a + pg - 1) & ~(pg - 1); *tl = e & ~(pg - 1);
@@ -5790,7 +5794,13 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, reup_key *key
                  (unsigned long long)n, (unsigned long long)nz, (unsigned long long)(n / 8), (void *)t->pool, t->pool ? t->pool->flags : 0, t->pool ? (void *)t->pool->host : NULL, (long long)t->off, (unsigned long long)atomic_load(&g_cur_frame)); } }
     upt_mark(2);
     *stamp = nvn_dirty_now();   // TOTK (#90): before protecting, as in wb_note: a write that faults during the protect or the copy is newer than it
+#if !defined(GAME_BOTW)
+    /* TOTK 1.4.3: a texture of 1 MB or more keeps the shared bytes at once (2 pages at most), so a WriteTexels strip into it
+       can go in place (texels_write_inplace) when the neighbour data was written first: ser 86 of the strip bursts */
+    if (pk && (pk->edge_want || t->L.size >= (1u << 20))) pkg_edge_snap(t, pk);
+#else
     if (pk && pk->edge_want) pkg_edge_snap(t, pk);
+#endif
     if (!pkg_hashed(t)) nvn_dirty_protect(t->mem, t->L.size);
     int bw, bh, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh);
     unsigned layers = (t->d.target == 4 || t->d.target == 9) ? t->d.depth : t->d.target == 8 ? 6 : t->d.target == 3 ? t->d.height : 1;   // cube array depth = layer-faces
@@ -19947,6 +19957,67 @@ static int texels_write_region(const tex_t *t, unsigned level, unsigned layer0, 
     }
     return 1;
 }
+/* TOTK 1.4.3 (owner play 2026-11-17): after the region write above, each frame of the game's strip bursts still
+   re-uploaded the whole 17 MB texture (ser 86, about 6 ms in the next submit), because the strip's pages were dirty.
+   When the texture's Metal copy is current (no write since its stamp; in a first or last page shared with other data, no
+   change to the texture's own bytes, as pkg_edge_clean) and a plain copy (all levels, no transcode), the
+   strip is blitted into that copy and the copy's stamp moves past the write, so no re-upload follows. The pages are
+   made dirty as for any host write, so another texture over the same pages still sees the change. A write to the
+   texture's other pages meanwhile keeps the old stamp (the re-upload takes everything). The blit's batch starts after
+   all earlier queue work (up_begin's barrier): frames already submitted read the old texels, later ones the new.
+   Not taken during a submission's replay, for GPU-owned textures (they have their own path below), 3D or multi-layer
+   regions, small hashed textures and UI-pack textures. A guest write to the strip's own pages while this runs (a race
+   in the game) can miss the Metal copy until the texture's next re-upload. 1: written and blitted (or the stamp kept);
+   0: not taken, nothing written; -2: the memory faulted (as texels_write_region). */
+static uint64_t g_wt_inplace_n, g_wt_inplace_kept;
+static int texels_write_inplace(const tex_t *t, unsigned level, unsigned layer0, const NVNcopyRegion *r, const uint8_t *src, size_t row, size_t img,
+                                size_t x0, size_t y0, size_t wb, size_t hb, int nz, int is3d) {
+    static int env = -1; if (env < 0) { const char *e = getenv("TOTK_WT_INPLACE"); env = !(e && !strcmp(e, "0")); if (!env) atomic_store(&g_wt_inplace, 0); }
+    if (!atomic_load_explicit(&g_wt_inplace, memory_order_relaxed) || nz != 1 || is3d || g_cb || tex_astc(t) || gpu_owned(t->serial)) return 0;
+    uint32_t upf; int ubpp; if (bc_unpack(t->d.format, &upf, &ubpp)) return 0;
+    __unsafe_unretained NvPkg *pk = (__bridge id)serial_ptr(t->serial);
+    if (!pk || !pk->tex) return 0;
+    if (pk->owned || pk->hashed || pk->vol || pk->lost || pk->tex.mipmapLevelCount != (t->d.levels ? t->d.levels : 1u) ||
+        (tc_pf(t->d.format) != MTLPixelFormatInvalid && pk->tex.pixelFormat == tc_pf(t->d.format))) return 0;
+#if MNG_UI_PACK
+    if (g_ui_pack && pk->tp_cls) return 0;
+#endif
+    /* own pages [h, tl) must be clean. The first and last page can hold other data too: a write there counts only when the
+       texture's bytes in it changed (pkg_edge_clean compares them with those kept at the upload and moves the stamp) */
+    uintptr_t h, tl, a = (uintptr_t)t->mem, e = a + t->L.size; pkg_edges(t, &h, &tl);
+    if (!nvn_dirty_tracked(t->mem, t->L.size) || tl <= h || nvn_dirty_since((const void *)h, tl - h, pk->stamp)) return 0;   // already stale: the re-upload takes this write too
+    if (((h > a && nvn_dirty_since(t->mem, h - a, pk->stamp)) || (e > tl && nvn_dirty_since((const void *)tl, e - tl, pk->stamp))) && !pkg_edge_clean(t, pk)) return 0;
+    uint64_t s0 = pk->stamp;
+    unsigned layer = layer0 + r->zoffset; uint64_t lo, hi;
+    if (nvn_swizzle_region_span(&t->d, level, layer, (uint32_t)y0, 0, (uint32_t)hb, &lo, &hi) || hi > t->L.size) return 0;
+    int rc = texels_write_region(t, level, layer0, r, src, row, img, x0, y0, wb, hb, nz, is3d);
+    if (rc != 1) return rc;
+    uint64_t st = nvn_dirty_now();   // after the write, before protecting: a write that faults after the protect is newer
+    nvn_dirty_protect(t->mem + lo, (size_t)(hi - lo));
+    id<MTLBuffer> stg = [g_dev newBufferWithLength:wb * hb options:MTLResourceStorageModeShared];
+    if (!stg) return 1;   // the pages stay dirty: the next use re-uploads (the kept shared bytes stay old, so pkg_edge_clean sees the change too)
+    if (pk->edge && pk->eh == h - a && pk->et == e - tl) {   // the strip's bytes in a shared page are the texture's kept bytes now
+        if (a + lo < h) memcpy(pk->edge + lo, t->mem + lo, (size_t)(MIN(a + hi, h) - (a + lo)));
+        if (a + hi > tl) { uintptr_t x = MAX(a + lo, tl); memcpy(pk->edge + pk->eh + (x - tl), (const void *)x, (size_t)(a + hi - x)); }
+    }
+    for (size_t y = 0; y < hb; y++) memcpy((uint8_t *)stg.contents + y * wb, src + y * row, wb);
+    res_add(stg);
+    if (g_up_cb) up_flush();   // an open batch may still copy into this texture: the strip goes in a batch after it
+    up_begin(); [g_up_keep addObject:stg]; [g_up_texs addObject:pk->tex];
+    up_blit_add(stg, 0, wb, wb * hb, MTLSizeMake(r->width, r->height, 1), pk->tex, layer, level);
+    g_up_blits[g_nup_blits - 1].org = MTLOriginMake(r->xoffset, r->yoffset, 0);
+    up_flush();
+    /* a write since the checks to a page outside the strip: the re-upload takes it (the strip's own pages are dirty by
+       this write, so a write there meanwhile is a race in the game) */
+    uintptr_t pg = (uintptr_t)getpagesize(), plo = (a + lo) & ~(pg - 1), phi = (a + hi + pg - 1) & ~(pg - 1);
+    int other = (plo > a && nvn_dirty_since(t->mem, plo - a, s0)) || (phi < e && nvn_dirty_since((const void *)phi, e - phi, s0));
+    if (other) g_wt_inplace_kept++;
+    else { pk->stamp = st; if (dirtycheck()) pk->hash = full_hash(t->mem, t->L.size); }
+    uint64_t n = ++g_wt_inplace_n;
+    if (n <= 4 || n % 1000 == 0) MLOG("[texels] WriteTexels ser=%llu %ux%u fmt=%#x lv%u %dx%d: blitted into the Metal copy, no re-upload (%llu so far, %llu re-uploaded for other writes)",
+                                      (unsigned long long)t->serial, t->d.width, t->d.height, t->d.format, level, r->width, r->height, (unsigned long long)n, (unsigned long long)g_wt_inplace_kept);
+    return 1;
+}
 #endif
 // TOTK: CPU texture write (WriteTexels), mirroring mtl_read_texels: packaged textures update pool memory in
 // block-linear layout (dirty tracking re-uploads it); other textures are written into the MTLTexture by blit.
@@ -19962,7 +20033,8 @@ void mtl_write_texels(const tex_t *t, unsigned level, unsigned layer0, const NVN
     TILELOG(t, "WriteTexels lv%u xy=%d,%d %dx%d owned %d mirrored %d flags=%#x pbh=%d tileH=%u size=%llu", level, r->xoffset, r->yoffset, r->width, r->height, gpu_owned(t->serial), tex_mirrored(t), t->d.flags, t->d.pkg_block_h, t->L.tileH, (unsigned long long)t->L.size);
     if (tex_mirrored(t)) {
 #if !defined(GAME_BOTW)
-        int rc = texels_write_region(t, level, layer0, r, src, row, img, x0, y0, wb, hb, nz, is3d);
+        int rc = texels_write_inplace(t, level, layer0, r, src, row, img, x0, y0, wb, hb, nz, is3d);
+        if (!rc) rc = texels_write_region(t, level, layer0, r, src, row, img, x0, y0, wb, hb, nz, is3d);
         if (rc) { if (gpu_owned(t->serial)) goto metal; return; }   // as below: a GPU-rendered texture takes the write too
 #endif
         dm_guest_write_prepare(t->mem, t->L.size);

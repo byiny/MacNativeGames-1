@@ -64,6 +64,7 @@ int mtl_probe_arena_trim(void);
 int mtl_probe_compressed_alias(void);
 int mtl_probe_linear_rt_upload(void);
 int mtl_probe_texels_region(void);
+int mtl_probe_texels_inplace(void);
 int mtl_probe_texture_retire(void);
 int mtl_probe_ds_clear(void);
 int mtl_probe_ub_rename(void);

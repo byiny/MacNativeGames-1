@@ -68,3 +68,81 @@ int mtl_probe_texels_region(void) {
     }}
     if(atomic_load(&g_texels_gpu_failures))MDIE("texels-region GPU failure");mtl_texels_gpu_report();return checked;
 }
+/* WriteTexels into a mirrored texture whose Metal copy is current (texels_write_inplace): the region lands in the guest
+   pool and in that copy, the next use re-uploads nothing, and a later write elsewhere in the texture still re-uploads. */
+int mtl_probe_texels_inplace(void) {
+    mtl_init();int checked=0;
+#if !defined(GAME_BOTW)
+    const int formats[]={0x25,0x49};
+    for(int c=0;c<2;c++){@autoreleasepool{
+        tex_t t={0};t.serial=0xffffd100u+c;
+        t.d=(nvn_texdesc){.width=1024,.height=512,.depth=1,.levels=3,.target=1,.format=formats[c],.samples=1};
+        nvn_tex_layout(&t.d,&t.L);size_t size=(t.L.size+getpagesize()-1)&~((size_t)getpagesize()-1);
+        uint8_t *mem=mmap(NULL,size,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANON,-1,0);
+        if(mem==MAP_FAILED)MDIE("texels-inplace probe allocation");
+        for(size_t i=0;i<size;i++)mem[i]=(uint8_t)(i*7+(i>>11)+c);
+        pool_t pool={0};pool.mem=mem;pool.size=size;pool.flags=0x24;t.pool=&pool;t.mem=mem;
+        mtl_pool_add(mem,size);nvn_dirty_add_range(mem,size);
+        int bw,bh,bpb=nvn_fmt_bpb(t.d.format,&bw,&bh);unsigned lv=1;
+        uint32_t lw=t.d.width>>lv,lh=t.d.height>>lv;size_t pitch=(size_t)((lw+bw-1)/bw)*bpb,rows=(lh+bh-1)/bh;
+        op_hdr end={OP_END,8};
+        mtl_sub_begin();mtl_exec((const uint8_t *)&end);id<MTLTexture> mt=tex_mtl(&t);mtl_sub_commit();mtl_finish();
+        if(!mt)MDIE("texels-inplace first upload case%d",c);
+        NVNcopyRegion r={.xoffset=24*bw,.yoffset=40*bh,.width=64*bw,.height=9*bh,.depth=1};
+        size_t wb=64*(size_t)bpb,hb=9,row=wb+40;uint8_t *src=malloc(row*hb);if(!src)MDIE("texels-inplace probe source");
+        for(size_t i=0;i<row*hb;i++)src[i]=(uint8_t)(i*29+(i>>4)+77+c);
+        uint64_t re0=g_pkg_reuploads,n0=g_wt_inplace_n;
+        mtl_write_texels(&t,lv,0,&r,src,row,row*hb);
+        if(g_wt_inplace_n!=n0+1)MDIE("texels-inplace not taken case%d",c);
+        uint8_t *lin=malloc(pitch*rows);if(!lin||nvn_deswizzle(&t.d,lv,0,mem,lin,pitch))MDIE("texels-inplace deswizzle");
+        for(size_t y=0;y<hb;y++)if(memcmp(lin+(r.yoffset/bh+y)*pitch+(r.xoffset/bw)*bpb,src+y*row,wb))MDIE("texels-inplace guest pool case%d",c);
+        id<MTLBuffer> out=probe_buf(pitch*rows);
+        mtl_sub_begin();mtl_exec((const uint8_t *)&end);id<MTLTexture> mt2=tex_mtl(&t);
+        enc_b_copy_texture_buffer(blit(),mt2,0,lv,MTLOriginMake(0,0,0),MTLSizeMake(lw,lh,1),out,0,pitch,pitch*rows);
+        mtl_sub_commit();mtl_finish();
+        if(mt2!=mt||g_pkg_reuploads!=re0)MDIE("texels-inplace re-uploaded case%d",c);
+        if(memcmp(out.contents,lin,pitch*rows))MDIE("texels-inplace Metal copy differs from the pool case%d",c);
+        dm_guest_write_prepare(mem,1);mem[0]^=0x5a;   // another write to the texture, outside the region
+        mtl_sub_begin();mtl_exec((const uint8_t *)&end);id<MTLTexture> mt3=tex_mtl(&t);mtl_sub_commit();mtl_finish();
+        if(!mt3||mt3==mt||g_pkg_reuploads!=re0+1)MDIE("texels-inplace later write not re-uploaded case%d",c);
+        res_remove(out);mtl_tex_release(&t);mtl_pool_del(mem);nvn_dirty_remove_range(mem);mtl_finish();munmap(mem,size);free(src);free(lin);checked+=3;
+    }}
+    @autoreleasepool{   // a texture that starts and ends mid-page, a strip in its shared first page (TOTK ser 86)
+        size_t pg=getpagesize();tex_t t={0};t.serial=0xffffd1f0u;
+        t.d=(nvn_texdesc){.width=1024,.height=512,.depth=1,.levels=3,.target=1,.format=0x25,.samples=1};
+        nvn_tex_layout(&t.d,&t.L);size_t size=(t.L.size+2*pg-1)&~(pg-1);
+        uint8_t *mem=mmap(NULL,size,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANON,-1,0);
+        if(mem==MAP_FAILED)MDIE("texels-inplace probe allocation (shared pages)");
+        for(size_t i=0;i<size;i++)mem[i]=(uint8_t)(i*13+(i>>10));
+        pool_t pool={0};pool.mem=mem;pool.size=size;pool.flags=0x24;t.pool=&pool;t.mem=mem+pg/2;
+        mtl_pool_add(mem,size);nvn_dirty_add_range(mem,size);
+        int bw,bh,bpb=nvn_fmt_bpb(t.d.format,&bw,&bh);(void)bh;
+        size_t pitch=(size_t)((t.d.width+bw-1)/bw)*bpb,rows=t.d.height;
+        op_hdr end={OP_END,8};
+#define PROBE_TEX(v) do{mtl_sub_begin();mtl_exec((const uint8_t *)&end);v=tex_mtl(&t);mtl_sub_commit();mtl_finish();}while(0)
+        id<MTLTexture> mt;PROBE_TEX(mt);if(!mt)MDIE("texels-inplace first upload (shared pages)");
+        uint64_t re0=g_pkg_reuploads;
+        dm_guest_write_prepare(mem,1);mem[0]^=0x33;   // other data in the shared first page: the shared bytes were kept at the upload (1 MB or more)
+        id<MTLTexture> mt1;PROBE_TEX(mt1);if(mt1!=mt||g_pkg_reuploads!=re0)MDIE("texels-inplace shared bytes not kept at the upload");
+        dm_guest_write_prepare(mem,1);mem[0]^=0x33;   // and again, before the strip: the texture's own bytes there are unchanged
+        NVNcopyRegion r={.xoffset=8,.yoffset=0,.width=200,.height=6,.depth=1};
+        size_t wb=200*(size_t)bpb,hb=6,row=wb;uint8_t *src=malloc(row*hb);if(!src)MDIE("texels-inplace probe source");
+        for(size_t i=0;i<row*hb;i++)src[i]=(uint8_t)(i*31+5);
+        uint64_t n0=g_wt_inplace_n;re0=g_pkg_reuploads;
+        mtl_write_texels(&t,0,0,&r,src,row,row*hb);
+        if(g_wt_inplace_n!=n0+1)MDIE("texels-inplace not taken (shared pages)");
+        uint8_t *lin=malloc(pitch*rows);if(!lin||nvn_deswizzle(&t.d,0,0,t.mem,lin,pitch))MDIE("texels-inplace deswizzle");
+        id<MTLBuffer> out=probe_buf(pitch*rows);id<MTLTexture> mt2;
+        mtl_sub_begin();mtl_exec((const uint8_t *)&end);mt2=tex_mtl(&t);
+        enc_b_copy_texture_buffer(blit(),mt2,0,0,MTLOriginMake(0,0,0),MTLSizeMake(t.d.width,t.d.height,1),out,0,pitch,pitch*rows);
+        mtl_sub_commit();mtl_finish();
+        if(mt2!=mt||g_pkg_reuploads!=re0)MDIE("texels-inplace re-uploaded (shared pages)");
+        if(memcmp(out.contents,lin,pitch*rows))MDIE("texels-inplace Metal copy differs from the pool (shared pages)");
+        dm_guest_write_prepare(mem,1);mem[0]^=0x33;   // other data again: the kept bytes include the strip, so no upload
+        PROBE_TEX(mt2);if(mt2!=mt||g_pkg_reuploads!=re0)MDIE("texels-inplace kept shared bytes stale");
+#undef PROBE_TEX
+        res_remove(out);mtl_tex_release(&t);mtl_pool_del(mem);nvn_dirty_remove_range(mem);mtl_finish();munmap(mem,size);free(src);free(lin);checked+=3;
+    }
+#endif
+    return checked;
+}
