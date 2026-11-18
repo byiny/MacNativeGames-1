@@ -31,7 +31,7 @@ int mtl_probe_draw_barriers(void) {
     mtl_init();
     const char *ne=getenv("TOTK_PROBE_NEGATIVE");g_oot_bar_probe_negative=ne ? atoi(ne) : 0;
     atomic_store(&g_oot_bar_request,1);
-    if(!oot_bar_allowed()) MDIE("draw-barrier probe requires OOT Mac");
+    if(!oot_bar_allowed()) MDIE("draw-barrier probe requires OOT or TOTK 1.4.3 on the Mac");
     NSString *src=@"#include <metal_stdlib>\nusing namespace metal;\n"
         "struct V {float4 p [[position]];float value;};\n"
         "inline float4 pos(uint id){float2 q[3]={float2(-1,-1),float2(3,-1),float2(-1,3)};return float4(q[id],0,1);}\n"
@@ -66,7 +66,7 @@ int mtl_probe_draw_barriers(void) {
     id<MTLTexture> tx=[g_dev newTextureWithDescriptor:td];res_add(tx);
     id<MTLBuffer> state=probe_buf(256),copy=probe_buf(256),out=probe_buf(1024);
     *(uint32_t *)copy.contents=96;int checked=0;
-    for(int round=0;round<16;round++)for(int c=0;c<8;c++) {
+    for(int round=0;round<16;round++)for(int c=0;c<9;c++) {
         *(uint32_t *)state.contents=32;mtl_sub_begin();
         oot_bar_probe_draw(pr[0],ps[0],state,tx,0,0,0);rp_end();
         uint64_t full=g_oot_bar_full,skip=g_oot_bar_skip;
@@ -81,6 +81,9 @@ int mtl_probe_draw_barriers(void) {
             oot_bar_probe_draw(pr[2],ps[2],state,tx,0,0,0);
             if(g_oot_bar_full!=full+1) MDIE("draw-barrier probe: native dependency did not keep full consumer barrier");
         } else if(c==2) {
+            /* the reading pass takes a full start barrier, so the barrier inside it does not end it (case 8 covers
+               that) and the order of the later write is left to oot_bar_before_draw */
+            oot_bar_probe_record(NVN_BARRIER_ORDER_PRIMITIVES_BIT);
             oot_bar_probe_draw(pr[0],ps[0],state,tx,0,1,0);
             oot_bar_probe_record(NVN_BARRIER_ORDER_PRIMITIVES_BIT|NVN_BARRIER_ORDER_FRAGMENTS_BIT);
             oot_bar_before_draw(pr[3]);
@@ -110,6 +113,17 @@ int mtl_probe_draw_barriers(void) {
             uint64_t fs=g_oot_bar_frag_skip;full=g_oot_bar_full;
             oot_bar_probe_draw(pr[0],ps[0],state,tx,0,0,0);
             if(g_oot_bar_frag_skip!=fs+1||g_oot_bar_full!=full) MDIE("draw-barrier probe: fragment-only native dependency kept the consumer barrier");
+        } else if(c==8) {
+            /* fragment write -> a pass that begins with no consumer barrier -> native ORDER_PRIMITIVES inside it -> vertex
+               read: the barrier must end that pass, and the next pass must take the full consumer barrier */
+            oot_bar_probe_draw(pr[1],ps[1],state,tx,0,0,0);rp_end();skip=g_oot_bar_skip;
+            oot_bar_probe_draw(pr[0],ps[0],state,tx,0,0,0);
+            if(g_oot_bar_skip!=skip+1) MDIE("draw-barrier probe: pass after a fragment write did not begin without a barrier");
+            oot_bar_probe_record(NVN_BARRIER_ORDER_PRIMITIVES_BIT);
+            if(g_enc) MDIE("draw-barrier probe: primitive-order barrier inside a pass without a consumer barrier did not end it");
+            full=g_oot_bar_full;
+            oot_bar_probe_draw(pr[2],ps[2],state,tx,0,0,0);
+            if(g_oot_bar_full!=full+1) MDIE("draw-barrier probe: primitive-order dependency inside a pass lost");
         } else {
             /* no writes -> native ORDER_FRAGMENTS|INVALIDATE_TEXTURE -> a new pass: no consumer barrier either */
             oot_bar_probe_draw(pr[0],ps[0],state,tx,0,0,0);
@@ -120,7 +134,7 @@ int mtl_probe_draw_barriers(void) {
         }
         rp_end();enc_b_copy_texture_buffer(blit(),tx,0,0,MTLOriginMake(0,0,0),MTLSizeMake(16,16,1),out,0,64,1024);
         mtl_sub_commit();mtl_finish();
-        uint32_t want=c==1?128:c==2?192:c==3?64:c==4?96:c==6?128:32;
+        uint32_t want=c==1?128:c==2?192:c==3?64:c==4?96:c==6||c==8?128:32;
         if(*(uint32_t *)state.contents!=want) MDIE("draw-barrier probe: case %d state=%u expected=%u",c,*(uint32_t *)state.contents,want);
         checked++;
         for(unsigned i=0;i<256;i++) {

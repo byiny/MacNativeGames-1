@@ -1879,7 +1879,9 @@ static void ser_gate(void) {
 /* OOT candidate: preserve the game's explicit dependencies instead of serializing
    every draw pass. Native shader writes remain ordered on BOTH sides of a game
    barrier; compute, copies, helpers and submission changes keep full barriers.
-   Default off until GPU and real-game validation. No render work is omitted. */
+   Default off until GPU and real-game validation. No render work is omitted.
+   TOTK 1.4.3 on the Mac (2026-11-18): on by default; TOTK_DRAW_BARRIERS=0 or `flag draw_barriers 0` restores the full
+   barriers at both ends of every encoder. Native 3456x1944, M1 Pro, Great Sky Island: frame 20.4 -> 17.9 ms. */
 static _Atomic int g_oot_bar_request = -1, g_oot_bar_dump, g_oot_bar_last;
 static int g_oot_bar_mode, g_oot_bar_pending = 1, g_oot_bar_beginning, g_oot_bar_pass;
 static int g_oot_bar_writes, g_oot_bar_order;
@@ -1904,8 +1906,9 @@ static int oot_bar_frag_skip_on(void) {
 }
 static struct { uint32_t bits; uint64_t count; } g_oot_bar_hist[32];
 static unsigned g_oot_bar_hist_n; static uint64_t g_oot_bar_hist_overflow;
+static uint64_t g_oot_bar_prim_splits;   /* game passes ended at a native primitive-order barrier (oot_bar_native) */
 static int oot_bar_allowed(void) {
-#if defined(GAME_OOT) && !TARGET_OS_IPHONE
+#if (defined(GAME_OOT) || defined(TOTK_GAME_V143)) && !TARGET_OS_IPHONE
     return 1;
 #else
     return 0;
@@ -1916,6 +1919,9 @@ static void oot_bar_sync(void) {
         int requested = atomic_load_explicit(&g_oot_bar_request, memory_order_relaxed);
         if (requested < 0) {
             const char *e = getenv("OOT_DRAW_BARRIERS"); int initial = oot_bar_allowed() && !(e && !strcmp(e, "0")), expected = -1; /* Mac default on since 2026-11-08; OOT_DRAW_BARRIERS=0 restores full barriers */ 
+#ifdef TOTK_GAME_V143
+            e = getenv("TOTK_DRAW_BARRIERS"); initial = oot_bar_allowed() && !(e && !strcmp(e, "0"));   /* TOTK 1.4.3 has its own switch */
+#endif
             atomic_compare_exchange_strong(&g_oot_bar_request, &expected, initial);
             requested = atomic_load_explicit(&g_oot_bar_request, memory_order_relaxed);
         }
@@ -1924,9 +1930,9 @@ static void oot_bar_sync(void) {
         g_oot_bar_writes = g_oot_bar_order = 0; atomic_store(&g_oot_bar_last, 0);
     }
     if (atomic_exchange_explicit(&g_oot_bar_dump, 0, memory_order_relaxed)) {
-        MLOG("[oot-barriers] mode=%d fence=%llu full=%llu skip=%llu fragment-only-skip=%llu shader-order-splits=%llu overflow=%llu",
+        MLOG("[oot-barriers] mode=%d fence=%llu full=%llu skip=%llu fragment-only-skip=%llu shader-order-splits=%llu primitive-order-splits=%llu overflow=%llu",
              g_oot_bar_mode, (unsigned long long)g_oot_bar_serial, (unsigned long long)g_oot_bar_full,
-             (unsigned long long)g_oot_bar_skip, (unsigned long long)g_oot_bar_frag_skip, (unsigned long long)g_oot_bar_splits, (unsigned long long)g_oot_bar_hist_overflow);
+             (unsigned long long)g_oot_bar_skip, (unsigned long long)g_oot_bar_frag_skip, (unsigned long long)g_oot_bar_splits, (unsigned long long)g_oot_bar_prim_splits, (unsigned long long)g_oot_bar_hist_overflow);
         for (unsigned i=0;i<g_oot_bar_hist_n;i++) MLOG("[oot-barriers] native bits=%#x count=%llu",g_oot_bar_hist[i].bits,(unsigned long long)g_oot_bar_hist[i].count);
     }
 }
@@ -4165,7 +4171,7 @@ void dm_gfx_set_flag(const char *name, int v) {
     if (!strcmp(name, "pool_wait_stats")) { atomic_store(&g_pool_wait_dump,1); return; }
     if (!strcmp(name, "pool_wait_trace")) { atomic_store(&g_pool_wait_trace, v < 0 ? 0 : v > 16 ? 16 : v); MLOG("[flag] pool_wait_trace = %d waits", atomic_load(&g_pool_wait_trace)); return; }
     if (!strcmp(name, "draw_barriers")) {
-        if (!oot_bar_allowed() || (v != 0 && v != 1)) { MLOG("[flag] draw_barriers requires OOT Mac and 0|1"); return; }
+        if (!oot_bar_allowed() || (v != 0 && v != 1)) { MLOG("[flag] draw_barriers requires OOT or TOTK 1.4.3 on the Mac and 0|1"); return; }
         atomic_store_explicit(&g_oot_bar_request, v, memory_order_relaxed);
         MLOG("[flag] draw_barriers = %d (next submission; candidate)", v); return;
     }
@@ -18835,6 +18841,11 @@ static void oot_bar_native(uint32_t bits) {
     if (g_oot_bar_probe_negative != 1) { g_oot_bar_pending = 1; g_oot_bar_pending_bits |= bits; }   // ~0u (unknown) stays unknown
     if (g_oot_bar_mode && g_enc) {
         if (g_oot_bar_writes) { rp_end(); g_oot_bar_splits++; }
+        /* 2026-11-18: the open pass began with no consumer barrier, so its later draws are not ordered after the earlier
+           passes' fragment work. A primitive-order barrier asks for that order: end the pass here, and the pending
+           bits give the next pass its full start barrier. */
+        else if (g_oot_bar_pass && !g_oot_bar_begin_mode && (bits & (NVN_BARRIER_ORDER_PRIMITIVES_BIT | NVN_BARRIER_ORDER_INDIRECT_DATA_BIT)) &&
+                 g_oot_bar_probe_negative != 4) { rp_end(); g_oot_bar_prim_splits++; }
         else g_oot_bar_order = 1;
     }
 }
