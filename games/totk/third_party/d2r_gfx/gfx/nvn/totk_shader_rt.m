@@ -50,6 +50,44 @@ extern char **environ;
 static pthread_mutex_t g_rt_lock = PTHREAD_MUTEX_INITIALIZER;
 static NSMutableDictionary<NSString *, NSMutableArray<NSDictionary *> *> *g_variants;
 static NSMutableSet<NSString *> *g_msl_checked;
+#if !defined(GAME_BOTW)
+/* TOTK (2026-11-18, owner: "constant and random fps drop with gpu load drop"): a variant whose shader is loaded needs no
+   first-use check. variant_lookup read the variant's Metal source from disk and searched it at the first draw that took
+   the variant, on the submit thread: 53 of 161 long submit frames of owner play, 3.7 ms each in the middle and up to 23
+   (run owner-ss1). Every one of those variants had its shader loaded already by the warm-up (no shader load in those
+   frames), and a load reads the same source and gets the entry function from its compiled library, so the source is
+   there and compiles. shader_load names such a variant here; one dropped later (seed_forget, totk_rt_variant_broken) is
+   taken out again. The set has its own lock: a translation holds g_rt_lock for tens of ms (totk_rt_variant), and the
+   warm-up's shader loads must not wait for it. Not for BOTW; flag msl_loaded 0 / 1, TOTK_MSL_LOADED=0 off. */
+static NSMutableSet<NSString *> *g_msl_loaded; static os_unfair_lock g_msl_loaded_lk = OS_UNFAIR_LOCK_INIT;   // g_msl_loaded_lk (taken last, also under g_rt_lock)
+static _Atomic int g_msl_loaded_on = 1;
+static uint64_t g_msl_reads, g_msl_read_ns, g_msl_passes;   // g_rt_lock
+void totk_rt_msl_loaded_set(int on) { atomic_store(&g_msl_loaded_on, on != 0); }
+void totk_rt_variant_loaded(NSString *key) {   // nvn_mtl.m shader_load: this runtime variant's shader is loaded from a whole source
+    if (![key hasSuffix:@"_b"]) return;
+    NSString *variant = [key substringToIndex:key.length - 2];
+    os_unfair_lock_lock(&g_msl_loaded_lk);
+    if (!g_msl_loaded) g_msl_loaded = [NSMutableSet set];
+    [g_msl_loaded addObject:variant];
+    os_unfair_lock_unlock(&g_msl_loaded_lk);
+}
+static int msl_loaded_has(NSString *variant) {
+    os_unfair_lock_lock(&g_msl_loaded_lk); int has = [g_msl_loaded containsObject:variant]; os_unfair_lock_unlock(&g_msl_loaded_lk);
+    return has;
+}
+static void msl_loaded_drop(NSString *variant) {
+    os_unfair_lock_lock(&g_msl_loaded_lk); [g_msl_loaded removeObject:variant]; os_unfair_lock_unlock(&g_msl_loaded_lk);
+}
+static void msl_check_log(void) {   // g_rt_lock held
+    LOG("[shader] first-use source checks: %llu read in %.1f ms, %llu passed without a read (shader loaded)",
+        (unsigned long long)g_msl_reads, g_msl_read_ns / 1e6, (unsigned long long)g_msl_passes);
+}
+static int msl_loaded_on(void) {
+    static int env = -1;
+    if (env < 0) { const char *e = getenv("TOTK_MSL_LOADED"); env = !(e && !strcmp(e, "0")); if (!env) atomic_store(&g_msl_loaded_on, 0); }
+    return atomic_load_explicit(&g_msl_loaded_on, memory_order_relaxed);
+}
+#endif
 typedef struct { FILE *in, *out; } rt_svc;   // one translator service process
 /* The iPhone / iPad build that links the translator (TOTK_DEVICE_XLATE, build_ipa.py: games/totk/prebuilt/ios-arm64/
    libtotk_xlate.a, the Mac's totk_xlate service as a NativeAOT static library, LibExports.cs): no process can be started
@@ -425,8 +463,22 @@ static NSString *variant_lookup(NSString *shader, NSDictionary *answers) {
         NSString *found = v[@"variant"];
         if (!g_msl_checked) g_msl_checked = [NSMutableSet set];
         BOOL checked = [g_msl_checked containsObject:found];
+#if !defined(GAME_BOTW)
+        if (!checked && msl_loaded_on() && msl_loaded_has(found)) {   // its shader is loaded: see g_msl_loaded
+            [g_msl_checked addObject:found];
+            if (++g_msl_passes % 500 == 1) msl_check_log();
+            return found;
+        }
+        uint64_t r0 = checked ? 0 : clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+#endif
         NSString *msl = checked ? nil :
             totk_rt_text(totk_rt_file([found stringByAppendingString:@"_b.metal"]));
+#if !defined(GAME_BOTW)
+        if (!checked) {
+            g_msl_read_ns += clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - r0;
+            if (++g_msl_reads % 100 == 1) msl_check_log();
+        }
+#endif
         /* missing, empty (a translation cut short: 0 bytes, 2026-10-30) or previously un-compilable: translated again */
         if (!checked && (!msl || msl.length < 64 || [msl containsString:@"double "] || [msl containsString:@"unsupported_GLSLstd450"])) {
             [vs removeObjectAtIndex:i];
@@ -880,6 +932,9 @@ static void seed_forget(NSString *shader, NSString *variant) {
     for (NSString *end in @[@"_b.metal", @"_b.json", @"_b.metallib"])
         unlink([totk_rt_dir() stringByAppendingPathComponent:[variant stringByAppendingString:end]].fileSystemRepresentation);
     [g_msl_checked removeObject:variant];
+#if !defined(GAME_BOTW)
+    msl_loaded_drop(variant);
+#endif
     if (g_seed_dropped++ < 8) LOG("[seed] %s: made from another request than this runtime's (or before requests were kept): translated again", variant.UTF8String);
 }
 /* Seed runs (seed_verify): the variant the index found is kept when this runtime, asked for the answers it was made for,
@@ -965,6 +1020,9 @@ void totk_rt_variant_broken(NSString *key) {
     NSMutableArray *vs = variants_of(shader);
     for (NSUInteger i = vs.count; i-- > 0;) if ([vs[i] isKindOfClass:NSDictionary.class] && [vs[i][@"variant"] isEqual:variant]) [vs removeObjectAtIndex:i];
     [g_msl_checked removeObject:variant];
+#if !defined(GAME_BOTW)
+    msl_loaded_drop(variant);
+#endif
     pthread_mutex_unlock(&g_rt_lock);
 }
 /* A row of this device's warm-up lists with its variants put on the app's own (totk_variant_rows.h): the one a draw takes

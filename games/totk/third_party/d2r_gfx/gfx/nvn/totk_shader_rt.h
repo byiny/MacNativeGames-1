@@ -46,6 +46,10 @@ void totk_rt_prefetch(NSArray<NSArray *> *asks);   /* a seed run: (shader, answe
    cached ones were kept and made again (totk_shader_rt.m seed_verified). */
 NSArray<NSString *> *totk_rt_seed_verified(uint64_t *kept, uint64_t *dropped);
 void totk_rt_variant_broken(NSString *key);   // shader_load found it unusable: translated again at its next use
+#if !defined(GAME_BOTW)
+void totk_rt_variant_loaded(NSString *key);   // shader_load loaded it from a whole source: its first use reads no source again
+void totk_rt_msl_loaded_set(int on);          // flag msl_loaded
+#endif
 NSString *totk_rt_portable_variant(NSString *name);   // "<variant>_b" as another player's build names it (pipeline contributions)
 int totk_rt_contrib_on(void);                       // a contribution file is kept (TOTK_SHADER_CONTRIB set, seed on)
 void totk_rt_contrib_line(NSString *line);           // one row into the contribution file (totk_shader_contrib.h)

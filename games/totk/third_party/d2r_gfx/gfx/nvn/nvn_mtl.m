@@ -4211,6 +4211,7 @@ void dm_gfx_set_flag(const char *name, int v) {
         atomic_store(!strcmp(name, "chunk_first") ? &g_chunk_first_request : &g_chunk_size_request, v);
         MLOG("[flag] %s = %d (next submission)", name, v); return;
     }
+    if (!strcmp(name, "msl_loaded")) { totk_rt_msl_loaded_set(v); MLOG("[flag] msl_loaded = %d", v != 0); return; }
     if (!strcmp(name, "usnap_index")) { atomic_store(&g_usnap_index_on, v != 0); MLOG("[flag] usnap_index = %d", v != 0); return; }
     if (!strcmp(name, "usnap_index_check")) { atomic_store(&g_usnap_index_check, v != 0); MLOG("[flag] usnap_index_check = %d", v != 0); return; }
     if (!strcmp(name, "vertex_streams")) { atomic_store(&g_vertex_streams_on, v != 0); MLOG("[flag] vertex_streams = %d", v != 0); return; }
@@ -8391,6 +8392,9 @@ static int plib_on(void) {
 #endif
 }
 static NSMutableDictionary<NSString *, id> *g_plib;   // variant key -> NSNull while it compiles, its NvShader once compiled (a failed one is removed)
+#if !defined(GAME_BOTW)
+    if (rt && full.length >= 64) totk_rt_variant_loaded(pc);   // its first use reads no source again (totk_shader_rt.m g_msl_loaded)
+#endif
 static pthread_mutex_t g_plib_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_plib_cv = PTHREAD_COND_INITIALIZER;
 static uint64_t g_plib_kicked, g_plib_taken, g_plib_waits, g_plib_purges;
 static _Atomic uint64_t g_plib_wait_ns;   // statistics line of pso_predict_rest
