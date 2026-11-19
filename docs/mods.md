@@ -402,6 +402,16 @@ game's own icons, which already name its buttons. The mod replaces the seven `Fo
 `Pack/Bootup.pack` (whose `Layout/Common.sblarc` holds the guide); the layouts keep their size, so no size table is
 needed, but another mod that replaces `Pack/Bootup.pack` cannot be used with it.
 
+Code mods at launch: a `botw190-code.pchtxt` (or `botw160-code.pchtxt`) beside the `mods/<version>` folder is applied at the next
+start as `TOTK_PCHTXT` would be (the log says `[launcher] code mods: <path>`); a `TOTK_PCHTXT` in the environment wins. `settings.txt` takes
+`MNG_` and `BOTW_` names as well as `TOTK_` ones.
+
+An app for a Mac with no Python or repo: `build_app.py --bundle-python` puts a pruned Python 3.14 and fontTools into the app (about 60 MB) so
+the launcher makes the prompts there, and writes `Contents/Resources/Install Mods.command`, which makes the `manifest.tsv` of
+`mods/botw190` with that Python. `--mac-gpu applegpu_g14g` (repeat for more) also compiles the pipeline archive of another Mac's GPU
+on the build Mac, so that Mac compiles less at its first start (pipelines the archive lacks are compiled there); one metal-tt refuses is left out and the build goes on. An app with
+`Contents/Resources/ui-pack` uses it unless `MNG_UI_PACK_DIR` is set (`MNG_UI_PACK=0` turns the pack off).
+
 ### Sharp UI texture pack (Breath of the Wild 1.9.0 and 1.6.0, Tears of the Kingdom 1.4.3)
 
 The games draw their UI from small textures (48x48 and 72x72 button and icon masks, colour icons) that the 3456x1944 picture
@@ -491,7 +501,13 @@ A Breath of the Wild 1.6.0 or 1.9.0 app draws the prompts itself, with no tool t
 | Xbox | Xbox, by position |
 | PlayStation | PlayStation, by position |
 | Switch | the game's own Switch icons, traced sharp at 2x or more (at 1x the game's own, with no set made) |
-| auto | the controller connected at start; with none, the last one the game saw (`controller-detected.txt`). Xbox and other controllers: Xbox; DualSense and DualShock: PlayStation; Nintendo controllers and no controller yet: Switch. `TOTK_FACE_BUTTONS=label` draws them by label |
+| auto | the controller connected at start; with none, the last one the game saw (`controller-detected.txt`). Xbox and other controllers: Xbox; DualSense and DualShock: PlayStation; Nintendo controllers and no controller yet: keyboard (key caps, below). `TOTK_FACE_BUTTONS=label` draws them by label |
+| keyboard | key caps of the keys in your `keyboard.txt` (the default layout without it), at any scale |
+
+The keyboard style (`botw_prompts.py --style keyboard`) is picked in this order: `TOTK_BUTTON_ICONS_STYLE=keyboard` in the environment
+or in `settings.txt` (no controller is looked for); `keyboard` written by hand in `controller-type.txt`; or auto with no controller connected
+now and none ever seen. A connected or remembered controller keeps its own icons. The set's name in the log is `keyboard`; a new
+`keyboard.txt` makes a new set at the next start.
 
 The icons follow your `controls.txt` too: each prompt shows the button you press on that controller, by its own name for
 each position (by position, `south` is Xbox A or Cross). The launcher draws them at the size of the main display, from 1x to 4x.
@@ -524,7 +540,7 @@ After a move to another display, the icons of its size also show from the next s
   (the A prompt shows Xbox Y while north does A). The stick press glyphs stay the game's own, swapped when `controls.txt`
   swaps the sticks. With the icon kit present, upstream's live prompt overlay is off by default (`TOTK_PROMPT_ICONS=0`;
   `settings.txt` or the environment still turn it on). With no controller ever seen, the prompts are Xbox. There is no keyboard
-  prompt set any more. Check a set with `games/totk/scripts/dev/prompt_sheet.py`.
+  prompt set any more (Tears of the Kingdom only; Breath of the Wild has one, see "Automatic icons"). Check a set with `games/totk/scripts/dev/prompt_sheet.py`.
 - Controller pictures (W1f, Tears of the Kingdom 1.4.3): the same tool also redraws the three controller pictures of the
   pause menu page "Basic controls" and of the ability guides, `Controller_{Console,Grip,Pro}^w`, and their shadows, in the
   common layout archive (`games/totk/scripts/totk_controller_art.py`; BC5 in place, so no file grows). The pad is the Xbox
@@ -1149,6 +1165,14 @@ Xbox 手柄时它不画任何东西：图标字体里已经有每个按钮，所
 就对应手柄上的按钮。mod 替换七个（1.6.0 为六个）`Font/Font_*.sbfarc` 和 `Pack/Bootup.pack`（其中的 `Layout/Common.sblarc` 存放操作提示）；
 布局大小不变，所以不需要资源大小表，但不能和另一个替换 `Pack/Bootup.pack` 的 mod 一起使用。
 
+启动时的代码模组：`mods/<版本>` 目录旁的 `botw190-code.pchtxt`（或 `botw160-code.pchtxt`）会在下次启动时像 `TOTK_PCHTXT` 一样应用
+（日志写 `[launcher] code mods: <路径>`）；环境里已有 `TOTK_PCHTXT` 时以它为准。`settings.txt` 除 `TOTK_` 名字外也接受 `MNG_` 和 `BOTW_` 名字。
+
+给没有 Python 也没有仓库的 Mac 用的 App：`build_app.py --bundle-python` 把精简的 Python 3.14 和 fontTools（约 60 MB）放进 App，启动器在那台 Mac 上就能生成按键提示；
+同时写入 `Contents/Resources/Install Mods.command`，用这个 Python 生成 `mods/botw190` 的 `manifest.tsv`。`--mac-gpu applegpu_g14g`（可重复）在构建用的 Mac 上
+再为另一种 Mac 的 GPU 编译管线存档，那台 Mac 首次启动要编译的管线因此减少（存档里没有的仍在那台 Mac 上编译）；metal-tt 拒绝的会被略过，构建继续。App 里有 `Contents/Resources/ui-pack` 时默认使用它，
+除非设了 `MNG_UI_PACK_DIR`（`MNG_UI_PACK=0` 关闭）。
+
 ### 高清界面贴图包（旷野之息 1.9.0 和 1.6.0，王国之泪 1.4.3）
 
 游戏的界面用小贴图（48x48 和 72x72 的按键、图标遮罩，以及彩色图标），3456x1944 的画面把它们放大约 2 倍，边缘因此发虚。
@@ -1224,7 +1248,12 @@ ContourPy（BSD-3-Clause）追踪拟合场的轮廓，像素边界由本项目�
 | Xbox | Xbox，按位置 |
 | PlayStation | PlayStation，按位置 |
 | Switch | 游戏自己的 Switch 图标，2x 及以上时描摹成清晰的大图（1x 时就用游戏原图，不生成图标包） |
-| 自动 | 启动时连接的手柄；没有时用游戏上次见到的手柄（`controller-detected.txt`）。Xbox 和其他手柄：Xbox；DualSense 和 DualShock：PlayStation；任天堂手柄和还没连过手柄时：Switch。`TOTK_FACE_BUTTONS=label` 时按标签绘制 |
+| 自动 | 启动时连接的手柄；没有时用游戏上次见到的手柄（`controller-detected.txt`）。Xbox 和其他手柄：Xbox；DualSense 和 DualShock：PlayStation；任天堂手柄：Switch；没有连接过任何手柄：键盘（见下）。`TOTK_FACE_BUTTONS=label` 时按标签绘制 |
+| 键盘 | `keyboard.txt` 里按键的键帽（没有该文件时用默认布局），任何倍数都可用 |
+
+键盘风格（`botw_prompts.py --style keyboard`）按这个顺序选：环境变量或 `settings.txt` 里的 `TOTK_BUTTON_ICONS_STYLE=keyboard`（不检查手柄）；
+手写在 `controller-type.txt` 里的 `keyboard`；或自动模式下当前没有连接手柄、也从没见过手柄。已连接或记住的手柄保持自己的图标。日志里这套图标的名字是 `keyboard`；
+`keyboard.txt` 改了，下次启动会生成新的一套。
 
 图标也跟随你的 `controls.txt`：每个提示显示在这个手柄上实际要按的按键，用这个手柄自己对每个位置的叫法（按位置映射时，`south` 是 Xbox
 的 A 或 PlayStation 的 Cross）。启动器按主显示器的尺寸绘制图标，取 1x 到 4x。

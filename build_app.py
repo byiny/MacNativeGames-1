@@ -2286,14 +2286,89 @@ ICON_KIT_FILES = (
     'totk/scripts/prepare_shader_seed.py', 'totk/scripts/prompt_assets.py', 'totk/scripts/prompt_layout.py', 'totk/scripts/sarc_repack.py',
     'totk/scripts/shader_list.py', 'totk/scripts/totk_controller_art.py', 'totk/scripts/totk_prompt_art.py',
     'botw/scripts/botw_controller_art.py', 'botw/scripts/botw_formats.py', 'botw/scripts/botw_prompts.py')
+# Under the repo root, not games/: the key caps' labels (botw_prompts.py --style keyboard reads keyboard.txt with tools/builder/keyboard_layout.py,
+# which imports only the standard library). The kit folder is that root for the scripts, so they sit at the same paths.
+ICON_KIT_REPO_FILES = ('tools/builder/__init__.py', 'tools/builder/keyboard_layout.py')
 
 
-def button_icons_kit(tree, res, version, game):
+# --bundle-python: the uv CPython 3.14 inside the app (Contents/Resources/python) and the kit's fontTools in button-icons/site, so a Mac
+# with no Python or repo makes the prompts at start and runs Install Mods.command. Copied with its own ad hoc signatures, which sign_app
+# seals as plain resources (checked 2026-11-19 on a dummy app: codesign --verify --deep --strict passes, also after the app was moved).
+BUNDLE_PYTHON_REL = 'Contents/Resources/python/bin/python3.14'      # kit.txt python=, relative to the app
+BUNDLE_SITE_REL = 'Contents/Resources/totk/button-icons/site'       # kit.txt pythonpath=
+BUNDLE_PYTHON_PRUNE = ('lib/python3.14/test', 'lib/python3.14/idlelib', 'lib/python3.14/tkinter', 'lib/python3.14/ensurepip',
+                       'lib/python3.14/turtledemo', 'lib/python3.14/site-packages', 'lib/python3.14/lib-dynload/_tkinter.cpython-314-darwin.so',
+                       'include', 'share', 'lib/pkgconfig', 'lib/libpython3.14.dylib', 'lib/libtcl9.0.dylib', 'lib/libtcl9tk9.0.dylib',
+                       'lib/tcl9', 'lib/tcl9.0', 'lib/tk9.0', 'lib/itcl4.3.8', 'lib/thread3.0.6',
+                       'bin/idle3', 'bin/idle3.14', 'bin/pip', 'bin/pip3', 'bin/pip3.14', 'bin/pydoc3', 'bin/pydoc3.14',
+                       'bin/python3.14-config', 'bin/python3-config')
+
+INSTALL_MODS_COMMAND = '''#!/bin/bash
+# Make the manifest of the RomFS mods in the mods folder of this app (docs/mods.md), with the Python inside the app.
+APP="$(cd "$(dirname "$0")/../.." && pwd)"
+KIT="$APP/Contents/Resources/totk/button-icons"
+MODS="$HOME/Library/Application Support/MacNativeGames/BotW/mods/{version}"
+if [ ! -d "$MODS" ]; then
+    echo "Put the mod's files in $MODS (under their RomFS paths), then run this again."
+    mkdir -p "$MODS" && open "$MODS"
+    read -n 1 -s -r -p "Press any key to close."; exit 1
+fi
+export PYTHONPATH="$KIT/site" PYTHONDONTWRITEBYTECODE=1
+"$APP/{python}" "$KIT/games/totk/scripts/make_mod_manifest.py" "$MODS" --app "$APP" --version {version}
+status=$?
+echo
+if [ $status -eq 0 ]; then echo "Done: the mods in $MODS are ready; start the game."; else echo "The manifest was not made (see above)."; fi
+read -n 1 -s -r -p "Press any key to close."
+exit $status
+'''
+
+
+def bundle_python_runtime(tree, python_dir, site_dir, logs):
+    """Clone the uv-managed CPython 3.14 of the work folder's .venv into `python_dir` without what the kit does not use
+    (BUNDLE_PYTHON_PRUNE), and install the fontTools of requirements.txt into `site_dir` (uv pip install --target, with its
+    bytecode, so a start writes nothing into the sealed app). The interpreter links system libraries only (checked with otool)."""
+    python = (tree / '.venv/bin/python').resolve()
+    root = python.parent.parent
+    if python.name != 'python3.14' or not (root / 'lib/python3.14/lib-dynload').is_dir():
+        raise BuildError(f'--bundle-python: {python} is not a CPython 3.14 install of uv (uv python install 3.14)')
+    links = [line.split()[0] for line in subprocess.run(['otool', '-L', python], capture_output=True, text=True).stdout.splitlines()[1:]]
+    if any(not (link.startswith(('/usr/lib/', '/System/Library/')) or link.startswith('@')) for link in links):
+        raise BuildError(f'--bundle-python: {python} links {", ".join(links)}; it would not run on a Mac with no Python')
+    requirement = next((line.split('#')[0].strip() for line in (tree / 'requirements.txt').read_text().splitlines()
+                        if line.lower().startswith('fonttools')), 'fonttools')
+    if python_dir.exists():
+        remove_tree(python_dir)
+    python_dir.parent.mkdir(parents=True, exist_ok=True)
+    if not clonefile(root, python_dir):   # an APFS clone; the tree keeps its signatures
+        shutil.copytree(root, python_dir, symlinks=True)
+    for rel in BUNDLE_PYTHON_PRUNE:
+        target = python_dir / rel
+        if target.is_dir() and not target.is_symlink():
+            remove_tree(target)
+        else:
+            target.unlink(missing_ok=True)
+    for link in (python_dir / 'bin').iterdir():   # python, python3 -> python3.14; no link may point out of the bundle
+        if link.is_symlink() and Path(os.readlink(link)).is_absolute():
+            raise BuildError(f'--bundle-python: {link} points outside the app')
+    (python_dir / 'lib/python3.14/site-packages').mkdir()
+    if site_dir.exists():
+        remove_tree(site_dir)
+    uv = shutil.which('uv', path=os.pathsep.join(TOOL_PATHS + [str(Path.home() / '.local/bin')]))
+    if not uv:
+        raise BuildError('--bundle-python: uv not found (it installs fontTools into the app): https://docs.astral.sh/uv/getting-started/installation/')
+    run([uv, 'pip', 'install', '-q', '--python', python, '--target', site_dir, '--compile-bytecode', requirement], logs / 'bundle-site.log')
+    for rel in ('bin', 'share'):   # scripts with this Mac's Python in their first line
+        if (site_dir / rel).is_dir():
+            remove_tree(site_dir / rel)
+
+
+def button_icons_kit(tree, res, version, game, *, bundle_python=False, logs=None):
     """The button icon tools inside the app (Contents/Resources/totk/button-icons, app/launcher.m button_icons): at each start
     the launcher makes, once, the prompts for the controller type, face mode and controls.txt in use (docs/mods.md). The
     scripts keep the repo layout (games/botw/scripts finds the shared ones at ../../totk/scripts), and kit.txt names the work
     folder's Python (fontTools: requirements.txt), the tool and an id over the scripts and the RomFS the app plays, so a
-    set made for an earlier build is never loaded."""
+    set made for an earlier build is never loaded. With `bundle_python` the app carries that Python and fontTools itself
+    (bundle_python_runtime), kit.txt names both relative to the app (python=, pythonpath=) and Install Mods.command is written."""
     kit = res / 'button-icons'
     digest = hashlib.sha256()
     for path in (tree.parent / name for name in ICON_KIT_FILES):
@@ -2301,12 +2376,23 @@ def button_icons_kit(tree, res, version, game):
         (kit / rel).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(path, kit / rel)
         digest.update(f'{rel}\n'.encode() + path.read_bytes())
+    for rel in ICON_KIT_REPO_FILES if game == 'botw' else ():   # the Tears of the Kingdom kit stays as it was
+        (kit / rel).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(REPO / rel, kit / rel)
+        digest.update(f'{rel}\n'.encode() + (REPO / rel).read_bytes())
     romfs = tree / f'extracted/{version}'
     digest.update((romfs / 'romfs/runtime-index.bin').read_bytes())
     for manifest in sorted(romfs.glob('romfs-patches*/**/manifest.tsv')) or ['none']:   # Breath of the Wild has no RomFS overlays
         digest.update(manifest.read_bytes() if isinstance(manifest, Path) else b'none')
     tool = 'games/botw/scripts/botw_prompts.py' if game == 'botw' else 'games/totk/scripts/make_button_icons.py'
-    (kit / 'kit.txt').write_text(f'python={tree.resolve() / ".venv/bin/python"}\ntool={tool}\nid={digest.hexdigest()}\n')
+    python = f'python={tree.resolve() / ".venv/bin/python"}\n'
+    if bundle_python:
+        bundle_python_runtime(tree, res.parent / 'python', kit / 'site', logs)
+        python = f'python={BUNDLE_PYTHON_REL}\npythonpath={BUNDLE_SITE_REL}\n'
+        command = res.parent / 'Install Mods.command'
+        command.write_text(INSTALL_MODS_COMMAND.format(version=version, python=BUNDLE_PYTHON_REL))
+        command.chmod(0o755)
+    (kit / 'kit.txt').write_text(f'{python}tool={tool}\nid={digest.hexdigest()}\n')
 
 
 def write_main_build_id(nso, target):
@@ -2328,7 +2414,8 @@ def app_modules(version):
     return [f'rewritten/{version}/{name}' for name in sorted(VERSIONS[version]['rewritten_sha256'])]
 
 
-def step_app(tree, out, logs, *, version="v0", game='totk', button_icons=False, game_data='app', game_data_folder=None, native_4k=False, native_5k=None):
+def step_app(tree, out, logs, *, version="v0", game='totk', button_icons=False, game_data='app', game_data_folder=None, native_4k=False, native_5k=None,
+             bundle_python=False):
     expected = VERSIONS[version]
     app_name, bundle_id, executable = APPS[game]
     tmp = out.with_name(out.name + '.partial')
@@ -2346,8 +2433,12 @@ def step_app(tree, out, logs, *, version="v0", game='totk', button_icons=False, 
     for rel in (f'extracted/{version}/romfs-patches', f'extracted/{version}/romfs-patches-out', 'extracted/firmware/shared-fonts'):
         if (tree / rel).is_dir():   # Breath of the Wild has no RomFS overlays
             copy_tree(tree / rel, res / rel)
+    if bundle_python and game != 'botw':   # app/launcher.m reads the relative kit.txt paths under GAME_BOTW only
+        raise BuildError('--bundle-python is for Breath of the Wild')
     if button_icons:
-        button_icons_kit(tree, res, version, game)
+        button_icons_kit(tree, res, version, game, bundle_python=bundle_python, logs=logs)
+    elif bundle_python:
+        say('4/4 app: --bundle-python bundles nothing without the button icon kit (--button-icons)')
     botw_5k = game == 'botw' and native_5k_enabled('macos', version, native_5k, native_4k)
     if game == 'botw' and (native_4k or botw_5k):   # the runtime sizes the code-owned heaps for this capability
         (res / f'extracted/{version}/native-4k').write_text('3840x2160\n')   # game_patches_botw.c native_4k_app
@@ -2395,6 +2486,28 @@ def step_app(tree, out, logs, *, version="v0", game='totk', button_icons=False, 
 PAR_SCHEMA = 6   # games/totk/third_party/d2r_gfx/gfx/nvn/totk_pipeline_archive.h PAR_SCHEMA
 
 
+def pipeline_owners(made):
+    """[(<name>.keys file, its keys that no later file lists again)] of the pipeline-archive mode's files in `made`, oldest first,
+    the files with no such key left out: each key belongs to one file, the one the tool itself takes (totk_pipeline_archive_publish.h
+    par_pub_scan: the key lists oldest first by modification time, then by name; a later file wins a key both list). A pipeline
+    written again (par_stale) stays listed in its old file, which keeps its other keys; until 2026-11-15 the index listed such a
+    key twice, the old file first by name, and the game takes a key's first row (par_load_prebuilt): it used the stale pipeline,
+    which Metal refused (14 of a quick App's 124 mesh pipelines compiled again at every start)."""
+    batches = sorted((p.with_suffix('.keys') for p in made.glob('*.metalarchive') if p.with_suffix('.keys').is_file()),
+                     key=lambda k: (k.stat().st_mtime, k.stem))
+    owner = {}
+    for keys in batches:
+        for key in keys.read_text().split('\n'):
+            if key:
+                owner[key] = keys.stem
+    owned = []
+    for keys in batches:
+        mine = [key for key in keys.read_text().split('\n') if key and owner.get(key) == keys.stem]
+        if mine:   # else every key it lists was written again later: the App does not carry it
+            owned.append((keys, list(dict.fromkeys(mine))))
+    return owned
+
+
 def mac_pipeline_files(made, seed, arch, chain):
     """The pipeline-archive mode's files (<name>.metalarchive + <name>.keys) into the app's build/pipelines (`seed`; the
     app's seed until 2026-11-03, now in the shader data bundle, which they would change on every build) as the runtime
@@ -2404,24 +2517,8 @@ def mac_pipeline_files(made, seed, arch, chain):
     seed.mkdir(parents=True, exist_ok=True)
     for old in seed.glob('pipelines-*'):
         old.unlink()
-    # Each key belongs to one file: the one the tool itself takes (totk_pipeline_archive_publish.h par_pub_scan: the key
-    # lists oldest first by modification time, then by name; a later file wins a key both list). A pipeline written again
-    # (par_stale) stays listed in its old file, which keeps its other keys; until 2026-11-15 the index listed such a key
-    # twice, the old file first by name, and the game takes a key's first row (par_load_prebuilt): it used the stale
-    # pipeline, which Metal refused (14 of a quick App's 124 mesh pipelines compiled again at every start).
-    batches = sorted((p.with_suffix('.keys') for p in made.glob('*.metalarchive') if p.with_suffix('.keys').is_file()),
-                     key=lambda k: (k.stat().st_mtime, k.stem))
-    owner = {}
-    for keys in batches:
-        for key in keys.read_text().split('\n'):
-            if key:
-                owner[key] = keys.stem
     index = []
-    for keys in batches:
-        mine = [key for key in keys.read_text().split('\n') if key and owner.get(key) == keys.stem]
-        if not mine:
-            continue   # every key it lists was written again later: the App does not carry it
-        mine = list(dict.fromkeys(mine))
+    for keys, mine in pipeline_owners(made):   # each key belongs to one file
         clone(keys.with_suffix('.metalarchive'), seed / f'pipelines-{arch}-{keys.stem}.metalarchive')
         index += [f'{key}\t{keys.stem}' for key in mine]
     if not index:
@@ -2439,7 +2536,64 @@ def mac_pipeline_files(made, seed, arch, chain):
     return len(index)
 
 
-def mac_pipelines(tree, res, version, logs, installed=None):
+def mac_target_sources(made, folder):
+    """The owners' files of pipeline_owners as device_pipelines.py --mac reads them: <name>.metalarchive cloned, <name>.keys holding
+    only the keys the file owns, so a key has one file in the target's index as in the host's. Returns the file count."""
+    if folder.exists():
+        remove_tree(folder)
+    folder.mkdir(parents=True)
+    owned = pipeline_owners(made)
+    for keys, mine in owned:
+        clone(keys.with_suffix('.metalarchive'), folder / f'{keys.stem}.metalarchive')
+        (folder / f'{keys.stem}.keys').write_text('\n'.join(mine) + '\n')
+    return len(owned)
+
+
+def mac_gpu_pipelines(tree, res, made, work, files, host_arch, mac_gpus, logs):
+    """--mac-gpu: the pipelines of this Mac's archive compiled with metal-tt for other Macs' GPUs (applegpu_g14g for an M2)
+    into `files`, beside the host's, by ios/tools/device_pipelines.py --sdk macosx (the one that does it for an iPhone): from
+    the owners' files of the host pass (mac_target_sources) and the compiled libraries the game loaded (--lib-map: their SHA-256
+    is what a pipeline script names). A pipeline that needs a library made at run time is left out (that Mac makes it on its
+    first start). `files` is a staging folder of the work folder, so the signed seed and bundles are never written. A GPU with no
+    compiled pipeline is left out whole, with no stamp; nothing here stops the build. Returns the pipelines per GPU compiled."""
+    done = {}
+    try:
+        sources = work / 'target-src'
+        n = mac_target_sources(made, sources)
+        libs = {hashlib.sha256(p.read_bytes()).hexdigest().upper(): str(p.resolve()) for p in sorted((res / 'build/shader-libs').glob('*.metallib'))}
+        (work / 'lib-map.json').write_text(json.dumps(libs))
+    except (BuildError, OSError, ValueError) as e:
+        say(f'   --mac-gpu: not done, the first start of those Macs fills it instead: {str(e).splitlines()[0] if str(e) else type(e).__name__}')
+        return done
+    for arch in dict.fromkeys(mac_gpus):
+        if arch == host_arch:
+            say(f'   --mac-gpu {arch}: this Mac\'s own GPU, already in the archive')
+            continue
+        log = logs / f'mac-pipelines-{arch}.log'
+        t0 = time.time()
+        try:
+            run([sys.executable, tree / 'ios/tools/device_pipelines.py', '--sdk', 'macosx', '--arch', arch, '--mac', sources,
+                 '--seed', res / 'build/shader-seed', '--lib-map', work / 'lib-map.json', '--out', files, '--cache', work / 'target-cache'], log)
+            report = last_json(log) or {}
+            mine = next((a for a in report.get('archs', []) if a.get('arch') == arch), {})
+        except (BuildError, OSError) as e:
+            report, mine = {}, {}
+            say(f'   --mac-gpu {arch}: metal-tt did not finish ({str(e).splitlines()[0] if str(e) else type(e).__name__}; see {log})')
+        if not mine.get('pipelines'):
+            for old in files.glob(f'pipelines-{arch}[-.]*'):   # no stamp, no files: that GPU fills its own
+                old.unlink()
+            say(f'   --mac-gpu {arch}: left out, no pipeline compiled ({report.get("library from source", 0)} of {n} files need a library made at run time)')
+            continue
+        done[arch] = mine['pipelines']
+        say(f"   --mac-gpu {arch}: {mine['pipelines']:,} pipelines in {mine.get('files', 0)} files in {time.time() - t0:.0f} s "
+            f"({report.get('no script', 0) + report.get('library from source', 0)} of {n} Mac files left out, {mine.get('failed', 0)} failed to compile)")
+    return done
+
+
+MAC_GPUS = []   # --mac-gpu, set by main(): mac_pipelines is called from step_app and from the update scripts, which add none
+
+
+def mac_pipelines(tree, res, version, logs, installed=None, mac_gpus=None):
     """The Mac's pipeline archive, made while packaging (user 2026-10-29: "mac的 管线 预热 和iPhone 一样 放在打包阶段做 不在app里做了"):
     the game binary's pipeline-archive mode (TOTK_PIPELINE_ARCHIVE_HOST=1) makes every pipeline of the warm-up lists from
     the libraries the game itself loads (the app's shader-libs) on this Mac's GPU, so the first start takes them from the
@@ -2499,6 +2653,8 @@ def mac_pipelines(tree, res, version, logs, installed=None):
     # install_app). `installed`: the app being replaced (update_runtime.py, shader_update.py, a rebuild over it), or None.
     files = work / 'files'
     n = mac_pipeline_files(work / 'cache/pipelines', files, arch, chain)
+    if n and (MAC_GPUS if mac_gpus is None else mac_gpus):   # staged in `files` too: the bundle below takes this Mac's and the others' together
+        mac_gpu_pipelines(tree, res, work / 'cache/pipelines', work, files, arch, MAC_GPUS if mac_gpus is None else mac_gpus, logs)
     app = res.parents[2]
     if not n:   # no archive: none in the app either, as before (its build/pipelines held no pipelines-* then)
         for old in (app / 'Contents/Helpers').glob('Pipelines-*.bundle'):
@@ -3151,6 +3307,13 @@ def parse_args(argv):
                     help='iOS: compile the pipeline archive on this Mac for this GPU (applegpu_g14p for an iPhone 14; repeat for '
                          'more; none: no archive). Default: the GPUs of the iPhones / iPads on the cable. The first start then '
                          'needs no fill before the title (about 10 minutes on an iPhone 14); the app is about 430 MB larger per GPU')
+    ap.add_argument('--bundle-python', action='store_true',
+                    help='Mac, with the button icon kit: carry a pruned uv Python 3.14 and fontTools in the app (about 60 MB), so a Mac with no Python '
+                         'makes the prompts at start (the keyboard style too) and runs Contents/Resources/Install Mods.command (docs/mods.md)')
+    ap.add_argument('--mac-gpu', action='append', metavar='ARCH',
+                    help='Mac: also compile the pipeline archive for this GPU on this Mac with metal-tt (applegpu_g14g for an M2; repeat for more), '
+                         'beside the archive of this Mac\'s GPU, so that Mac needs no fill before the title. One that metal-tt refuses is left out; '
+                         'the build goes on')
     ap.add_argument('--mac-game-data', choices=('app', 'library'), default='app',
                     help='Mac: carry the 16 GB RomFS image in the app (default), or keep it in ~/Library/Application Support/'
                          'MacNativeGames/<TOTK|BotW>/GameData/<version>, put there once (the app is then a few hundred MB, '
@@ -3228,6 +3391,9 @@ def main(argv):
     work, why = (args.work.expanduser().resolve(), 'given with --work') if args.work else default_work(out, 'totk')
     if out.suffix.lower() not in (('.ipa', '.app') if device_app else ('.app',)):   # iOS .app: unsigned folder for install_device.py
         raise BuildError(f'the {args.platform} output must end in {".ipa or .app" if device_app else ".app"}: {out}')
+    if device_app and (args.bundle_python or args.mac_gpu):
+        raise BuildError('--bundle-python and --mac-gpu are for a Mac app')
+    MAC_GPUS[:] = args.mac_gpu or []
     kind = input_kind(game)
     if kind not in ('xci', 'nsp'):
         raise BuildError('the base game must be an uncompressed XCI or NSP; NSZ is supported for update packages')
@@ -3357,7 +3523,8 @@ def main(argv):
             return
         step_app(tree, out, logs, version=version, game='botw', button_icons=True if args.button_icons is None else args.button_icons,
                  game_data=args.mac_game_data, game_data_folder=game_data_folder,
-                 native_4k=native_4k, native_5k=native_5k if args.native_5k is not None else (False if args.native_4k is False else None))
+                 native_4k=native_4k, native_5k=native_5k if args.native_5k is not None else (False if args.native_4k is False else None),
+                 bundle_python=args.bundle_python)
         run([LSREGISTER, '-f', out], logs / 'register-app.log')
         say('4/4 app: macOS checks the app once (seconds when this app folder was checked before, a few minutes for a new one)')
         t1 = time.time()
@@ -3449,7 +3616,7 @@ def main(argv):
         say_device_pipelines(logs)
     else:
         step_app(tree, out, logs, version=version, button_icons=bool(args.button_icons), game_data=args.mac_game_data, game_data_folder=game_data_folder,
-                 native_5k=False if args.native_4k is False else args.native_5k)
+                 native_5k=False if args.native_4k is False else args.native_5k, bundle_python=args.bundle_python)
     # Refresh an existing app's version, executable and signing identity before
     # the next Finder launch; the desktop alias keeps pointing to this bundle.
     if args.platform=='macos': run([LSREGISTER, '-f', out], logs / 'register-app.log')

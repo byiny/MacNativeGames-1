@@ -288,6 +288,10 @@ static void load_controller_type(void) {
     char path[4096], word[64] = {0};
     if (!setting_read("controller-type.txt", word, sizeof word, path, sizeof path)) return;
     int type = gamepad_type_parse(word);
+#ifdef GAME_BOTW
+    if (type < 0 && gamepad_word_is_keyboard(word)) {   /* the launcher's prompt icon style (app/launcher.m button_icons), no controller type */
+        fprintf(stderr, "[totk-input] controller type: auto, with the keyboard's prompt icons (%s)\n", path); return; }
+#endif
     if (type < 0) { fprintf(stderr, "[totk-input] %s: not a controller type (auto, xbox, playstation, switch); using auto\n", path); return; }
     atomic_store(&controllerType, type);
     fprintf(stderr, "[totk-input] controller type: %s (%s)\n", gamepad_type_name(type), path);

@@ -35,6 +35,12 @@ added to the entries of Layout/Common.blarc and Font/Font_*.bfarc. Scale 1 (the 
 texture pack ships one), that table is the one raised, each entry to the larger of the mod's size and the game's grown one, and
 the manifest names it as the original, so runtime/romfs.c loads these icons over the mod's table instead of leaving them out.
 
+With --style keyboard every prompt shows the key cap of the key that presses its button (a light rounded key with a dark label, as
+make_button_icons.py draws TOTK's): A B X Y, L R ZL ZR, + -, the stick presses and the d-pad from keyboard.txt (--bindings; the default layout
+of keyboard_map.h without it), the stick being moved as the keys bound to its directions (one cap, two, or W above A S D). A button
+with no key bound keeps the game's picture. The controller pictures and the action popup stay the game's; --face-buttons and --controls
+have no effect.
+
 Another game version may differ from 1.9.0: a texture that is missing or not the expected format or size, or a font file with no
 External_00.bffnt or an unexpected glyph sheet, is skipped with a note and stays the game's. With --scale above 1, a resource size
 table that is missing or lacks an entry for an archive that grows (or an archive that cannot grow) makes the whole run draw at
@@ -43,7 +49,7 @@ table that is missing or lacks an entry for an archive that grows (or an archive
 Needs Python 3.14 and fontTools (uv run --no-project --python 3.14 --with fonttools python botw_prompts.py ...). An existing Pack/Bootup.pack (with --scale above 1 also the
 resource size table) in the mod folder (another mod's, or an earlier run) is only overwritten with --replace.
 usage: botw_prompts.py <mod folder> (--app <Breath of the Wild.app> | --romfs <folder>) [--version botw190]
-                       [--style xbox|playstation|switch] [--face-buttons position|label] [--controls controls.txt] [--replace] [--keep-switch-pictures] [--scale 1..4] [--mods <folder>] [--preview picture.png]
+                       [--style xbox|playstation|switch|keyboard] [--face-buttons position|label] [--controls controls.txt] [--bindings keyboard.txt] [--mouse|--no-mouse] [--replace] [--keep-switch-pictures] [--scale 1..4] [--mods <folder>] [--preview picture.png]
 """
 import argparse
 import functools
@@ -61,7 +67,7 @@ import botw_formats as bf                                                       
 import botw_controller_art as art                                                # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'totk' / 'scripts'))
 from make_mod_manifest import APP_VERSIONS, read_index, write_manifest          # noqa: E402
-from prompt_layout import FACE_MODES, LayoutError, describe, prompt_controls    # noqa: E402
+from prompt_layout import FACE_MODES, SWITCH_LABEL, LayoutError, describe, prompt_controls    # noqa: E402
 
 PACK, LAYOUT, BNTX = 'Pack/Bootup.pack', 'Layout/Common.sblarc', 'timg/__Combined.bntx'
 FACE = {slot: f'Nt_KeyTex{slot.upper()}_00^d' for slot in 'abxy'}               # Switch button -> its texture
@@ -172,11 +178,8 @@ def grown_contour(points, d, miter=2.0):
     return out
 
 
-@functools.lru_cache(maxsize=None)     # the same drawers for every font archive, so render() below finds its pictures again
-def drawers_of(style, letters):
-    """pad control (and d-pad glyph code point, see DPAD_GLYPHS) -> (advance, draw) of the style's buttons: the drawings of
-    make_button_icons.py, with their letters from `letters.font` (the Switch system font)."""
-    style_parts(style)
+def style_glyphs(letters):
+    """make_button_icons.Glyphs on the Switch system font `letters.font`, for the letters the drawings of every style cut out."""
     import make_button_icons as mbi
     from fontTools.pens.recordingPen import RecordingPen
     from fontTools.pens.reverseContourPen import ReverseContourPen
@@ -205,8 +208,17 @@ def drawers_of(style, letters):
                 ink = [min(ink[0], *(p[0] for p in points)), min(ink[1], *(p[1] for p in points)),
                        max(ink[2], *(p[0] for p in points)), max(ink[3], *(p[1] for p in points))]
             return grown, tuple(ink) if grown.value else bounds, upm, advance + 2 * LETTER_STROKE * cap   # the growth keeps the gaps
+    return Glyphs([letters.font])
+
+
+@functools.lru_cache(maxsize=None)     # the same drawers for every font archive, so render() below finds its pictures again
+def drawers_of(style, letters):
+    """pad control (and d-pad glyph code point, see DPAD_GLYPHS) -> (advance, draw) of the style's buttons: the drawings of
+    make_button_icons.py, with their letters from `letters.font` (the Switch system font)."""
+    style_parts(style)
+    import make_button_icons as mbi
     make = {'xbox': mbi.xbox_drawers, 'playstation': mbi.playstation_drawers, 'switch': switch_drawers}[style]
-    g = Glyphs([letters.font])
+    g = style_glyphs(letters)
     drawers, dpads = make(g)
     sticks = {pad: drawer for pad, drawer in switch_drawers(g)[0].items() if pad in STICKS}     # where the game has no picture
     return {**drawers, **sticks, **dpads}
@@ -446,6 +458,117 @@ def plan_pictures(bntx, textures, controls, letters, style='xbox', scale=1):
     return new, notes
 
 
+KEY_NAMES = {'space': 'Space', 'return': 'Enter', 'escape': 'Esc', 'tab': 'Tab', 'backspace': 'Bksp', 'forward_delete': 'Del',
+             'shift': 'Shift', 'right_shift': 'RShift', 'control': 'Ctrl', 'right_control': 'RCtrl', 'option': 'Opt', 'right_option': 'ROpt',
+             'arrow_up': '↑', 'arrow_down': '↓', 'arrow_left': '←', 'arrow_right': '→', 'home': 'Home', 'end': 'End', 'page_up': 'PgUp',
+             'page_down': 'PgDn', 'grave': '`', 'minus': '-', 'equal': '=', 'left_bracket': '[', 'right_bracket': ']', 'backslash': '\\',
+             'semicolon': ';', 'quote': "'", 'comma': ',', 'period': '.', 'slash': '/', 'keypad_divide': 'K/', 'keypad_multiply': 'K*',
+             'keypad_minus': 'K-', 'keypad_plus': 'K+', 'keypad_period': 'K.', 'keypad_enter': 'KEnt',
+             'mouse_left': 'LMB', 'mouse_right': 'RMB', 'mouse_middle': 'MMB', 'mouse4': 'M4', 'mouse5': 'M5'}      # keyboard.txt input -> the label on its key
+KEY_PRESS = ('a', 'b', 'x', 'y', 'l', 'r', 'zl', 'zr', 'plus', 'minus', 'lstick', 'rstick')      # the Switch buttons a key presses
+KEY_TEXTURES = {**{name: slot for slot, name in FACE.items()}, 'Nt_KeyTexL_00^d': 'l', 'Nt_KeyTexZL_00^d': 'zl',
+                'Nt_KeyTexLSt_00^d': 0xE052, 'Nt_KeyTexLSt_01^d': 0xE05E, DPAD_TEXTURE: 0xE049}      # texture -> the drawing of its key (slot, or glyph code point)
+STICK_GLYPHS = (*(c for c in range(0xE050, 0xE060) if c not in (0xE056, 0xE057)), 0xE068)      # the stick being moved: its keys, in the order of make_button_icons.py
+
+
+def key_label(name):
+    """The label on the key of a keyboard.txt input: short (Shift, Enter, Esc, Opt, PgUp, K5, LMB), arrows as arrows."""
+    return KEY_NAMES.get(name) or ('K' + name[7:] if name.startswith('keypad_') else name.upper())
+
+
+def keyboard_controls(path=None, mouse=None):
+    """(action -> the label of the first key bound to it, or None when no key is; notes) for the keyboard.txt at `path` (the default
+    layout of keyboard_map.h without it), by tools/builder/keyboard_layout.py as make_button_icons.py reads it. A mouse button counts
+    when `mouse` says so (--mouse / --no-mouse: the launcher passes the game's mouse mode); with no word, only when the mouse.txt
+    beside the file says on (without a file, as the TOTK tool does, it does). A file with a bad line is ignored
+    as a whole, as the game does: the default layout shows, and a note says why."""
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2].parent))
+    from tools.builder.keyboard_layout import default_layout, read_layout
+    layout, notes = (read_layout(path) if path else default_layout()), []
+    if not layout.valid:
+        notes.append(f'{path}: {"; ".join(layout.problems)}; the game ignores it, so the default keys show')
+        layout = default_layout()
+    if mouse is None:
+        mouse = True if not path else (path.with_name('mouse.txt').is_file() and path.with_name('mouse.txt').read_text().strip() == 'on')
+    labels = {}
+    for action, inputs in layout.bindings.items():
+        inputs = [i for i in inputs if mouse or not i.startswith('mouse')]
+        labels[action] = key_label(inputs[0]) if inputs else None
+    return labels, notes
+
+
+@functools.lru_cache(maxsize=None)
+def keyboard_drawers(letters, keys):
+    """Switch button (KEY_PRESS) and glyph code point -> (advance, draw) of the key caps for `keys` (keyboard_controls as sorted
+    items): the drawings of make_button_icons.keyboard_style (a light key, its label cut out) with this tool's labels. A button
+    or glyph with a key unbound is left out (it keeps the game's picture). Moving a stick is the keys bound to it: one cap for
+    one direction, two for left and right or up and down, an inverted T (W above A S D) for the stick itself."""
+    import make_button_icons as mbi
+    g, label = style_glyphs(letters), dict(keys)
+    Y0, Y1 = mbi.Y0, mbi.Y1
+
+    def cap(text):      # one key; a long label on a wide, lower key
+        if len(text) == 1:
+            return 640, lambda pen: mbi.key(g, pen, 40, Y0, 600, Y1, text)
+        width = min(1000, 250 + 90 * len(text))      # a word key, a little wider than high, its label large (a narrow cell shows it small)
+
+        def draw(pen):
+            mbi.rounded(pen, 40, Y0 + 40, 40 + width, Y1 - 40, 110); g.hole(pen, text, 40 + width / 2, (Y0 + Y1) / 2, 250, width * 0.9)
+        return width + 80, draw
+
+    def pair(a, b, advance=960):
+        def draw(pen):
+            w = (advance - 80 - 50) / 2
+            mbi.key(g, pen, 40, Y0 + 60, 40 + w, Y1 - 60, a); mbi.key(g, pen, 40 + w + 50, Y0 + 60, advance - 40, Y1 - 60, b)
+        return advance, draw
+
+    def cluster(top, left, mid, right, advance=900):
+        def draw(pen):
+            gap = 24; w = (advance - 80 - 2 * gap) / 3; h = (Y1 + 40 - (Y0 - 40) - gap) / 2
+            bottom = Y0 - 40; upper = bottom + h + gap; xs = [40, 40 + w + gap, 40 + 2 * (w + gap)]
+            for text, (x, y) in ((top, (xs[1], upper)), (left, (xs[0], bottom)), (mid, (xs[1], bottom)), (right, (xs[2], bottom))):
+                mbi.key(g, pen, x, y, x + w, y + h, text, radius=w * 0.18, cap=h * 0.6)
+        return advance, draw
+    drawers = {action: cap(label[action]) for action in KEY_PRESS if label.get(action)}
+
+    def add(code, build, *actions):
+        texts = [label.get(action) for action in actions]
+        if all(texts):
+            drawers[code] = build(*texts)
+    add(0xE049, cluster, 'up', 'left', 'down', 'right')
+    for code, action in ((0xE060, 'up'), (0xE061, 'down'), (0xE062, 'left'), (0xE063, 'right')):
+        add(code, cap, action)
+    add(0xE064, lambda a, b: pair(a, b, 900), 'up', 'down')
+    add(0xE065, lambda a, b: pair(a, b, 900), 'left', 'right')
+    for base, prefix in ((0, 'move_'), (1, 'camera_')):      # the left stick, then the right one: the codes of both go in twos
+        for offset, build, names in ((0, cap, 'down'), (2, cap, 'up'), (4, pair, 'left right'), (8, cap, 'right'), (10, cap, 'left'),
+                                     (12, pair, 'up down'), (14, cluster, 'up left down right')):
+            add(0xE050 + base + offset, build, *(prefix + n for n in names.split()))
+    if 0xE05F in drawers:
+        drawers[0xE068] = drawers[0xE05F]
+    return drawers
+
+
+def keyboard_plan(bntx, textures, controls, letters, style='keyboard', scale=1):
+    """texture name -> new pixel rows (`scale` times the game's) for the style keyboard, and notes, as plan() does for the controller
+    styles: the key (keyboard_drawers; `controls` is keyboard_controls' labels) that drives the button of each of the 8 prompt
+    textures, fitted on the white shape of the game's picture. A button with no key bound, or a texture that is not as expected,
+    stays the game's with a note. The two stick textures show the keys that move the stick (up, and all four)."""
+    drawers = keyboard_drawers(letters, tuple(sorted(controls.items())))
+    new, notes = {}, []
+    for name, key in KEY_TEXTURES.items():
+        if key not in drawers:
+            notes.append(f'{name}: no key bound; the Switch icon stays')
+            continue
+        size = DPAD_SIZE if name == DPAD_TEXTURE else SIZE
+        try:
+            old = key_rows(bntx, textures, name, size)
+            new[name] = render(drawers[key], size * scale, enlarged((disc_box if key in FACE or name == DPAD_TEXTURE else bright_box)(old), scale))
+        except BAD_DATA as error:
+            notes.append(f'{name}: {error}; the Switch icon stays')
+    return new, notes
+
+
 def ring_edits(layout, inner, controls, spots=SPOT):
     """(offset, new bytes) edits of the layout archive `layout` (members `inner`) that move the ring and the dot of each hint box
     face button (panes N_A_00 to N_Y_00 of HINT) to the spot of the button the player presses for it (controls[slot]) on our
@@ -605,8 +728,8 @@ def make_pack(pack, controls, letters, style='xbox', pictures=True, scale=1):
     start = inner[BNTX][0]
     bntx = layout[start:inner[BNTX][1]]
     textures = bf.bntx_textures(bntx)
-    new, notes = plan(bntx, textures, controls, letters, style, scale)
-    pictures = pictures and style != 'switch'      # the game's own pictures are the Switch's
+    new, notes = (keyboard_plan if style == 'keyboard' else plan)(bntx, textures, controls, letters, style, scale)
+    pictures = pictures and style not in ('switch', 'keyboard')      # the game's own pictures are the Switch's; the keyboard style leaves them too
     drawn, more = plan_pictures(bntx, textures, controls, letters, style, scale) if pictures else ({}, [])
     if scale == 1:
         edits = [(start + textures[name].offset, bf.r8_image(bntx, textures[name], rows)) for name, rows in sorted(new.items())]
@@ -621,7 +744,7 @@ def make_pack(pack, controls, letters, style='xbox', pictures=True, scale=1):
     if HINT_PIECE in drawn or style == 'switch':      # our diamond or the game's: the rings of the hint boxes go to the buttons pressed
         moved, more_notes = ring_edits(layout, inner, controls, SPOT if HINT_PIECE in drawn else SWITCH_SPOT)   # offsets as the archive was
         edits, more = edits + moved, more + more_notes
-    popped, more_notes = popup_edits(layout, inner, controls, style, SWITCH_SPOT if style == 'switch' else SPOT)
+    popped, more_notes = ([], []) if style == 'keyboard' else popup_edits(layout, inner, controls, style, SWITCH_SPOT if style == 'switch' else SPOT)
     edits, more = edits + popped, more + more_notes
     spliced = bf.yaz0_splice(stream, layout, edits)
     new_pack = bf.sarc_replace(pack, LAYOUT, spliced)
@@ -680,13 +803,43 @@ def font_cells(font, sheet_rows, controls, letters, style='xbox', scale=1):
             draw(code, kind, disc_box, f'{slot} glyph')
         else:
             notes.append(f'{slot}: {kind or "nothing"} has no {brand} picture here; the Switch glyph stays')
-    if scale > 1:     # every other button glyph (a stick being moved, a button nothing drives) traced too, in every style
+    trace_rest(font, sheet_rows, new, scale)
+    return new, notes
+
+
+def trace_rest(font, sheet_rows, new, scale):
+    """Above scale 1 every other button glyph (a stick being moved, a button nothing drives) of the font is traced too, in every
+    style: into `new`."""
+    size, height = font.cell * scale, font.cell_height * scale
+    if scale > 1:
         for code in sorted(font.cells):
             if code not in new and SWITCH_TRACED[0] <= code < SWITCH_TRACED[1]:
                 old = font.get(sheet_rows, code)
                 if max(map(max, old)) > 128:
                     box = (0, 0, len(old[0]), len(old))
                     new[code] = traced(old, box, size, enlarged(box, scale), height)
+
+
+def keyboard_cells(font, sheet_rows, controls, letters, style='keyboard', scale=1):
+    """code point -> new upright cell for the style keyboard, and notes, as font_cells() does for the controller styles: the key
+    (keyboard_drawers) of A B X Y, L R ZL ZR, the stick presses, + and -, the d-pad glyphs and the stick being moved, fitted on the
+    place of the game's glyph (the disc of A B X Y, + and - and the d-pad, the white shape of every other glyph). A glyph whose key
+    is not bound stays the game's, with a note."""
+    drawers = keyboard_drawers(letters, tuple(sorted(controls.items())))
+    size, height, new, notes = font.cell * scale, font.cell_height * scale, {}, []
+    glyphs = [*((code, slot, disc_box) for slot, code in {**FONT_FACE, **FONT_MENU}.items()), *((code, slot, bright_box) for slot, code in FONT_SHAPE.items()),
+              *((code, code, disc_box) for code in DPAD_GLYPHS), *((code, code, bright_box) for code in STICK_GLYPHS)]
+    for code, key, find in glyphs:
+        if code not in font.cells:
+            continue
+        if key not in drawers:
+            notes.append(f'glyph {code:X}: no key bound; the Switch glyph stays')
+            continue
+        try:
+            new[code] = render(drawers[key], size, enlarged(find(font.get(sheet_rows, code)), scale), height)
+        except ValueError as error:     # no shape found: the glyph stays as it was
+            notes.append(f'glyph {code:X}: {error}; the Switch glyph stays')
+    trace_rest(font, sheet_rows, new, scale)
     return new, notes
 
 
@@ -710,7 +863,7 @@ def make_font(stream, controls, letters, style='xbox', scale=1):
                          f'{font.texture.width}x{font.texture.height} sheet')
     sheet = data[font.sheet_at:]
     rows = bf.bc4_read(sheet, font.texture)
-    new, notes = font_cells(font, rows, controls, letters, style, scale)
+    new, notes = (keyboard_cells if style == 'keyboard' else font_cells)(font, rows, controls, letters, style, scale)
     if scale > 1:
         big = []
         for row in rows:
@@ -782,7 +935,10 @@ def main():
     source.add_argument('--app', type=Path, help='the built Breath of the Wild.app')
     source.add_argument('--romfs', type=Path, help='a folder holding romfs.bin and runtime-index.bin')
     parser.add_argument('--version', choices=[v for v in APP_VERSIONS if v.startswith('botw')], help='the game version (default: the mod folder name)')
-    parser.add_argument('--style', choices=list(STYLES), default='xbox', help='the buttons to show: xbox (default), playstation or switch (the game\'s own names, sharp at --scale 2 and up)')
+    parser.add_argument('--style', choices=[*STYLES, 'keyboard'], default='xbox', help='the buttons to show: xbox (default), playstation, switch (the game\'s own names, sharp at --scale 2 and up) or keyboard (key caps of keyboard.txt; --face-buttons and --controls do not apply)')
+    parser.add_argument('--bindings', type=Path, help='your keyboard.txt (--style keyboard: the caps then show the keys you press; the default keys without it)')
+    parser.add_argument('--mouse', action=argparse.BooleanOptionalAction, default=None,
+                        help='--style keyboard: show mouse buttons on the caps (mouse mode on) or the next key bound (--no-mouse); default: the mouse.txt beside --bindings, on without a file')
     parser.add_argument('--face-buttons', choices=FACE_MODES, default='position',
                         help='how the controller\'s face buttons map (the runtime\'s TOTK_FACE_BUTTONS, or key 6): position (Xbox, PlayStation; default) or label (Switch)')
     parser.add_argument('--controls', type=Path, help='your controls.txt (the prompts then show the button you press)')
@@ -828,13 +984,21 @@ def main():
     if exists and not args.replace:      # checked before anything is written
         parser.error(f'{args.mod / exists[0]} already exists (another mod\'s, or an earlier run): pass --replace to overwrite it')
     font_notes = []
-    try:
-        controls = prompt_controls(args.controls.read_text() if args.controls else '', args.face_buttons)
-    except LayoutError as error:
-        parser.error(f'{args.controls}, {error}')
-    except (OSError, UnicodeDecodeError) as error:
-        parser.error(f'{args.controls}: {error}')
-    print('\n'.join(describe(args.controls.read_text() if args.controls else '', args.face_buttons, args.style, (*FACE, *SHAPE))))
+    if args.style == 'keyboard':      # the keys of keyboard.txt; the controller's layout (--face-buttons, --controls) does not matter
+        if args.bindings and not args.bindings.is_file():
+            parser.error(f'no binding file: {args.bindings}')
+        controls, lines = keyboard_controls(args.bindings, args.mouse)      # lines: notes
+        for line in lines:
+            print('note:', line)
+        print('\n'.join(f'Switch {SWITCH_LABEL.get(slot, slot.upper())} <- ' + (f'key {controls[slot]}' if controls[slot] else 'unchanged (no key bound)') for slot in KEY_PRESS))
+    else:
+        try:
+            controls = prompt_controls(args.controls.read_text() if args.controls else '', args.face_buttons)
+        except LayoutError as error:
+            parser.error(f'{args.controls}, {error}')
+        except (OSError, UnicodeDecodeError) as error:
+            parser.error(f'{args.controls}: {error}')
+        print('\n'.join(describe(args.controls.read_text() if args.controls else '', args.face_buttons, args.style, (*FACE, *SHAPE))))
 
     from fontTools.ttLib import TTFont
     letters = Letters(TTFont(io.BytesIO(bfttf_decode((app_fonts / FONT).read_bytes()))))

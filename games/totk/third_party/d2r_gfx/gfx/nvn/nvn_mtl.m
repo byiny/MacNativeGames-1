@@ -95,7 +95,7 @@ static _Atomic uint64_t g_taa_last;     // game frame of the last edge smoothing
 #include "nvn_dirty.h"
 #include "nvn_depth_clear.h"
 #include "nvn_fbread.h"
-#ifdef TOTK_GAME_V143
+#if defined(TOTK_GAME_V143) || defined(GAME_BOTW)
 #include "nvn_fbdep.h"   // csnap_draw: a draw that samples its colour target off its own pixel
 #endif
 #include "nvn_refl.h"
@@ -1884,7 +1884,10 @@ static void ser_gate(void) {
    barrier; compute, copies, helpers and submission changes keep full barriers.
    Default off until GPU and real-game validation. No render work is omitted.
    TOTK 1.4.3 on the Mac (2026-11-18): on by default; TOTK_DRAW_BARRIERS=0 or `flag draw_barriers 0` restores the full
-   barriers at both ends of every encoder. Native 3456x1944, M1 Pro, Great Sky Island: frame 20.4 -> 17.9 ms. */
+   barriers at both ends of every encoder. Native 3456x1944, M1 Pro, Great Sky Island: frame 20.4 -> 17.9 ms.
+   Breath of the Wild on the Mac (2026-11-19): on by default, the same switch. The game orders its passes with its own
+   barriers (84% of them are bits 0x12). Native 3456x1944, M1 Pro, a field by a river: frame p50
+   18.0 -> 15.1 ms (54 -> 63 fps), switched live twice in one run. */
 static _Atomic int g_oot_bar_request = -1, g_oot_bar_dump, g_oot_bar_last;
 static int g_oot_bar_mode, g_oot_bar_pending = 1, g_oot_bar_beginning, g_oot_bar_pass;
 static int g_oot_bar_writes, g_oot_bar_order;
@@ -1911,7 +1914,7 @@ static struct { uint32_t bits; uint64_t count; } g_oot_bar_hist[32];
 static unsigned g_oot_bar_hist_n; static uint64_t g_oot_bar_hist_overflow;
 static uint64_t g_oot_bar_prim_splits;   /* game passes ended at a native primitive-order barrier (oot_bar_native) */
 static int oot_bar_allowed(void) {
-#if (defined(GAME_OOT) || defined(TOTK_GAME_V143)) && !TARGET_OS_IPHONE
+#if (defined(GAME_OOT) || defined(TOTK_GAME_V143) || defined(GAME_BOTW)) && !TARGET_OS_IPHONE
     return 1;
 #else
     return 0;
@@ -1922,8 +1925,8 @@ static void oot_bar_sync(void) {
         int requested = atomic_load_explicit(&g_oot_bar_request, memory_order_relaxed);
         if (requested < 0) {
             const char *e = getenv("OOT_DRAW_BARRIERS"); int initial = oot_bar_allowed() && !(e && !strcmp(e, "0")), expected = -1; /* Mac default on since 2026-11-08; OOT_DRAW_BARRIERS=0 restores full barriers */ 
-#ifdef TOTK_GAME_V143
-            e = getenv("TOTK_DRAW_BARRIERS"); initial = oot_bar_allowed() && !(e && !strcmp(e, "0"));   /* TOTK 1.4.3 has its own switch */
+#if defined(TOTK_GAME_V143) || defined(GAME_BOTW)
+            e = getenv("TOTK_DRAW_BARRIERS"); initial = oot_bar_allowed() && !(e && !strcmp(e, "0"));   /* TOTK 1.4.3 and Breath of the Wild have their own switch */
 #endif
             atomic_compare_exchange_strong(&g_oot_bar_request, &expected, initial);
             requested = atomic_load_explicit(&g_oot_bar_request, memory_order_relaxed);
@@ -6935,7 +6938,7 @@ static void watch_tex_flush(void) {
     }
     g_wt_nreq = 0;
 }
-#ifdef TOTK_GAME_V143
+#if defined(TOTK_GAME_V143) || defined(GAME_BOTW)
 /* Colour sampled off the fragment's own pixel by a draw that writes it (2026-11-19). Rauru's ghost in Ukouh Shrine fades
    in and out with 20 blended draws that sample the HDR scene target they draw into, at the screen position plus an offset
    from a normal map (refraction). On Apple's GPUs the attachment sampled in the pass that writes it reads blocks of
@@ -6944,7 +6947,9 @@ static void watch_tex_flush(void) {
    pixel. Such a draw reads a copy: the pass ends, the target is copied (csnap_prepare) and the draw's slot resolves to the
    copy (tex_fast / tex_fast_rid). One copy serves a run of such draws: the game records no barrier between them, so they
    are not ordered against each other on the Switch either. Any other draw and every pass end drop the copy (csnap_clear).
-   TOTK_COLOR_SNAP=0: the target is read directly, as before. */
+   TOTK_COLOR_SNAP=0: the target is read directly, as before.
+   Breath of the Wild (2026-11-19): the same path. One fragment shader of the game (2f177d69...) does this in the rain by a
+   shrine in Faron; the copy cost no frame time there (55.0 fps with it, 54.9 without). */
 static int g_csnap_tid;                      // texture id whose slots read the copy (0 = none)
 static uint64_t g_csnap_ser, g_csnap_rid, g_csnap_copies; static void *g_csnap_tex;   // its serial; the copy
 static void csnap_clear(void) { if (g_csnap_tid) { g_csnap_tid = 0; g_csnap_ser = 0; args_dirty_all(); } }
@@ -6959,7 +6964,7 @@ static void rp_end_from(const char *rp_file, int rp_line) { if (g_enc) {
 #endif
     if (totk_tl_on()) totk_tl(TL_PASS_END, g_stat_pass, g_stat_draw - g_pass_draw0);
     sd_finish(); enc_r_end(g_enc); g_oot_bar_pass = g_oot_bar_writes = g_oot_bar_order = 0; zskip_commit_clears(); g_enc = nil; g_rt_merged = 0; g_lay.active = 0;
-#ifdef TOTK_GAME_V143
+#if defined(TOTK_GAME_V143) || defined(GAME_BOTW)
     csnap_clear();   // nothing between two passes reads the copy
 #endif
     hdr_shadow_store();
@@ -7660,7 +7665,7 @@ static uint64_t g_pmemo_hit, g_pmemo_none, g_pmemo_uread, g_pmemo_udiff, g_pmemo
     NvBorderKeyCache *border_cache;   // registry lock
     NvFunctionCache *fragment_cache, *vertex_cache;   // g_bpatch_lock / g_vpatch_lock
     uint8_t vertex_components[32];   // atomic: 0 unknown, otherwise 1 + highest lane read by the original MSL
-#ifdef TOTK_GAME_V143
+#if defined(TOTK_GAME_V143) || defined(GAME_BOTW)
     uint64_t csnap_known[2], csnap_dep[2]; uint8_t csnap_logged;   // per fragment texture register: nvn_fbdep_dependent was asked / said yes (csnap_dep_reg); the first-use line is out
 #endif
 } @end   // TOTK: MSL source, user varyings (locn -> type), patched vertex functions   // bflib：可读 tile 版本 <键>_bf（合并 B 第 2 步） | bflib: readable-tile version <key>_bf (merge B step 2)
@@ -9274,7 +9279,7 @@ static inline __attribute__((always_inline)) int dsnap_hit(int tid) {   // calle
 }
 static inline __attribute__((always_inline)) void *tex_fast(int tid) {
     if (dsnap_hit(tid)) return g_dsnap_tex;
-#ifdef TOTK_GAME_V143
+#if defined(TOTK_GAME_V143) || defined(GAME_BOTW)
     if (g_csnap_tid && tid == g_csnap_tid) return g_csnap_tex;
 #endif
     void *p=tex_view_valid(tid)?g_treg[tid].view:tex_by_id_p(tid);
@@ -9283,7 +9288,7 @@ static inline __attribute__((always_inline)) void *tex_fast(int tid) {
 }
 static inline __attribute__((always_inline)) uint64_t tex_fast_rid(int tid, void **out) {
     if (dsnap_hit(tid)) { if (out) *out = g_dsnap_tex; return g_dsnap_rid; }
-#ifdef TOTK_GAME_V143
+#if defined(TOTK_GAME_V143) || defined(GAME_BOTW)
     if (g_csnap_tid && tid == g_csnap_tid) { if (out) *out = g_csnap_tex; return g_csnap_rid; }
 #endif
     if(!hdr_shadow_enabled()) {
@@ -15740,7 +15745,7 @@ static int dsnap_prepare(const tex_t *d) {
     PD("M %llu 绘制一边写深度一边采样本通道的深度附件：改读拷贝（ser=%llu）", g_stat_pass, (unsigned long long)d->serial);
     return 1;
 }
-#ifdef TOTK_GAME_V143
+#if defined(TOTK_GAME_V143) || defined(GAME_BOTW)
 static int csnap_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("TOTK_COLOR_SNAP"); on = !(e && !strcmp(e, "0")); if (!on) MLOG("TOTK_COLOR_SNAP=0: a draw that samples its own colour target off its pixel reads the target itself"); } return on; }
 /* Does fs read the texture of binding b only at positions that depend on another texture read (nvn_fbdep.h)? Asked once per shader and register. */
 static int csnap_dep_reg(NvShader *fs, const nvn_rbind *b) {
@@ -16326,7 +16331,7 @@ static void defer_fallback(void) {
     if (g_defer_replaying || !defer_has_active()) return;
     g_defer_fallbacks++; MLOG("【红】推迟合并通道：提交结束仍有未回放组，按各组 P 原目标兜底");
     if (g_enc) { enc_r_end(g_enc); g_enc = nil; }
-#ifdef TOTK_GAME_V143
+#if defined(TOTK_GAME_V143) || defined(GAME_BOTW)
     csnap_clear();
 #endif
     typeof(S) save; memcpy(&save, &S, sizeof S); p_set_rt rt = R.rt; g_defer_replaying = 1;
@@ -17038,7 +17043,7 @@ static void clear_quad_core(id<MTL4RenderCommandEncoder> en, const uint32_t cfmt
     enc_r_draw(en, MTLPrimitiveTypeTriangle, 0, 3);
 }
 static void clear_quad(const p_clear_color *c) {
-#ifdef TOTK_GAME_V143
+#if defined(TOTK_GAME_V143) || defined(GAME_BOTW)
     csnap_clear();   // the clear changes the target: a later reader copies again
 #endif
     gpu_path_on("TOTK_GPU_MIDCLEAR", "mid-pass / partial-mask / scissored color clear"); NVN_RT_DUP_CLEAR_TO_FIRST(c)
@@ -19177,7 +19182,7 @@ static void draw_inner(const p_draw *dw, const p_draw_idx *di) {
     uint64_t att_rs[ATT_READS_MAX]; int att_n = att_store_on() ? draw_att_reads(pr, att_rs) : 0;
     if (dsnap_on() && att_n && R.has_rt && R.rt.depth && (S.ds.dw || S.ds.st) && has_ser(att_rs, att_n, R.rt.depth->serial)) { if (!dsnap_prepare(R.rt.depth)) dsnap_clear(); }
     else dsnap_clear();
-#ifdef TOTK_GAME_V143
+#if defined(TOTK_GAME_V143) || defined(GAME_BOTW)
     csnap_draw(pr, att_rs, &att_n);   // a read of its own colour target off the fragment's pixel reads a copy
 #endif
     id<MTLFunction> fb_fn = att_n ? att_fb_take(pr, att_rs, &att_n) : nil;   // TOTK: attachments it reads from the tile need no store
@@ -19443,7 +19448,7 @@ frz_plain:;
                                  : g_vis_counting;
     if (taa_jittered() && nv > 6 && vo == 0 && vs == 1 && ux == 1 && uy == 1 && !vis_proxy && !fb_fn && !att_n && !(!att_store_on() && draw_att_reads(pr, att_rs)))
         taa_jitter(&jx, &jy);
-#ifdef TOTK_GAME_V143
+#if defined(TOTK_GAME_V143) || defined(GAME_BOTW)
     if (g_csnap_tid) jx = jy = 0;   // this draw reads the colour snapshot: it samples its target, so it is not jittered (as before the snapshot)
 #endif
     MTLScissorRect sc = {0, 0, tw, th};

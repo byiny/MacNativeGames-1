@@ -65,12 +65,12 @@ _STUB_FONT = []
 
 
 def stub_font():
-    """A tiny TrueType font (made up: every capital letter and digit is a clockwise square, like the Switch system font's outer
+    """A tiny TrueType font (made up: every letter and digit is a clockwise square, like the Switch system font's outer
     contours), the `font` the button drawings take their letters from."""
     if not _STUB_FONT:
         from fontTools.fontBuilder import FontBuilder
         from fontTools.pens.ttGlyphPen import TTGlyphPen
-        chars = string.ascii_uppercase + string.digits
+        chars = string.ascii_letters + string.digits
         names = ['.notdef'] + [f'g{ord(c)}' for c in chars]
         builder = FontBuilder(1000, isTTF=True)
         builder.setupGlyphOrder(names)
@@ -1169,6 +1169,146 @@ class GrownLetters(unittest.TestCase):
         self.assertEqual(len(hole), 3)                          # the plain mitre point at each corner of the hole
         self.assertEqual(bp.grown_contour(self.COUNTER, 200), [])     # shrunk to nothing: the counter fills
 
+
+
+class Keyboard(unittest.TestCase):
+    """--style keyboard: key caps of keyboard.txt's keys (labels, bound or unbound keys, the stick keys), on the made-up archives of Scale."""
+    setUp, textures, romfs_with_everything, run_tool, main_with, written = (Scale.__dict__[n] for n in ('setUp', 'textures', 'romfs_with_everything', 'run_tool', 'main_with', 'written'))
+    SIZE = Scale.SIZE
+
+    def labels(self, text=None, mouse=None):
+        """keyboard_controls for a keyboard.txt of `text` (the default layout when None), with a mouse.txt of `mouse` beside it."""
+        import tempfile
+        sys.path.insert(0, str(ROOT))
+        if text is None:
+            return bp.keyboard_controls()[0]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'keyboard.txt'
+            path.write_text(text)
+            if mouse:
+                (Path(tmp) / 'mouse.txt').write_text(mouse)
+            return bp.keyboard_controls(path)[0]
+
+    def drawers(self, labels):
+        return bp.keyboard_drawers(StubLetters(), tuple(sorted(labels.items())))
+
+    def shown(self, drawer):
+        """The labels cut out of a key drawing, in order (an arrow is a shape, not a label)."""
+        import make_button_icons as mbi
+        from fontTools.pens.recordingPen import RecordingPen
+        from unittest import mock
+        seen = []
+        with mock.patch.object(mbi.Glyphs, 'hole', lambda glyphs, pen, text, *rest: seen.append(text)):
+            drawer[1](RecordingPen())
+        return seen
+
+    def test_labels_are_the_bound_keys_shortened(self):
+        labels = self.labels()
+        self.assertEqual([labels[a] for a in ('a', 'b', 'x', 'y', 'l', 'zl', 'zr', 'plus', 'minus', 'lstick', 'rstick')],
+                         ['E', 'Shift', 'Space', 'LMB', 'F', 'Q', 'RMB', 'Esc', 'Tab', 'Ctrl', 'V'])
+        self.assertEqual([labels[a] for a in ('up', 'left', 'move_up', 'camera_up', 'camera_left')], ['3', '2', 'W', '↑', '←'])
+        from tools.builder.keyboard_layout import INPUTS
+        for name in INPUTS:
+            self.assertTrue(0 < len(bp.key_label(name)) <= 6, name)
+        self.assertEqual([bp.key_label(n) for n in ('return', 'backspace', 'option', 'page_down', 'keypad_5', 'keypad_enter', 'f11', 'mouse4', 'slash')],
+                         ['Enter', 'Bksp', 'Opt', 'PgDn', 'K5', 'KEnt', 'F11', 'M4', '/'])
+
+    def test_a_changed_binding_changes_the_label_and_the_mouse_follows_mouse_txt(self):
+        self.assertEqual(self.labels('a = k\n')['a'], 'K')
+        self.assertEqual(self.shown(self.drawers(self.labels('a = k\n'))['a']), ['K'])
+        self.assertEqual(self.shown(self.drawers(self.labels())['a']), ['E'])
+        self.assertEqual(self.labels('y = mouse_left g\n')['y'], 'G')                  # no mouse.txt beside the file: the mouse is off
+        self.assertEqual(self.labels('y = mouse_left g\n', 'on\n')['y'], 'LMB')
+        off, on = bp.keyboard_controls(None, False)[0], bp.keyboard_controls(None, True)[0]   # the launcher's word (--no-mouse, --mouse) wins
+        self.assertEqual((off['y'], off['zr'], on['y'], on['zr']), ('G', 'Opt', 'LMB', 'RMB'))
+        self.assertIsNone(self.labels('y = none\n')['y'])
+        import tempfile                                                                 # a bad file is ignored as a whole, as the game does
+        with tempfile.TemporaryDirectory() as tmp:
+            bad = Path(tmp) / 'keyboard.txt'
+            bad.write_text('a = k\nb = nonsense\n')
+            got, notes = bp.keyboard_controls(bad)
+        self.assertEqual((got['a'], got['b'], got['y']), ('E', 'Shift', 'G'))               # the default keys (no mouse.txt: the mouse is off)
+        self.assertIn('default keys show', notes[0])
+
+    def test_the_prompt_textures_are_the_key_caps_of_the_bound_keys_on_the_games_shapes(self):
+        labels, letters = self.labels(), StubLetters()
+        drawers = self.drawers(labels)
+        new_pack, changed, drawn, notes, _ = bp.make_pack(self.pack, labels, letters, 'keyboard')
+        got = self.textures(new_pack)[3]
+        blob = self.textures(new_pack)[2]
+        self.assertEqual(drawn, {})                                                     # the controller pictures stay the game's
+        for name, slot, text in zip(NAMES[:4], 'abxy', ('E', 'Shift', 'Space', 'LMB')):
+            self.assertEqual(self.shown(drawers[slot]), [text])
+            self.assertEqual(bf.r8_read(blob, got[name]), bp.render(drawers[slot], 48, bp.disc_box(self.pics[name])))
+        for name, key, text in zip(NAMES[4:], ('l', 'zl', 0xE052, 0xE05E), (['F'], ['Q'], ['W'], ['W', 'A', 'S', 'D'])):
+            self.assertEqual(self.shown(drawers[key]), text)
+            self.assertEqual(bf.r8_read(blob, got[name]), bp.render(drawers[key], 48, bp.bright_box(self.pics[name])))
+        self.assertEqual(sorted(changed), sorted(NAMES))                                # (the shortcut d-pad is not in this layout: a note)
+        self.assertEqual([n for n in notes if 'ButtonIconL46NN_00' in n], ['ButtonIconL46NN_00^d: not found; the Switch icon stays'])
+        xbox = bp.make_pack(self.pack, pl.prompt_controls('', 'position'), letters)[1]
+        self.assertNotEqual(changed[NAMES[0]], xbox[NAMES[0]])
+
+    def test_the_stick_is_the_keys_bound_to_its_directions(self):
+        drawers = self.drawers(self.labels('move_up = i\n'))
+        self.assertEqual(self.shown(drawers[0xE05E]), ['I', 'A', 'S', 'D'])             # the stick: W above A S D (here I)
+        self.assertEqual([self.shown(drawers[c]) for c in (0xE052, 0xE050, 0xE054, 0xE058, 0xE05A, 0xE05C)],
+                         [['I'], ['S'], ['A', 'D'], ['D'], ['A'], ['I', 'S']])
+        self.assertEqual([self.shown(drawers[c]) for c in (0xE05F, 0xE053, 0xE055, 0xE068)], [[]] * 4)     # the camera keys are arrows
+        self.assertEqual(self.shown(drawers[0xE049]), ['3', '2', '5', '4'])             # the d-pad: its four numbers, up above left down right
+        self.assertEqual([self.shown(drawers[c]) for c in (0xE064, 0xE065)], [['3', '5'], ['2', '4']])
+        self.assertEqual(drawers[0xE068], drawers[0xE05F])
+
+    def test_an_unbound_button_keeps_the_games_glyph_and_picture(self):
+        labels = self.labels('a = none\nup = none\n')
+        drawers = self.drawers(labels)
+        self.assertNotIn('a', drawers)
+        self.assertEqual([c in drawers for c in (0xE049, 0xE060, 0xE064, 0xE065, 0xE061)], [False, False, False, True, True])   # needs every key
+        new_pack, changed, _, notes, _ = bp.make_pack(self.pack, labels, StubLetters(), 'keyboard')
+        self.assertEqual(self.textures(new_pack)[3][NAMES[0]].offset, self.textures(self.pack)[3][NAMES[0]].offset)
+        self.assertEqual(bf.r8_read(self.textures(new_pack)[2], self.textures(new_pack)[3][NAMES[0]]), self.pics[NAMES[0]])
+        self.assertNotIn(NAMES[0], changed)
+        self.assertIn(f'{NAMES[0]}: no key bound; the Switch icon stays', notes)
+        glyph = disc_picture(25, 25, 20, 50)
+        cells, notes = bp.keyboard_cells(StubFont({0xE040: glyph, 0xE041: glyph, 0xE049: glyph}), None, labels, StubLetters())
+        self.assertEqual(sorted(cells), [0xE041])
+        self.assertEqual(notes, ['glyph E040: no key bound; the Switch glyph stays', 'glyph E049: no key bound; the Switch glyph stays'])
+
+    def test_a_font_glyph_is_the_key_on_the_place_of_the_games_glyph(self):
+        labels, letters = self.labels(), StubLetters()
+        drawers = self.drawers(labels)
+        disc, stick = disc_picture(25, 25, 20, 50), stick_glyph()
+        cells = {0xE040: disc, 0xE04B: disc, 0xE049: disc, 0xE056: stick, 0xE05E: stick}
+        for scale in (1, 2):
+            new, notes = bp.keyboard_cells(StubFont(cells), None, labels, letters, 'keyboard', scale)
+            self.assertEqual(sorted(new), sorted(cells), notes)
+            for code, key, find in ((0xE040, 'a', bp.disc_box), (0xE04B, 'plus', bp.disc_box), (0xE049, 0xE049, bp.disc_box),
+                                    (0xE056, 'lstick', bp.bright_box), (0xE05E, 0xE05E, bp.bright_box)):
+                old = cells[code]
+                self.assertEqual(new[code], bp.render(drawers[key], 50 * scale, bp.enlarged(find(old), scale)), (code, scale))
+
+    def test_face_buttons_and_controls_do_not_change_the_keyboard_set_and_bindings_do(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            romfs, _ = self.romfs_with_everything(tmp)
+            controls, bad, bindings = tmp / 'controls.txt', tmp / 'bad.txt', tmp / 'keyboard.txt'
+            controls.write_text('south = x\neast = a\n')
+            bad.write_text('this is not a controls file\n')
+            bindings.write_text('a = k\n')
+            runs = {'plain': (), 'label': ('--face-buttons', 'label'), 'controls': ('--controls', str(controls)), 'bad controls': ('--controls', str(bad)),
+                    'both': ('--face-buttons', 'label', '--controls', str(controls)), 'bindings': ('--bindings', str(bindings))}
+            files = {}
+            for name, args in runs.items():
+                code, text = self.run_tool(tmp / name / 'botw190', romfs, '--style', 'keyboard', *args)
+                self.assertEqual(code, 0, (name, text))
+                self.assertIn('Switch A <- key ' + ('K' if name == 'bindings' else 'E'), text)
+                files[name] = [(tmp / name / 'botw190' / f).read_bytes() for f in ('Pack/Bootup.pack', 'Font/Font_US.sbfarc')]
+            for name in runs:
+                self.assertEqual(files[name] == files['plain'], name != 'bindings', name)
+            code, text = self.run_tool(tmp / 'xbox' / 'botw190', romfs)
+            self.assertNotEqual((tmp / 'xbox' / 'botw190' / bp.PACK).read_bytes(), files['plain'][0])      # (negative control: the xbox set differs)
+            code, text = self.run_tool(tmp / 'missing' / 'botw190', romfs, '--style', 'keyboard', '--bindings', str(tmp / 'none.txt'))
+            self.assertEqual(code, 2, text)
 
 class CommandLine(unittest.TestCase):
     def test_a_font_already_in_the_mod_folder_stops_the_run_before_anything_is_written(self):

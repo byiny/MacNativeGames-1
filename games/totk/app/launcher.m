@@ -195,6 +195,13 @@ static BOOL make_dir(NSString *path) {
     return [NSFileManager.defaultManager createDirectoryAtPath:path withIntermediateDirectories:YES attributes:nil error:nil];
 }
 
+#ifdef GAME_BOTW
+/* A path in kit.txt (python=, pythonpath=): absolute, or relative to the app (build_app.py --bundle-python), which then holds its own Python. */
+static NSString *kit_path(NSString *value) {
+    return value.isAbsolutePath ? value : [NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:value];
+}
+
+#endif
 /* Button icons (docs/mods.md, Button prompts): an app built with them (build_app.py: button-icons/kit.txt) draws the game's
    prompts for the controller in use. The style comes from key 6's type in controller-type.txt, or for auto from the
    controller connected now, else the last one the game saw (controller-detected.txt, runtime/gamepad.m); the face mode
@@ -216,6 +223,14 @@ static NSString *button_icons(NSString *root, NSString *controls, NSString **fol
         return text ?: @""; };
     int type = gamepad_type_parse(word(@"controller-type.txt").UTF8String);
     if (type < 0) type = GAMEPAD_TYPE_AUTO;
+#ifdef GAME_BOTW
+    /* The keyboard's key caps (botw_prompts.py --style keyboard): picked by TOTK_BUTTON_ICONS_STYLE=keyboard or controller-type.txt, or
+       auto with no controller connected now and none seen before. A picked one skips the controller check (type is then a
+       stand-in that is not auto); a connected or remembered controller keeps its own style. */
+    BOOL keyboard = gamepad_icon_keyboard_picked(getenv("TOTK_BUTTON_ICONS_STYLE"), word(@"controller-type.txt").UTF8String);
+    if (keyboard) type = GAMEPAD_TYPE_XBOX;
+    BOOL pad_now = NO;
+#endif
     int detected = -1;
     if (type == GAMEPAD_TYPE_AUTO) {
         /* controllers macOS already knows show up within a few run loop turns */
@@ -224,9 +239,14 @@ static NSString *button_icons(NSString *root, NSString *controls, NSString **fol
                 if (c.extendedGamepad) { detected = gamepad_type_detect(c.productCategory.UTF8String, c.vendorName.UTF8String); break; }
             if (detected < 0) [NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.1]];
         }
+#ifdef GAME_BOTW
+        pad_now = detected >= 0 || controller_connected();
+#endif
         if (detected < 0) detected = gamepad_type_parse(word(@"controller-detected.txt").UTF8String);
 #ifndef GAME_BOTW
         if (detected < 0) detected = GAMEPAD_TYPE_XBOX;     /* no pad seen yet: Xbox prompts */
+#else
+        keyboard = gamepad_icon_keyboard_auto(type, pad_now, detected);
 #endif
     }
     NSScreen *screen = NSScreen.mainScreen;     /* sharper icons for a bigger display: the game's size times this */
@@ -235,12 +255,24 @@ static NSString *button_icons(NSString *root, NSString *controls, NSString **fol
         ? gamepad_icon_scale(screen.frame.size.width * backing, screen.frame.size.height * backing) : 1;
     setenv("TOTK_BUTTON_ICONS_SCALE", @(scale).stringValue.UTF8String, 1);   /* runtime/gamepad.m logs the next start's pick with it */
     int by_position = 1, style = gamepad_icon_style(type, detected, scale, &by_position);
+#ifdef GAME_BOTW
+    if (keyboard) style = GAMEPAD_ICON_KEYBOARD;
+#endif
     if (style < 0) return @"none";
     NSString *name = [NSString stringWithFormat:@"%s-%s", gamepad_type_name(style), by_position ? "position" : "label"];
+#ifdef GAME_BOTW
+    if (keyboard) { name = @"keyboard"; by_position = 1; }   /* the keys are the player's, not a face mode */
+    NSString *bindings = [settings stringByAppendingPathComponent:@"keyboard.txt"];   /* the player's keys (runtime/input.c) */
+    if (!keyboard || ![NSFileManager.defaultManager fileExistsAtPath:bindings]) bindings = nil;
+    /* Mouse mode (mouse.txt, off without it: runtime/gamepad.m load_mouse_mode): off, a cap shows the next key bound, not a mouse button. */
+    BOOL mouse = [[word(@"mouse.txt") stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] isEqualToString:@"on"];
+#endif
     NSData *layout = [NSData dataWithContentsOfFile:controls];
     NSMutableData *keyed = [[[NSString stringWithFormat:@"%@\n%@\n%d\n", info[@"id"], name, scale] dataUsingEncoding:NSUTF8StringEncoding] mutableCopy];
     if (layout) [keyed appendData:layout];
 #ifdef GAME_BOTW
+    if (bindings) [keyed appendData:[NSData dataWithContentsOfFile:bindings] ?: NSData.data];   /* other keys, other caps */
+    if (keyboard) [keyed appendData:[(mouse ? @"\nmouse=on\n" : @"\nmouse=off\n") dataUsingEncoding:NSUTF8StringEncoding]];
     /* A mod with its own resource size table (an HD texture pack): the tool raises that table (botw_prompts.py --mods), so a
        new table of the mods makes a new set at 2x or more. TOTK_ROMFS_MODS is set before this runs. */
     const char *mods = getenv("TOTK_ROMFS_MODS");
@@ -282,9 +314,23 @@ static NSString *button_icons(NSString *root, NSString *controls, NSString **fol
         if (pack) [arguments addObjectsFromArray:@[@"--texture-pack", pack]];
 #endif
         if (layout) [arguments addObjectsFromArray:@[@"--controls", controls]];
+#ifdef GAME_BOTW
+        if (bindings) [arguments addObjectsFromArray:@[@"--bindings", bindings]];
+        if (keyboard) [arguments addObject:mouse ? @"--mouse" : @"--no-mouse"];
+#endif
         fprintf(stderr, "[launcher] button icons: making %s (%s, %dx) in %s\n", name.UTF8String, layout ? "controls.txt" : "default layout", scale, target.fileSystemRepresentation);
         NSTask *task = [NSTask new];
+#ifdef GAME_BOTW
+        task.executableURL = [NSURL fileURLWithPath:kit_path(info[@"python"])];
+        NSString *site = info[@"pythonpath"];
+        if (site.length) {   /* the fontTools folder of an app that carries its own Python */
+            NSMutableDictionary *environment = [NSProcessInfo.processInfo.environment mutableCopy];
+            environment[@"PYTHONPATH"] = kit_path(site);
+            task.environment = environment;
+        }
+#else
         task.executableURL = [NSURL fileURLWithPath:info[@"python"]];
+#endif
         task.arguments = arguments;
         NSDate *start = NSDate.date;
         NSError *error = nil;
@@ -390,8 +436,8 @@ int runtime_app_launch(int argc, char **argv, char ***boot) {
         NSString *data = [home stringByAppendingPathComponent:@"Library/Application Support/MacNativeGames/" GAME_FOLDER];   /* game_version.h: TOTK, BotW */
         NSString *logs = [home stringByAppendingPathComponent:@"Library/Logs/MacNativeGames"];
 #ifdef GAME_BOTW
-        /* Local build only: the player's settings: <data>/settings.txt, one TOTK_NAME=value per line (# starts a comment), read at
-           each launch (e.g. TOTK_BOTW_COOK_COUNT=3). Only TOTK_ names; a line here wins over the app's Info.plist environment. */
+        /* The player's settings: <data>/settings.txt, one TOTK_NAME=value, MNG_NAME=value or BOTW_NAME=value per line (# starts a comment), read at
+           each launch (e.g. TOTK_BOTW_COOK_COUNT=3, BOTW_FOG=1). Only TOTK_, MNG_ and BOTW_ names; a line here wins over the app's Info.plist environment. */
         { NSString *path = [data stringByAppendingPathComponent:@"settings.txt"];
           NSString *text = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
           NSCharacterSet *ws = NSCharacterSet.whitespaceCharacterSet;
@@ -403,10 +449,10 @@ int runtime_app_launch(int argc, char **argv, char ***boot) {
               if (!line.length) return;
               NSRange eq = [line rangeOfString:@"="];
               NSString *name = eq.location == NSNotFound ? line : [[line substringToIndex:eq.location] stringByTrimmingCharactersInSet:ws];
-              if (eq.location == NSNotFound || ![name hasPrefix:@"TOTK_"] || [name rangeOfCharacterFromSet:bad].location != NSNotFound) { badline = n; *stop = YES; return; }
+              if (eq.location == NSNotFound || !([name hasPrefix:@"TOTK_"] || [name hasPrefix:@"MNG_"] || [name hasPrefix:@"BOTW_"]) || [name rangeOfCharacterFromSet:bad].location != NSNotFound) { badline = n; *stop = YES; return; }
               setenv(name.UTF8String, [[line substringFromIndex:eq.location + 1] stringByTrimmingCharactersInSet:ws].UTF8String, 1);
           }];
-          if (badline) { show_error([NSString stringWithFormat:@"%@, line %d: expected TOTK_NAME=value", path, badline]); return 1; } }
+          if (badline) { show_error([NSString stringWithFormat:@"%@, line %d: expected TOTK_NAME=value, MNG_NAME=value or BOTW_NAME=value", path, badline]); return 1; } }
 #endif
         /* Folders the environment already names are kept (open --env TOTK_PROFILE_DIR=... runs a test on a save copy,
            TOTK_GAME_SLOT_DIR shares one game slot with another build of the game: one game at a time on the Mac). */
@@ -513,6 +559,18 @@ int runtime_app_launch(int argc, char **argv, char ***boot) {
             mods = keyboardMods;
 #endif
         setenv("TOTK_ROMFS_MODS", mods.fileSystemRepresentation, 0);
+#ifdef GAME_BOTW
+        /* Code mods at launch (runtime/pchtxt.h): <data>/mods/<version>-code.pchtxt, beside the mods folder, unless the environment names a file. */
+        NSString *code_mods = nil;   /* named in the log below, after the redirect */
+        { NSString *code = [data stringByAppendingPathComponent:@"mods/" TOTK_GAME_DIR "-code.pchtxt"];
+          if (!getenv("TOTK_PCHTXT") && [NSFileManager.defaultManager fileExistsAtPath:code]) {
+              setenv("TOTK_PCHTXT", code.fileSystemRepresentation, 1);
+              code_mods = code;
+          }
+          /* The UI pack of an app that carries one (gfx/nvn/ui_pack.h; MNG_UI_PACK=0 turns it off) */
+          NSString *pack = [NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:@"Contents/Resources/ui-pack"];
+          if (!getenv("MNG_UI_PACK_DIR") && [NSFileManager.defaultManager fileExistsAtPath:pack]) setenv("MNG_UI_PACK_DIR", pack.fileSystemRepresentation, 1); }
+#endif
         /* The game's language (runtime/services.c): the app's first preferred language, which also follows a per-app
            language (defaults write org.macnativegames.totk AppleLanguages -array pt-BR). TOTK_LANG still overrides it. */
         NSString *preferred = NSLocale.preferredLanguages.firstObject;
@@ -570,6 +628,9 @@ int runtime_app_launch(int argc, char **argv, char ***boot) {
             dup2(fileno(lf), STDERR_FILENO);
             fclose(lf);
         }
+#ifdef GAME_BOTW
+        if (code_mods) fprintf(stderr, "[launcher] code mods: %s\n", code_mods.fileSystemRepresentation);
+#endif
         NSString *icons = nil, *style = button_icons(root, controls, &icons);
         if (style) setenv("TOTK_BUTTON_ICONS", style.UTF8String, 1);
 #ifndef GAME_BOTW

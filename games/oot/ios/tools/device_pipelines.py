@@ -256,6 +256,10 @@ def main():
     ap.add_argument('--groups', type=int, default=GROUPS, help=f'merged files per GPU (default {GROUPS}; 0: one file per Mac file, as before 2026-11-13)')
     ap.add_argument('--group-jobs', type=int, default=os.environ.get('MNG_DEVICE_PIPELINE_JOBS', GROUP_JOBS),
                     help=f'merged files compiled at once (MNG_DEVICE_PIPELINE_JOBS, otherwise {GROUP_JOBS}; each uses several cores)')
+    ap.add_argument('--out', type=Path, help='write the pipelines-* files into this folder, which may already hold other GPUs\' files, '
+                    'and read --seed only (build_app.py --mac-gpu: the Mac app\'s seed is signed); only this run\'s --arch files are replaced')
+    ap.add_argument('--lib-map', type=Path, help='a JSON {SHA-256 of a compiled library: its path} for the Mac\'s libraries, in place of the '
+                    'seed\'s metallib index (build_app.py --mac-gpu, with --sdk macosx)')
     ap.add_argument('--variants', type=Path, help='only compile the recorded variant sources of this folder into the seed (none: remove them)')
     a = ap.parse_args()
     if a.group_jobs < 1:
@@ -264,14 +268,23 @@ def main():
     seed = a.seed.resolve()
     if a.variants:
         print(json.dumps(variants(a.variants, seed, a.cache, a.sdk, env))); return
-    for old in seed.glob('pipelines-*'):   # this build's set replaces the last one's
-        old.unlink()
+    out = a.out.resolve() if a.out else seed
+    if a.out:
+        out.mkdir(parents=True, exist_ok=True)
+        for arch in a.arch:
+            for old in out.glob(f'pipelines-{arch}[-.]*'): old.unlink()
+    else:
+        for old in seed.glob('pipelines-*'):   # this build's set replaces the last one's
+            old.unlink()
     if not a.arch:
         print(json.dumps({'archs': []})); return
     if not a.mac: ap.error('--arch needs --mac')
     manifest = json.loads((seed / 'seed-manifest.json').read_text())
-    libs = {digest.upper(): name for name, digest in manifest['files'].items() if name.endswith('.metallib')}
-    for p in seed.glob('variant-*.metallib'): libs[hashlib.sha256(p.read_bytes()).hexdigest().upper()] = p.name
+    if a.lib_map:   # absolute paths: seed / path is the path
+        libs = {digest.upper(): path for digest, path in json.loads(a.lib_map.read_text()).items()}
+    else:
+        libs = {digest.upper(): name for name, digest in manifest['files'].items() if name.endswith('.metallib')}
+        for p in seed.glob('variant-*.metallib'): libs[hashlib.sha256(p.read_bytes()).hexdigest().upper()] = p.name
     compiler = hashlib.sha256(Path(tool(a.sdk, 'metal-tt', env)).read_bytes()).hexdigest()
     scripts = a.cache / 'scripts'; scripts.mkdir(parents=True, exist_ok=True)
     files = sorted(p for p in a.mac.glob('*.metalarchive') if (p.with_suffix('.keys')).is_file())
@@ -309,7 +322,7 @@ def main():
             counts[how] += len(members)
             if why: reasons[why] = reasons.get(why, 0) + len(members)
             if kept:
-                place(kept, seed / f'pipelines-{arch}-{name}.metalarchive'); placed += 1
+                place(kept, out / f'pipelines-{arch}-{name}.metalarchive'); placed += 1
                 index.extend((k, name) for k in keys)
         done = 0
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers if a.groups <= 0 else max(1, a.group_jobs)) as pool:
@@ -323,8 +336,8 @@ def main():
                     for m, r in zip(members, pool.map(lambda m: compile_one(m[0], m[3], [m]), members)): take(r, [m])
                 if done // 1000 != (done - len(members)) // 1000 or done == len(jobs):
                     print(f'{arch}: {done}/{len(jobs)} pipelines, {placed} files', flush=True)
-        (seed / f'pipelines-{arch}.tsv').write_text(''.join(f'{k}\t{n}\n' for k, n in sorted(index)))
-        (seed / f'pipelines-{arch}.json').write_text(json.dumps({'schema': SCHEMA, 'chain': manifest['chain'], 'arch': arch,
+        (out / f'pipelines-{arch}.tsv').write_text(''.join(f'{k}\t{n}\n' for k, n in sorted(index)))
+        (out / f'pipelines-{arch}.json').write_text(json.dumps({'schema': SCHEMA, 'chain': manifest['chain'], 'arch': arch,
                                                                   'pipelines': len(index)}, indent=1) + '\n')
         report['archs'].append({'arch': arch, 'pipelines': len(index), 'files': placed, 'groups': len(planned),
                                 'group_fallbacks': len(fallback), **counts, 'reasons': reasons})

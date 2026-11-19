@@ -48,8 +48,18 @@ static inline int gamepad_face_by_position(const char *category, const char *ven
    runtime/gamepad.m are Switch-style and always read by position. */
 enum { GAMEPAD_TYPE_AUTO, GAMEPAD_TYPE_XBOX, GAMEPAD_TYPE_PLAYSTATION, GAMEPAD_TYPE_SWITCH, GAMEPAD_TYPE_COUNT };
 
+#ifdef GAME_BOTW
+/* Breath of the Wild only: the keyboard's key caps as an icon style (scripts botw_prompts.py --style keyboard). Not a controller
+   type (the settings panel and controller-type.txt's runtime reader know four), so it stays out of the enum and only
+   gamepad_type_name names it, for app/launcher.m button_icons. */
+#define GAMEPAD_ICON_KEYBOARD 100
+
+#endif
 static inline const char *gamepad_type_name(int type) {
     static const char *const names[GAMEPAD_TYPE_COUNT] = {"auto", "xbox", "playstation", "switch"};
+#ifdef GAME_BOTW
+    if (type == GAMEPAD_ICON_KEYBOARD) return "keyboard";
+#endif
     return type >= 0 && type < GAMEPAD_TYPE_COUNT ? names[type] : "auto";
 }
 
@@ -95,6 +105,29 @@ static inline int gamepad_icon_style(int type, int detected, int scale, int *by_
     return style;
 }
 
+#ifdef GAME_BOTW
+/* 1: text (a saved word, white space ignored) is "keyboard". */
+static inline int gamepad_word_is_keyboard(const char *text) {
+    if (!text) return 0;
+    while (isspace((unsigned char)*text)) text++;
+    size_t n = strlen(text);
+    while (n && isspace((unsigned char)text[n - 1])) n--;
+    return n == 8 && !strncmp(text, "keyboard", 8);
+}
+
+/* 1: the player picked the keyboard's icons: TOTK_BUTTON_ICONS_STYLE=keyboard (env, which wins over everything) or controller-type.txt
+   saying keyboard (word). No controller is looked for. */
+static inline int gamepad_icon_keyboard_picked(const char *env, const char *word) {
+    return gamepad_word_is_keyboard(env) || gamepad_word_is_keyboard(word);
+}
+
+/* 1: type auto and no controller to take the icons from: none connected now (pad_now) and none seen before (detected, -1 none).
+   A connected or remembered controller keeps its own style (gamepad_icon_style). */
+static inline int gamepad_icon_keyboard_auto(int type, int pad_now, int detected) {
+    return type == GAMEPAD_TYPE_AUTO && !pad_now && detected < 0;
+}
+
+#endif
 /* How many times the game's size the launcher draws the button icons for a display of width x height pixels: the height of
    the 16:9 picture on it over 1080, rounded up, 1 to 4 (1080p 1, 3456x2234 2, 5K 3). */
 static inline int gamepad_icon_scale(double width, double height) {
