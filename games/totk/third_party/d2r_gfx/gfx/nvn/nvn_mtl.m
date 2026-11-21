@@ -22296,7 +22296,7 @@ static double present_min_duration(double period) {
    frame (the fixed cases: stor_compressed 2026-10-15, the storage-buffer snapshot 2026-11-08, the zero-blend guard, the
    colour snap 2026-11-19). To find the next cause from a player's log, every PW_EVERY-th picture 16 blocks of 6x6 pixels
    (a 4x4 grid) are copied into a small buffer on the same queue and checked on the completion thread. Nothing waits for
-   the GPU: a slot whose copy has not completed is skipped. A picture is purple when half the samples have red and blue
+   the GPU: a slot whose copy has not completed is skipped. A picture is purple when 85% of the samples have red and blue
    above 50 and green 18 below their mean (the DM_NVN_FLASHCAP rule). Two purple probes in a row (about 1 s) start an
    episode: its colours, the frame, the settings and the build go to the event log (pw_log), a screenshot is taken (three a
    start at most; the one frame of it waits for the GPU) and the uniform blocks of the next three frames are scanned for
@@ -22327,7 +22327,8 @@ static void pw_analyse(const uint8_t *px, int bgra, uint64_t frame, uint64_t pro
     pthread_mutex_lock(&g_pw_mu);
     double now = CACurrentMediaTime();
     if (pw_on() >= 2 && probe % 20 == 0) MLOG("[purple] probe %llu F%llu RGB %.0f,%.0f,%.0f purple share %.2f", (unsigned long long)probe, (unsigned long long)frame, m[0], m[1], m[2], frac);
-    int purple = frac >= 0.5, clear = frac < 0.2;
+    /* 85%: the three real episodes of 2026-11-20 were 94-100%; a magenta Magnesis-lit block in a shrine read 51-60% */
+    int purple = frac >= 0.85, clear = frac < 0.2;
     if (state == 0) {
         if (purple && ++in_streak >= 2) {
             state = 1; out_streak = 0; episode++; start_frame = frame; start_t = now;
